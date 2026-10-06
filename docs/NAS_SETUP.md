@@ -8,6 +8,8 @@
 
 ## 1. 下載程式
 
+先確認 DSM 套件中心的 Container Manager 已安裝並啟動。
+
 到 https://github.com/bai-qi-laundering/companybrain ，按 Code → Download ZIP。
 
 解壓縮，將 `companybrain-main` 內的檔案放至 NAS：
@@ -33,7 +35,7 @@ cd /volume1/docker/companybrain
 sh scripts/prepare-settings.sh
 ```
 
-儲存後選取這個任務，按「執行」。檔案 `settings.env` 就會出現在 companybrain 資料夾。此步驟會產生隨機資料庫密碼與登入密碼，重複執行不會覆蓋已有設定。
+儲存後選取這個任務，按「執行」。檔案 `settings.env` 就會出現在 companybrain 資料夾。此步驟會產生隨機資料庫密碼與登入密碼，重複執行不會覆蓋已有設定。在 Synology 上，此檔只允許 root 與 administrators 群組讀寫；請用 NAS 管理員帳號編輯。
 
 若檔案沒出現，先查看任務的執行結果／輸出，確認路徑正確。
 
