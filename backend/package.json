@@ -1,0 +1,1 @@
+{"name":"companybrain-api","private":true,"version":"1.0.0","type":"module","dependencies":{"pg":"8.16.3"},"scripts":{"start":"node server.mjs","test":"node --test ../tests/*.test.mjs"},"devDependencies":{"@electric-sql/pglite":"^0.5.8"}}
