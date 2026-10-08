@@ -21,3 +21,13 @@ npm test
 ```
 
 Docker 建置只安裝正式環境所需的 pg 套件；測試用 PGlite 不會打包進正式映像。
+
+## 先接 LINE、NAS 之後再裝
+
+獨立的 Cloudflare Worker＋D1 暫存版本已準備好：
+
+- [LINE／Cloudflare 安裝指南](docs/LINE_CLOUDFLARE_SETUP.md)
+- [後台直接貼上的完整 Worker](cloudflare/worker-paste.js)
+- [D1 建表 SQL](cloudflare/schema.sql)
+
+LINE 私人文字 → Gemini 草稿 → 手動確認 → Cloudflare 儲存。可匯出 NAS 相容 JSON，目前尚未自動同步 NAS，也沒有定時推播。修改模組來源後執行 `node cloudflare/build.mjs` 重新產生貼上版。
