@@ -2,12 +2,13 @@ import {readFile} from 'node:fs/promises';
 import {AppError,requireText,validateState} from './domain.mjs';
 import {token,digest,cookieToken,sessionCookie,verifyPassword,hashPassword} from './security.mjs';
 import {extractDraft} from './gemini.mjs';
-export function createHandler({store,config,htmlPath,ai=extractDraft}){
+export function createHandler({store,config,htmlPath,line,ai=extractDraft}){
  const limits=new Map(),dummyHash=hashPassword(token());
  function limit(key,max){const now=Date.now();if(limits.size>10000)for(const [k,v] of limits)if(now-v.since>60000)limits.delete(k);let v=limits.get(key);if(!v||now-v.since>60000){v={since:now,n:0};limits.set(key,v)}if(++v.n>max)throw new AppError(429,'操作太頻繁，請一分鐘後重試');}
  async function body(req){let size=0,parts=[];for await(const p of req){size+=p.length;if(size>3*1024*1024)throw new AppError(413,'資料太大，請分批處理');parts.push(p)}try{return JSON.parse(Buffer.concat(parts).toString('utf8'))}catch{throw new AppError(400,'請提供有效的 JSON')}}
  return async(req,res)=>{res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','same-origin');res.setHeader('X-Frame-Options','DENY');res.setHeader('Cache-Control','no-store');res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");const send=(status,data)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(data))};
  try{const path=new URL(req.url,'http://localhost').pathname;
+ if(req.method==='POST'&&path==='/api/line/webhook'){if(!line)throw new AppError(503,'LINE 尚未設定');return send(200,await line.webhook(req));}
  if(req.method==='GET'&&path==='/api/health'){await store.health();return send(200,{ok:true,service:'companybrain-api'})}
  if(req.method==='GET'&&['/','/index.html'].includes(path)){res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});res.end((await readFile(htmlPath,'utf8')).replace('</head>','<meta name="companybrain-runtime" content="nas"></head>'));return}
  if(!path.startsWith('/api/'))throw new AppError(404,'找不到頁面');
