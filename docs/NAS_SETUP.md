@@ -2,7 +2,7 @@
 
 這是可安裝的第一版。提供 NAS PostgreSQL 儲存、單一管理帳號登入、對象建檔、往來紀錄、待辦月曆、Gemini 文字整理草稿、試填資料匯入及備份。
 
-目前不包含 LINE、照片或 PDF 上傳、自動推播，以及員工個別權限。AI 草稿必須由使用者確認後儲存，不會直接改合約或價格主檔。
+已加入 LINE 多人、照片、語音、歷史查詢與每日到期通知，設定及更新請看 [LINE_SETUP.md](LINE_SETUP.md)。PDF 上傳與員工個別權限尚未提供。AI 整理在資訊完整時自動儲存，缺資料需人工補充；不會直接改合約或價格主檔。
 
 原本的 chatgpt.site 和 GitHub Pages 網址仍是前端體驗版。**本次 NAS 安裝會由 NAS 一起提供網頁與後端。正式使用請開 NAS 的新網址。** 網頁、登入和 API 使用同一個網址，無需在每台裝置登入 DSM 或安裝 NAS 管理工具。
 
@@ -115,13 +115,13 @@ sh scripts/apply.sh
 
 > 2026/09/20 到 2026/09/23 上海出差，參加洗滌展，搭華航商務艙。
 
-按「產生草稿」。確認類型、日期和百麒對象，按「填入新增表單」，檢查後按「儲存紀錄」。草稿產生本身不會寫入紀錄。
+按「整理並儲存」。資料完整時會自動儲存；若有缺漏，顯示整理內容，補填後再儲存。
 
 再測一筆待辦：
 
 > 請提醒我明天確認設備報價明細。
 
-Gemini 應整理成待辦草稿；確認表單內容並儲存，月曆會標示待辦日期。
+Gemini 應整理並儲存待辦，月曆會標示日期；資料不足時先補充。
 
 只寫「09/20」沒有年份時，系統要求補填，避免把年份猜錯。若對象未建檔，先建立對象，再重新整理或在表單選擇正確對象。
 
@@ -172,7 +172,7 @@ cd /volume1/docker/companybrain
 sh scripts/backup.sh
 ```
 
-執行後，`companybrain/backups` 會出現 `.sql.gz` 檔。此備份包括公司資料、帳號及稽核歷史。先手動確認成功，再視需要設定每天非工作時間執行。
+執行後，`companybrain/backups` 會出現 `.sql.gz` 檔。此備份包括公司資料、LINE 照片／語音原檔、帳號及稽核歷史。先手動確認成功，再視需要設定每天非工作時間執行。
 
 另外保留 settings.env 的安全副本。資料庫 volume 留在 NAS，但僅留在同一台 NAS 不足以防止硬碟或整台 NAS 故障，應再將備份複製到其他安全位置。還原會修改資料庫，請在實際需要還原時再確認目標與檔案。
 
@@ -194,7 +194,7 @@ sh scripts/backup.sh
 | 模型不存在／無權使用 | 修改GEMINI_MODEL為專案可用且支援JSON結構化輸出的模型 |
 | Gemini額度或速率受限 | 稍後重試並檢查AI Studio用量；不會因此寫入假資料 |
 | 另一台看不到 | 是否都使用同一個NAS網址且顯示「NAS已連線」；chatgpt.site體驗版是獨立本機資料 |
-| Gemini沒有直接存入 | 正常：先產生草稿，再填入表單，確認後儲存 |
+| Gemini沒有直接存入 | 檢查缺漏警告或儲存錯誤，先查看清單避免重複新增 |
 
 ## 驗證範圍與參考
 
@@ -208,3 +208,4 @@ sh scripts/backup.sh
 - https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite
 - https://ai.google.dev/gemini-api/docs/generate-content/structured-output
 - https://kb.synology.com/en-global/DSM/help/ContainerManager/docker_project
+
