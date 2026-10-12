@@ -5,7 +5,7 @@ import {createHmac} from 'node:crypto';
 import {Readable} from 'node:stream';
 import {Store} from '../backend/store.mjs';
 import {createLineService} from '../backend/line.mjs';
-import {retrieve,answerQuestion,describeMedia,expirySummary,expiryText,taipeiDay} from '../backend/assistant.mjs';
+import {retrieve,answerQuestion,hotelSheetPriceAnswer,describeMedia,expirySummary,expiryText,taipeiDay} from '../backend/assistant.mjs';
 const require=createRequire(new URL('../backend/package.json',import.meta.url));
 const {PGlite}=require('@electric-sql/pglite');
 async function fixture(t,extra={}){
@@ -30,7 +30,7 @@ test('all friends share records; duplicate delivery, provenance, photo caption, 
  await f.send('picture','secretary',{type:'image',id:'photo'});s=await f.store.read();const photo=s.records.find(r=>r.sourceKind==='photo');assert(photo);const media=await f.line.db.media(photo.attachments[0].id,true);assert.equal(Buffer.from(media.body).toString(),'original attachment');assert.equal(media.owner_id,'secretary');
  await f.send('caption','secretary',{type:'text',text:'這張照片是2026/10/9枕套髒污'});s=await f.store.read();assert.equal(s.records.length,3);assert.equal(s.records.find(r=>r.id===photo.id).sourceKind,'photo-caption');assert.equal(s.records.find(r=>r.id===photo.id).attachments.length,1);
  await f.send('voice','manager',{type:'audio',id:'voice',duration:3000});s=await f.store.read();assert.equal(s.records.length,4);assert(s.records.some(r=>r.sourceKind==='voice'&&r.sourceText.includes('秘書出差')));
- await f.send('question','manager',{type:'text',text:'查詢客訴'});assert.equal((await f.store.read()).records.length,4);assert(f.messages.at(-1).messages[0].text.includes('來源'));
+ await f.send('question','manager',{type:'text',text:'查詢客訴'});assert.equal((await f.store.read()).records.length,4);assert(!f.messages.at(-1).messages[0].text.includes('來源'));
  const audit=(await f.pool.query('SELECT * FROM cb_audit')).rows;assert.equal(audit.length,5);assert(audit.some(a=>a.before_data?.sourceKind==='photo'&&a.after_data?.sourceKind==='photo-caption'));
 });
 test('signed webhooks, optional allowlist and out-of-order unfollow',async t=>{
@@ -67,10 +67,21 @@ test('dated LINE tasks save without an organization or AI, and redelivery is ide
 test('supplier free-form price descriptions are searchable and retained in answer evidence',()=>{
  const state={organizations:[{id:'salt',name:'原料商',prices:[],priceNotes:'鹽 50kg/包 $245'}],records:[],tasks:[]};const found=retrieve(state,{keywords:['鹽'],orgIds:[]});assert.equal(found.organizationTotal,1);assert.equal(found.organizations[0].priceNotes,'鹽 50kg/包 $245');assert.equal(retrieve(state,{keywords:['價格'],orgIds:[]}).organizationTotal,1);
 });
+test('all hotel sheet prices are listed concisely even after the first 40 organizations',async()=>{
+ const organizations=Array.from({length:45},(_,i)=>({id:'hotel-'+i,name:'飯店'+i,kind:'飯店',prices:[],priceNotes:''}));
+ organizations[2]={...organizations[2],name:'然一',prices:[['床單',21.3,'2026-10-01']]};
+ organizations[44]={...organizations[44],name:'驛館',priceNotes:'床單 $25.0\n浴巾 $18'};
+ organizations.push({id:'supplier',name:'供應商',kind:'原料商',prices:[['床單',9,'2026-10-01']]});
+ const state={organizations,records:[],tasks:[]},question='所有飯店床單價格';
+ const expected='資料庫紀錄\n1. 然一：床單 $21.3\n2. 驛館：床單 $25.0';
+ assert.equal(hotelSheetPriceAnswer(question,state),expected);
+ const answer=await answerQuestion({text:question,state,plan:{warnings:[],keywords:['飯店','床單','價格'],orgIds:[]},key:'key',model:'model',origin:'https://company.test',fetchImpl:()=>{throw Error('價格查詢應從完整名錄讀取')}});
+ assert.equal(answer.answer,expected);assert.deepEqual(answer.sources,[]);
+});
 
 test('LINE sends links only for photo records; text, tasks, audio, help, queries and reminders omit URLs',async t=>{
  const f=await fixture(t);const last=()=>f.messages.at(-1).messages[0].text;
- await f.send('help','secretary',{type:'text',text:'說明'});assert(!last().includes('https://'));await f.send('text');assert(!last().includes('https://'));await f.send('task','secretary',{type:'text',text:'明天待辦：去郵局'});assert(!last().includes('https://'));await f.send('question','secretary',{type:'text',text:'查詢客訴'});assert(last().includes('來源'));assert(!last().includes('https://'));
+ await f.send('help','secretary',{type:'text',text:'說明'});assert(!last().includes('https://'));await f.send('text');assert(!last().includes('https://'));await f.send('task','secretary',{type:'text',text:'明天待辦：去郵局'});assert(!last().includes('https://'));await f.send('question','secretary',{type:'text',text:'查詢客訴'});assert(!last().includes('來源'));assert(!last().includes('https://'));
  await f.send('audio','secretary',{type:'audio',id:'voice',duration:3000});assert(!last().includes('https://'));await f.send('photo','secretary',{type:'image',id:'photo'});assert(last().includes('查看照片：https://'));await f.send('caption','secretary',{type:'text',text:'這張照片是2026/10/9枕套客訴'});assert(last().includes('查看照片：https://'));
  await f.send('expiry','secretary',{type:'text',text:'查看到期'});assert(!last().includes('https://'));
 });
