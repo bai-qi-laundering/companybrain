@@ -58,3 +58,8 @@ test('audio analysis failures and long uncertain transcripts remain accessible a
  const f=await fixture(t,{failAI:true});await f.send('failed-voice','secretary',{type:'audio',id:'voice',duration:3000});const records=(await f.store.read()).records;assert.equal(records.length,1);assert.equal(records[0].attachments.length,1);assert(records[0].note.includes('AI 分類暫時失敗'));assert(f.messages.at(-1).messages[0].text.includes('已保存語音'));
  const g=await fixture(t,{longMedia:true,mediaUncertain:true});await g.send('long-voice','secretary',{type:'audio',id:'voice',duration:3000});await g.send('long-photo','secretary',{type:'image',id:'photo'});const saved=(await g.store.read()).records;assert.equal(saved.length,2);assert(saved.every(r=>r.note.length<=8000&&r.sourceText.length<=8000));
 });
+
+test('dated LINE tasks save without an organization or AI, and redelivery is idempotent',async t=>{
+ const f=await fixture(t,{failAI:true});await f.send('direct-task','secretary',{type:'text',text:'幫我加入10/15待辦：跟媽媽吃飯'});await f.send('direct-task','secretary',{type:'text',text:'幫我加入10/15待辦：跟媽媽吃飯'});
+ const s=await f.store.read();assert.equal(s.tasks.length,1);assert.equal(s.records.length,0);assert.equal(s.tasks[0].org,null);assert.equal(s.tasks[0].dueDate,'2026-10-15');assert.equal(s.tasks[0].title,'跟媽媽吃飯');assert.equal(s.tasks[0].createdBy,'secretary');assert.equal(f.calls,0);assert(f.messages[0].messages[0].text.includes('已記錄待辦'));
+});
