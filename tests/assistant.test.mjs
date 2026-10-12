@@ -67,3 +67,10 @@ test('dated LINE tasks save without an organization or AI, and redelivery is ide
 test('supplier free-form price descriptions are searchable and retained in answer evidence',()=>{
  const state={organizations:[{id:'salt',name:'原料商',prices:[],priceNotes:'鹽 50kg/包 $245'}],records:[],tasks:[]};const found=retrieve(state,{keywords:['鹽'],orgIds:[]});assert.equal(found.organizationTotal,1);assert.equal(found.organizations[0].priceNotes,'鹽 50kg/包 $245');assert.equal(retrieve(state,{keywords:['價格'],orgIds:[]}).organizationTotal,1);
 });
+
+test('LINE sends links only for photo records; text, tasks, audio, help, queries and reminders omit URLs',async t=>{
+ const f=await fixture(t);const last=()=>f.messages.at(-1).messages[0].text;
+ await f.send('help','secretary',{type:'text',text:'說明'});assert(!last().includes('https://'));await f.send('text');assert(!last().includes('https://'));await f.send('task','secretary',{type:'text',text:'明天待辦：去郵局'});assert(!last().includes('https://'));await f.send('question','secretary',{type:'text',text:'查詢客訴'});assert(last().includes('來源'));assert(!last().includes('https://'));
+ await f.send('audio','secretary',{type:'audio',id:'voice',duration:3000});assert(!last().includes('https://'));await f.send('photo','secretary',{type:'image',id:'photo'});assert(last().includes('查看照片：https://'));await f.send('caption','secretary',{type:'text',text:'這張照片是2026/10/9枕套客訴'});assert(last().includes('查看照片：https://'));
+ await f.send('expiry','secretary',{type:'text',text:'查看到期'});assert(!last().includes('https://'));
+});

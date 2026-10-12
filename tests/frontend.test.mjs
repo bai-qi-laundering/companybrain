@@ -43,3 +43,8 @@ test('record deletion confirms, removes only the selected record and preserves u
  assert(vm.runInContext('eventHTML(records[0])',c.context).includes('data-record-delete="one"'));await vm.runInContext("deleteRecord('one')",c.context);assert.deepEqual(c.read().records.map(x=>x.id),['two','line-new']);assert.equal(c.read().organizations.length,1);
  const changed=structuredClone(c.read());await vm.runInContext('refreshNas()',c.context);changed.revision++;changed.records[0].title='主管更新';c.setState(changed);await vm.runInContext("deleteRecord('two')",c.context);assert.equal(c.read().records.length,2);assert(c.$('#sync-error').textContent.includes('已被其他人修改'));
 });
+
+test('directory categories use a dropdown and explicit new-category input; aliases persist',async()=>{
+ const c=sandbox(true);await new Promise(r=>setTimeout(r,0));vm.runInContext("openOrg('baiqi')",c.context);const f=c.$('#org-form');assert(f.elements.kind.innerHTML.includes('＋ 新增分類'));f.elements.kind.value='__custom__';vm.runInContext('updateCustomKind()',c.context);assert.equal(c.$('#custom-kind-label').hidden,false);assert.equal(f.elements.customKind.required,true);
+ f.data={name:'百麒',kind:'__custom__',customKind:'物流夥伴',aliases:'百麒公司、百麒國際',contact:'',role:'',manager:'',contract:'',memo:'',prices:''};await f.onsubmit({preventDefault(){},target:f});assert.equal(c.read().organizations[0].kind,'物流夥伴');assert.deepEqual(c.read().organizations[0].aliases,['百麒公司','百麒國際']);vm.runInContext("openOrg('baiqi')",c.context);assert(f.elements.kind.innerHTML.includes('物流夥伴'));assert.equal(f.elements.kind.value,'物流夥伴');assert.equal(c.$('#custom-kind-label').hidden,true);assert.equal(f.elements.aliases.value,'百麒公司、百麒國際');
+});
