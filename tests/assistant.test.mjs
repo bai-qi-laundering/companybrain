@@ -63,3 +63,7 @@ test('dated LINE tasks save without an organization or AI, and redelivery is ide
  const f=await fixture(t,{failAI:true});await f.send('direct-task','secretary',{type:'text',text:'幫我加入10/15待辦：跟媽媽吃飯'});await f.send('direct-task','secretary',{type:'text',text:'幫我加入10/15待辦：跟媽媽吃飯'});
  const s=await f.store.read();assert.equal(s.tasks.length,1);assert.equal(s.records.length,0);assert.equal(s.tasks[0].org,null);assert.equal(s.tasks[0].dueDate,'2026-10-15');assert.equal(s.tasks[0].title,'跟媽媽吃飯');assert.equal(s.tasks[0].createdBy,'secretary');assert.equal(f.calls,0);assert(f.messages[0].messages[0].text.includes('已記錄待辦'));
 });
+
+test('supplier free-form price descriptions are searchable and retained in answer evidence',()=>{
+ const state={organizations:[{id:'salt',name:'原料商',prices:[],priceNotes:'鹽 50kg/包 $245'}],records:[],tasks:[]};const found=retrieve(state,{keywords:['鹽'],orgIds:[]});assert.equal(found.organizationTotal,1);assert.equal(found.organizations[0].priceNotes,'鹽 50kg/包 $245');assert.equal(retrieve(state,{keywords:['價格'],orgIds:[]}).organizationTotal,1);
+});
