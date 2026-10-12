@@ -5,7 +5,7 @@ import {createHmac} from 'node:crypto';
 import {Readable} from 'node:stream';
 import {Store} from '../backend/store.mjs';
 import {createLineService} from '../backend/line.mjs';
-import {retrieve,answerQuestion,describeMedia,expirySummary,taipeiDay} from '../backend/assistant.mjs';
+import {retrieve,answerQuestion,describeMedia,expirySummary,expiryText,taipeiDay} from '../backend/assistant.mjs';
 const require=createRequire(new URL('../backend/package.json',import.meta.url));
 const {PGlite}=require('@electric-sql/pglite');
 async function fixture(t,extra={}){
@@ -41,7 +41,7 @@ test('signed webhooks, optional allowlist and out-of-order unfollow',async t=>{
 });
 test('daily Taipei reminders reach members once, opt-out and stable push retry keys',async t=>{
  const f=await fixture(t);await f.send('start');await f.send('start2','manager');
- await f.line.db.mutate(s=>({...s,tasks:[{id:'due',title:'確認人事',dueDate:'2026-10-09',org:'baiqi',note:'',done:false}]}),'test');
+ await f.line.db.mutate(s=>({...s,tasks:[{id:'due',title:'確認人事',dueDate:'2026-10-11',org:'baiqi',note:'',done:false}]}),'test');
  f.setClock(new Date('2026-10-09T23:30:00Z'));await f.line.reminderTick();assert.equal(f.pushes.length,0);assert.equal(taipeiDay(new Date('2026-10-09T23:30:00Z')),'2026-10-10');
  f.setClock(new Date('2026-10-10T00:00:00Z'));await f.line.reminderTick();await f.line.reminderTick();await f.line.reminderTick();assert.equal(f.pushes.length,2);assert.equal(new Set(f.pushes.map(p=>p.body.to)).size,2);
  await f.send('off','manager',{type:'text',text:'關閉提醒'});f.setClock(new Date('2026-10-11T00:00:00Z'));f.setPushStatus(503);await f.line.reminderTick();const failed=f.pushes.at(-1);assert.equal(failed.body.to,'secretary');await f.pool.query("UPDATE cb_notifications SET next_attempt=now()-interval '1 minute' WHERE status='pending'");f.setPushStatus(200);await f.line.reminderTick();assert.equal(f.pushes.at(-1).key,failed.key);assert.equal(f.pushes.length,4);
@@ -73,4 +73,10 @@ test('LINE sends links only for photo records; text, tasks, audio, help, queries
  await f.send('help','secretary',{type:'text',text:'說明'});assert(!last().includes('https://'));await f.send('text');assert(!last().includes('https://'));await f.send('task','secretary',{type:'text',text:'明天待辦：去郵局'});assert(!last().includes('https://'));await f.send('question','secretary',{type:'text',text:'查詢客訴'});assert(last().includes('來源'));assert(!last().includes('https://'));
  await f.send('audio','secretary',{type:'audio',id:'voice',duration:3000});assert(!last().includes('https://'));await f.send('photo','secretary',{type:'image',id:'photo'});assert(last().includes('查看照片：https://'));await f.send('caption','secretary',{type:'text',text:'這張照片是2026/10/9枕套客訴'});assert(last().includes('查看照片：https://'));
  await f.send('expiry','secretary',{type:'text',text:'查看到期'});assert(!last().includes('https://'));
+});
+
+test('reminders include only incomplete today and tomorrow tasks, with unchanged 30-day contracts across year boundaries',()=>{
+ const day='2026-12-31',state={organizations:[{id:'today-contract',name:'當日到期',contractEndDate:day},{id:'limit',name:'三十天',contractEndDate:'2027-01-30'},{id:'future',name:'三十一天',contractEndDate:'2027-01-31'},{id:'old',name:'舊合約',contractEndDate:'2026-12-30'}],records:[],tasks:[{id:'old',title:'逾期',dueDate:'2026-12-30',done:false},{id:'today',title:'今天工作',dueDate:day,done:false},{id:'tomorrow',title:'明天工作',dueDate:'2027-01-01',done:false},{id:'later',title:'後天',dueDate:'2027-01-02',done:false},{id:'done',title:'已完成',dueDate:day,done:true},{id:'none',title:'未定日期',dueDate:null,done:false}]};
+ const s=expirySummary(state,day);assert.deepEqual(s.tasks.map(t=>t.id),['today','tomorrow']);assert.deepEqual(s.contracts.map(c=>c.id),['today-contract','limit']);const text=expiryText(s);assert(text.includes('今日到期｜2026-12-31｜今天工作'));assert(text.includes('明日到期｜2027-01-01｜明天工作'));assert(!text.includes('逾期'));assert(!text.includes('後天'));assert.equal(expirySummary({...state,tasks:[]},day).contracts.length,2);
+ assert(expiryText(expirySummary({organizations:[],tasks:[],records:[]},day)).includes('今天／明天'));
 });
