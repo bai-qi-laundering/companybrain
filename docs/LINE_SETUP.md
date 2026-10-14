@@ -96,3 +96,12 @@ LINE 語音會先保存原檔並產生逐字稿，再依內容新增紀錄、待
 - https://developers.line.biz/en/docs/messaging-api/retrying-api-request/
 - https://developers.line.biz/en/docs/messaging-api/pricing/
 - https://ai.google.dev/gemini-api/docs/audio
+
+
+### 有對象的待辦與年份
+
+- 有名錄對象和日期的待辦，同步存入該對象的往來紀錄。紀錄標示「待辦安排（不代表已完成）」，完成待辦後仍保留。
+- 例如「10/14 鉑麗送全部第一次布品清洗」可記為鉑麗的送洗待辦與往來紀錄。
+- 沒寫年份的月日，一律用台灣當前年份，包含日期區間；明確提供年份則保留。
+- 沒有日期的事項仍需補日期，無名錄對象的個人待辦不會建立對象往來紀錄。
+- 此規則適用新存入的資料，不會自行改寫舊待辦。

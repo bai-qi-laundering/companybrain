@@ -91,3 +91,10 @@ test('reminders include only incomplete today and tomorrow tasks, with unchanged
  const s=expirySummary(state,day);assert.deepEqual(s.tasks.map(t=>t.id),['today','tomorrow']);assert.deepEqual(s.contracts.map(c=>c.id),['today-contract','limit']);const text=expiryText(s);assert(text.includes('今日到期｜2026-12-31｜今天工作'));assert(text.includes('明日到期｜2027-01-01｜明天工作'));assert(!text.includes('逾期'));assert(!text.includes('後天'));assert.equal(expirySummary({...state,tasks:[]},day).contracts.length,2);
  assert(expiryText(expirySummary({organizations:[],tasks:[],records:[]},day)).includes('今天／明天'));
 });
+
+test('a dated hotel LINE task and its history are saved together once and retained on completion',async t=>{
+ const f=await fixture(t,{failAI:true});let state=await f.store.read();const org={...state.organizations[0],id:'boli',name:'鉑麗飯店',kind:'飯店'};await f.store.save(state.revision,{...state,organizations:[...state.organizations,org]},'test');
+ await f.send('linked-task','secretary',{type:'text',text:'10/14 待辦：鉑麗送全部第一次布品清洗'});await f.send('linked-task','secretary',{type:'text',text:'10/14 待辦：鉑麗送全部第一次布品清洗'});
+ state=await f.store.read();assert.equal(state.tasks.length,1);assert.equal(state.records.length,1);assert.equal(state.tasks[0].org,'boli');assert.equal(state.records[0].org,'boli');assert.equal(state.records[0].date,'2026-10-14');assert.equal(state.records[0].linkedTaskId,state.tasks[0].id);assert(state.records[0].note.includes('不代表已完成'));assert.equal(f.calls,0);assert.equal(retrieve(state,{orgIds:['boli'],keywords:[]}).total,1);
+ await f.store.save(state.revision,{...state,tasks:state.tasks.map(x=>({...x,done:true}))},'test');assert.equal((await f.store.read()).records.length,1);
+});

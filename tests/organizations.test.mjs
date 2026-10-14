@@ -26,3 +26,14 @@ test('recent complaints use stored records newest first without guessed time win
  assert.equal(result.sources.length,5);assert.equal(result.sources[0].id,'r6');assert.equal(result.sources[4].id,'r2');assert(result.answer.startsWith('資料庫紀錄'));assert(result.answer.includes('共 7 筆'));assert(!result.answer.includes('其他客訴'));
  const explicit=await answerQuestion({text:'最近家和客訴',state:{organizations:orgs,records:[],tasks:[]},plan});assert(explicit.answer.includes('尚無家和飯店客訴紀錄'));
 });
+
+test('month/day defaults to Taipei current year and dated hotel washing tasks keep their organization',async()=>{
+ const orgs=[{id:'boli',name:'鉑麗飯店',kind:'飯店'}],now=new Date('2026-10-14T08:00:00Z');
+ const raw={kind:'task',orgId:null,type:'一般紀錄',title:'第一次布品清洗',note:'送全部布品',date:null,endDate:null,amount:null,warnings:['缺少年份']};
+ const fake=async()=>Response.json({candidates:[{content:{parts:[{text:JSON.stringify(raw)}]}}]});
+ for(const fn of [extractDraft,understand]){const d=await fn({text:'10/14 鉑麗送全部第一次布品清洗',organizations:orgs,now,key:'key',model:'model',fetchImpl:fake});assert.equal(d.kind,'task');assert.equal(d.orgId,'boli');assert.equal(d.date,'2026-10-14');assert.deepEqual(d.warnings,[]);}
+ assert.equal(normalizeDraft({...raw,kind:'record'},orgs,'2025/10/14 鉑麗已送布品清洗',now).date,'2025-10-14');
+ const range=normalizeDraft({...raw,kind:'record'},orgs,'09/20–09/23 鉑麗會議',now);assert.equal(range.date,'2026-09-20');assert.equal(range.endDate,'2026-09-23');
+ assert.equal(normalizeDraft(raw,orgs,'1/2 鉑麗待辦',new Date('2026-12-31T16:01:00Z')).date,'2027-01-02');
+ assert(normalizeDraft(raw,orgs,'2/30 鉑麗待辦',now).warnings.length);
+});
