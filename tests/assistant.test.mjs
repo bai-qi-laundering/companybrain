@@ -5,7 +5,7 @@ import {createHmac} from 'node:crypto';
 import {Readable} from 'node:stream';
 import {Store} from '../backend/store.mjs';
 import {createLineService} from '../backend/line.mjs';
-import {retrieve,answerQuestion,hotelSheetPriceAnswer,describeMedia,expirySummary,expiryText,taipeiDay} from '../backend/assistant.mjs';
+import {retrieve,answerQuestion,understand,catalogPriceQuery,catalogPriceAnswer,describeMedia,expirySummary,expiryText,taipeiDay} from '../backend/assistant.mjs';
 const require=createRequire(new URL('../backend/package.json',import.meta.url));
 const {PGlite}=require('@electric-sql/pglite');
 async function fixture(t,extra={}){
@@ -14,9 +14,9 @@ async function fixture(t,extra={}){
  const store=new Store(pool);await store.init('admin1','abcdefghijklmnop');
  const messages=[],pushes=[];let calls=0,clock=new Date('2026-10-09T01:00:00Z'),pushStatus=200;
  const line=createLineService({store,config:{origin:'https://company.test',key:'key',model:'model',lineSecret:'secret',lineToken:'token',lineAllowedUsers:'only-old-user',lineAccess:'friends',...extra},now:()=>clock,
- ai:async({text})=>{calls++;if(extra.failAI)throw new Error('AI temporarily unavailable');return text.includes('查詢')?{kind:'query',keywords:['客訴'],orgIds:[],warnings:[]}:{kind:'record',orgId:'baiqi',date:'2026-10-09',type:'一般紀錄',title:text.slice(0,80),note:text.slice(0,8000),warnings:[]}},
+ ai:extra.realAI?understand:async({text})=>{calls++;if(extra.failAI)throw new Error('AI temporarily unavailable');return text.includes('查詢')?{kind:'query',keywords:['客訴'],orgIds:[],warnings:[]}:{kind:'record',orgId:'baiqi',date:'2026-10-09',type:'一般紀錄',title:text.slice(0,80),note:text.slice(0,8000),warnings:[]}},
  mediaAI:async({type})=>({text:extra.longMedia?'字'.repeat(8000):type==='audio'?'2026/10/9紀錄秘書出差':'枕套有污漬',uncertain:Boolean(extra.mediaUncertain)}),
- answerAI:async()=>({answer:'依據公司紀錄',sources:[{id:'r1',date:'2026-10-09',title:'客訴',url:'https://company.test/?record=r1'}]}),
+ answerAI:extra.realAI?answerQuestion:async()=>({answer:'依據公司紀錄',sources:[{id:'r1',date:'2026-10-09',title:'客訴',url:'https://company.test/?record=r1'}]}),
  fetchImpl:async(url,opts)=>{if(url.includes('/profile/'))return Response.json({displayName:url.includes('manager')?'經理':'秘書'});if(url.includes('api-data'))return new Response(Buffer.from('original attachment'),{headers:{'content-type':url.includes('/photo/')?'image/jpeg':'audio/mp4'}});const body=JSON.parse(opts.body);if(url.endsWith('/push')){pushes.push({body,key:opts.headers['X-Line-Retry-Key']});return new Response('',{status:pushStatus});}messages.push(body);return new Response('',{status:200});}});
  await line.init();
  async function send(id,user='secretary',message={type:'text',text:'2026/10/9 紀錄'},type='message',timestamp=clock.getTime()){
@@ -74,7 +74,7 @@ test('all hotel sheet prices are listed concisely even after the first 40 organi
  organizations.push({id:'supplier',name:'供應商',kind:'原料商',prices:[['床單',9,'2026-10-01']]});
  const state={organizations,records:[],tasks:[]},question='所有飯店床單價格';
  const expected='資料庫紀錄\n1. 然一：床單 $21.3\n2. 驛館：床單 $25.0';
- assert.equal(hotelSheetPriceAnswer(question,state),expected);
+ assert.equal(catalogPriceAnswer(question,state),expected);
  const answer=await answerQuestion({text:question,state,plan:{warnings:[],keywords:['飯店','床單','價格'],orgIds:[]},key:'key',model:'model',origin:'https://company.test',fetchImpl:()=>{throw Error('價格查詢應從完整名錄讀取')}});
  assert.equal(answer.answer,expected);assert.deepEqual(answer.sources,[]);
 });
@@ -97,4 +97,24 @@ test('a dated hotel LINE task and its history are saved together once and retain
  await f.send('linked-task','secretary',{type:'text',text:'10/14 待辦：鉑麗送全部第一次布品清洗'});await f.send('linked-task','secretary',{type:'text',text:'10/14 待辦：鉑麗送全部第一次布品清洗'});
  state=await f.store.read();assert.equal(state.tasks.length,1);assert.equal(state.records.length,1);assert.equal(state.tasks[0].org,'boli');assert.equal(state.records[0].org,'boli');assert.equal(state.records[0].date,'2026-10-14');assert.equal(state.records[0].linkedTaskId,state.tasks[0].id);assert(state.records[0].note.includes('不代表已完成'));assert.equal(f.calls,0);assert.equal(retrieve(state,{orgIds:['boli'],keywords:[]}).total,1);
  await f.store.save(state.revision,{...state,tasks:state.tasks.map(x=>({...x,done:true}))},'test');assert.equal((await f.store.read()).records.length,1);
+});
+
+test('all bath towel prices bypass Gemini for planning and answers and search beyond 40 organizations',async()=>{
+ const state={organizations:Array.from({length:65},(_,i)=>({id:'h'+i,name:'飯店'+i,kind:'飯店',prices:i===64?[['大浴巾',18,'2026-10-01']]:[],priceNotes:i===1?'浴巾 70×140cm $20/條\n床單 $22':''})),records:[],tasks:[]};
+ state.organizations.push({id:'supplier',name:'原料商',kind:'供應商',prices:[['浴巾',9,'2026-10-01']]});
+ const noAI=()=>{throw Error('查價不應呼叫 Gemini')};
+ for(const text of ['所有飯店浴巾價格','幫我查所有飯店浴巾價格是多少？']){
+  const plan=await understand({text,organizations:state.organizations,fetchImpl:noAI});assert.equal(plan.kind,'query');assert.equal(plan.item,'浴巾');assert.equal(plan.hotelOnly,true);
+  const r=await answerQuestion({text,state,plan,fetchImpl:noAI});assert.equal(r.answer,'資料庫紀錄\n1. 飯店1：浴巾 70×140cm $20/條\n2. 飯店64：大浴巾 $18');assert.deepEqual(r.sources,[]);
+ }
+ const all=catalogPriceAnswer('所有浴巾價格',state);assert(all.includes('原料商：浴巾 $9'));
+ assert.equal(catalogPriceQuery('紀錄所有飯店浴巾價格改成20'),null);assert.equal(catalogPriceQuery('所有飯店價格'),null);
+ assert.equal(catalogPriceAnswer('所有飯店枕頭套價格',state),'資料庫紀錄\n尚無飯店枕頭套價格。');
+ const many={...state,organizations:Array.from({length:200},(_,i)=>({id:'x'+i,name:'飯店名稱'.repeat(10)+i,kind:'飯店',prices:[['浴巾',18,'2026-10-01']]}))};
+ const long=catalogPriceAnswer('所有飯店浴巾價格',many);assert(long.length<4900);assert(long.includes('共 200 家'));assert(long.includes('其餘請在網頁查看'));
+});
+test('LINE replies to all hotel bath towel prices even while Gemini is unavailable without writing records',async t=>{
+ const f=await fixture(t,{realAI:true});let state=await f.store.read();await f.store.save(state.revision,{...state,organizations:[...state.organizations,{...state.organizations[0],id:'hotel',name:'測試飯店',kind:'飯店',prices:[['浴巾',18,'2026-10-01']]}]},'test');
+ await f.send('price-query','secretary',{type:'text',text:'所有飯店浴巾價格'});
+ assert.equal(f.messages.at(-1).messages[0].text,'資料庫紀錄\n1. 測試飯店：浴巾 $18');state=await f.store.read();assert.equal(state.records.length,0);assert.equal(state.tasks.length,0);
 });
