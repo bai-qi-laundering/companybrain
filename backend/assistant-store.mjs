@@ -6,6 +6,7 @@ export class AssistantStore {
  async init(){await this.pool.query(`
  CREATE TABLE IF NOT EXISTS cb_line_jobs(id text PRIMARY KEY,event jsonb NOT NULL,status text NOT NULL DEFAULT 'pending',lease_until timestamptz,reply_text text,created_at timestamptz NOT NULL DEFAULT now());
  CREATE TABLE IF NOT EXISTS cb_camera_groups(hotel text PRIMARY KEY,group_id text NOT NULL UNIQUE,updated_at timestamptz NOT NULL DEFAULT now());
+ CREATE TABLE IF NOT EXISTS cb_camera_photos(id text PRIMARY KEY,mime text NOT NULL,body bytea NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
  CREATE TABLE IF NOT EXISTS cb_line_members(user_id text PRIMARY KEY,display_name text NOT NULL DEFAULT '',active boolean NOT NULL DEFAULT true,reminders boolean NOT NULL DEFAULT true,event_ms bigint NOT NULL DEFAULT 0);
  CREATE TABLE IF NOT EXISTS cb_media(id text PRIMARY KEY,mime text NOT NULL,name text NOT NULL,body bytea NOT NULL,owner_id text NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
  CREATE TABLE IF NOT EXISTS cb_notifications(id text PRIMARY KEY,user_id text NOT NULL,retry_key text NOT NULL,payload jsonb NOT NULL,status text NOT NULL DEFAULT 'pending',attempts integer NOT NULL DEFAULT 0,lease_until timestamptz,next_attempt timestamptz NOT NULL DEFAULT now(),created_at timestamptz NOT NULL DEFAULT now());
@@ -15,6 +16,9 @@ export class AssistantStore {
  async unbindCameraGroup(hotel,groupId){const r=await this.pool.query('DELETE FROM cb_camera_groups WHERE hotel=$1 AND group_id=$2 RETURNING hotel',[hotel,groupId]);return r.rowCount>0;}
  async cameraGroupNames(groupId){const r=await this.pool.query('SELECT hotel FROM cb_camera_groups WHERE group_id=$1 ORDER BY hotel',[groupId]);return r.rows.map(x=>x.hotel);}
  async cameraGroup(hotel){const r=await this.pool.query('SELECT group_id FROM cb_camera_groups WHERE hotel=$1',[hotel]);return r.rows[0]?.group_id||null;}
+ async cameraPhoto(id){return (await this.pool.query("SELECT mime,body,created_at FROM cb_camera_photos WHERE id=$1 AND created_at>now()-interval '24 hours'",[id])).rows[0]||null;}
+ async saveCameraPhoto(id,body){await this.pool.query("INSERT INTO cb_camera_photos(id,mime,body) VALUES($1,'image/jpeg',$2) ON CONFLICT DO NOTHING",[id,body]);}
+ async purgeCameraPhotos(){await this.pool.query("DELETE FROM cb_camera_photos WHERE created_at<now()-interval '24 hours'");}
  async member(id){return (await this.pool.query('SELECT * FROM cb_line_members WHERE user_id=$1',[id])).rows[0];}
  async register(id,name='',active=true,ms=Date.now()){await this.pool.query(`INSERT INTO cb_line_members(user_id,display_name,active,event_ms) VALUES($1,$2,$3,$4) ON CONFLICT(user_id) DO UPDATE SET display_name=CASE WHEN excluded.display_name<>'' THEN excluded.display_name ELSE cb_line_members.display_name END,active=excluded.active,event_ms=excluded.event_ms WHERE cb_line_members.event_ms<=excluded.event_ms`,[id,name,active,ms]);}
  async subscription(id,on){await this.pool.query('UPDATE cb_line_members SET reminders=$2 WHERE user_id=$1',[id,on]);}
