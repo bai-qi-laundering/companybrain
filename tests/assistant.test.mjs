@@ -14,9 +14,9 @@ async function fixture(t,extra={}){
  const store=new Store(pool);await store.init('admin1','abcdefghijklmnop');
  const messages=[],pushes=[];let calls=0,clock=new Date('2026-10-09T01:00:00Z'),pushStatus=200;
  const line=createLineService({store,config:{origin:'https://company.test',key:'key',model:'model',lineSecret:'secret',lineToken:'token',lineAllowedUsers:'only-old-user',lineAccess:'friends',...extra},now:()=>clock,
- ai:extra.realAI?understand:async({text})=>{calls++;if(extra.failAI)throw new Error('AI temporarily unavailable');return text.includes('查詢')?{kind:'query',keywords:['客訴'],orgIds:[],warnings:[]}:{kind:'record',orgId:'baiqi',date:'2026-10-09',type:'一般紀錄',title:text.slice(0,80),note:text.slice(0,8000),warnings:[]}},
+ ai:extra.ai||(extra.realAI?understand:async({text})=>{calls++;if(extra.failAI)throw new Error('AI temporarily unavailable');return text.includes('查詢')?{kind:'query',keywords:['客訴'],orgIds:[],warnings:[]}:{kind:'record',orgId:'baiqi',date:'2026-10-09',type:'一般紀錄',title:text.slice(0,80),note:text.slice(0,8000),warnings:[]}}),
  mediaAI:async({type})=>({text:extra.longMedia?'字'.repeat(8000):type==='audio'?'2026/10/9紀錄秘書出差':'枕套有污漬',uncertain:Boolean(extra.mediaUncertain)}),
- answerAI:extra.realAI?answerQuestion:async()=>({answer:'依據公司紀錄',sources:[{id:'r1',date:'2026-10-09',title:'客訴',url:'https://company.test/?record=r1'}]}),
+ answerAI:extra.answerAI||(extra.realAI?answerQuestion:async()=>({answer:'依據公司紀錄',sources:[{id:'r1',date:'2026-10-09',title:'客訴',url:'https://company.test/?record=r1'}]})),
  fetchImpl:async(url,opts)=>{if(url.includes('/profile/'))return Response.json({displayName:url.includes('manager')?'經理':'秘書'});if(url.includes('api-data'))return new Response(Buffer.from('original attachment'),{headers:{'content-type':url.includes('/photo/')?'image/jpeg':'audio/mp4'}});const body=JSON.parse(opts.body);if(url.endsWith('/push')){pushes.push({body,key:opts.headers['X-Line-Retry-Key']});return new Response('',{status:pushStatus});}messages.push(body);return new Response('',{status:200});}});
  await line.init();
  async function send(id,user='secretary',message={type:'text',text:'2026/10/9 紀錄'},type='message',timestamp=clock.getTime()){
@@ -117,4 +117,39 @@ test('LINE replies to all hotel bath towel prices even while Gemini is unavailab
  const f=await fixture(t,{realAI:true});let state=await f.store.read();await f.store.save(state.revision,{...state,organizations:[...state.organizations,{...state.organizations[0],id:'hotel',name:'測試飯店',kind:'飯店',prices:[['浴巾',18,'2026-10-01']]}]},'test');
  await f.send('price-query','secretary',{type:'text',text:'所有飯店浴巾價格'});
  assert.equal(f.messages.at(-1).messages[0].text,'資料庫紀錄\n1. 測試飯店：浴巾 $18');state=await f.store.read();assert.equal(state.records.length,0);assert.equal(state.tasks.length,0);
+});
+
+test('LINE conversations are per-user, limited to six recent rounds, survive a new service, and never save chat as records',async t=>{
+ const seen=[],ai=async input=>{seen.push(input);return {kind:'chat',reply:'回覆：'+input.text,warnings:[]}},f=await fixture(t,{ai,answerAI:answerQuestion});
+ await f.send('chat-a','secretary',{type:'text',text:'你好，幫我想一段問候語'});await f.send('chat-b','manager',{type:'text',text:'經理自己的對話'});
+ await f.send('chat-c','secretary',{type:'text',text:'那幫我縮短一點'});assert.equal(seen.at(-1).history.length,1);assert.equal(seen.at(-1).history[0].text,'你好，幫我想一段問候語');assert(seen.at(-1).history[0].reply.includes('回覆：'));assert(!JSON.stringify(seen.at(-1).history).includes('經理自己的對話'));
+ for(let i=0;i<7;i++)await f.send('more-chat-'+i,'secretary',{type:'text',text:'追問'+i});assert.equal(seen.at(-1).history.length,6);
+ const before=seen.length;await f.send('more-chat-6','secretary',{type:'text',text:'追問6'});assert.equal(seen.length,before);
+ const state=await f.store.read();assert.equal(state.records.length,0);assert.equal(state.tasks.length,0);
+ // A fresh store instance reads persisted context; no in-memory conversation map.
+ const {AssistantStore}=await import('../backend/assistant-store.mjs');const fresh=new AssistantStore(f.store);const current=await f.pool.query("INSERT INTO cb_line_jobs(id,event) VALUES('future-chat',$1) RETURNING id",[{type:'message',source:{userId:'secretary'},message:{type:'text',text:'接下來'}}]);assert.equal((await fresh.conversation('secretary',current.rows[0].id)).length,6);
+ await f.pool.query("UPDATE cb_line_jobs SET created_at=now()-interval '25 hours' WHERE id<>'future-chat'");assert.equal((await fresh.conversation('secretary','future-chat')).length,0);
+});
+test('general chat uses one Gemini response and follow-up planning receives context without turning questions into writes',async()=>{
+ const fake=payload=>async()=>Response.json({candidates:[{content:{parts:[{text:JSON.stringify(payload)}]}}]});
+ const history=[{text:'老闆什麼時候去越南',reply:'董事長的候選行程為2026/11/7–11/9'}];let body;
+ const plan=await understand({text:'那幾號回來？',organizations:[],history,key:'key',model:'model',fetchImpl:async(u,o)=>{body=JSON.parse(o.body);return fake({kind:'query',keywords:['越南','出差'],orgIds:[],fromDate:null,toDate:null,warnings:[]})()}});
+ assert.equal(plan.kind,'query');const sent=JSON.parse(body.contents[0].parts[0].text);assert.equal(sent.history[0].message,history[0].text);assert.equal(sent.message,'那幾號回來？');assert(plan.keywords.includes('越南'));
+ const guarded=await understand({text:'老闆什麼時候去越南？',organizations:[],key:'key',model:'model',fetchImpl:fake({kind:'task',title:'越南出差',orgId:null,date:'2026-11-07',warnings:['缺少對象']})});assert.equal(guarded.kind,'query');assert.deepEqual(guarded.warnings,[]);
+ const writingGuard=await understand({text:'幫我寫一句工作問候',organizations:[],key:'key',model:'model',fetchImpl:fake({kind:'record',title:'工作問候',orgId:'baiqi',date:'2026-10-25'})});assert.equal(writingGuard.kind,'chat');
+ const chat=await understand({text:'幫我寫一句工作問候',organizations:[],key:'key',model:'model',fetchImpl:fake({kind:'chat',chatReply:'今天也一起把工作做好。'})});assert.equal(chat.kind,'chat');
+ const r=await answerQuestion({text:'幫我寫一句工作問候',state:{organizations:[],records:[],tasks:[]},plan:chat,fetchImpl:()=>{throw Error('chat reply already generated')}});assert.equal(r.answer,'今天也一起把工作做好。');assert.deepEqual(r.sources,[]);
+});
+test('full-pool search ranks older Vietnam trip above generic boss mentions and invalid citations show grounded candidate dates',async()=>{
+ const state={organizations:[{id:'baiqi',name:'百麒',kind:'內部'}],records:Array.from({length:75},(_,i)=>({id:'m'+i,org:'baiqi',date:'2026-10-25',type:'會議',title:'老闆開會',note:'討論日常工作',amount:null})),tasks:[]};
+ state.records.push({id:'vietnam-trip',org:'baiqi',date:'2026-11-07',endDate:'2026-11-09',type:'出差／展覽',title:'董事長越南出差',note:'參訪洗滌廠',amount:null});
+ const plan={kind:'query',keywords:['老闆','越南出差'],orgIds:[],warnings:[]},evidence=retrieve(state,plan,'老闆什麼時候去越南');assert.equal(evidence.items[0].id,'vietnam-trip');assert.equal(retrieve(state,{keywords:['客訴'],orgIds:[]}).total,0);
+ const result=await answerQuestion({text:'老闆什麼時候去越南',state,plan,key:'key',model:'model',origin:'https://company.test',fetchImpl:async()=>Response.json({candidates:[{content:{parts:[{text:JSON.stringify({answer:'錯誤的捏造內容',sourceIds:['不是有效編號']})}]}}]})});
+ assert(result.answer.includes('候選紀錄'));assert(result.answer.includes('2026-11-07～2026-11-09'));assert(result.answer.includes('董事長越南出差'));assert(!result.answer.includes('捏造'));assert(!result.answer.includes('請在網頁確認'));assert.equal(result.sources[0].id,'vietnam-trip');
+});
+
+test('short AI reference labels map back to real source IDs without discarding a grounded answer',async()=>{
+ const state={organizations:[],records:[{id:'line-long-real-record-id',date:'2026-11-07',endDate:'2026-11-09',title:'越南出差',note:'11/9回國',type:'出差／展覽'}],tasks:[]};let sent;
+ const r=await answerQuestion({text:'幾號回來',state,plan:{kind:'query',keywords:['越南'],orgIds:[],warnings:[]},key:'key',model:'model',origin:'https://company.test',fetchImpl:async(u,o)=>{sent=JSON.parse(JSON.parse(o.body).contents[0].parts[0].text);return Response.json({candidates:[{content:{parts:[{text:JSON.stringify({answer:'資料庫紀錄\n越南出差於2026/11/9回國。',sourceIds:['R1']})}]}}]})}});
+ assert.equal(sent.evidence.items[0].ref,'R1');assert(r.answer.includes('2026/11/9回國'));assert(!r.answer.includes('候選'));assert.equal(r.sources[0].id,'line-long-real-record-id');
 });
