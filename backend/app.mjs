@@ -1,4 +1,5 @@
 import {readFile} from 'node:fs/promises';
+import {createHmac,timingSafeEqual,randomUUID} from 'node:crypto';
 import {AppError,requireText,validateState} from './domain.mjs';
 import {token,digest,cookieToken,sessionCookie,verifyPassword,hashPassword} from './security.mjs';
 import {extractDraft} from './gemini.mjs';
@@ -10,6 +11,36 @@ export function createHandler({store,config,htmlPath,line,ai=extractDraft,queryA
  return async(req,res)=>{res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','same-origin');res.setHeader('X-Frame-Options','DENY');res.setHeader('Cache-Control','no-store');res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");const send=(status,data)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(data))};
  try{const path=new URL(req.url,'http://localhost').pathname;
  if(req.method==='POST'&&path==='/api/line/webhook'){if(!line)throw new AppError(503,'LINE 尚未設定');return send(200,await line.webhook(req));}
+ if(req.method==='POST'&&path==='/api/camera/photo'){
+  if(!config.cameraApiKey||!config.cameraLinkKey)throw new AppError(503,'相機金鑰尚未設定');
+  const provided=String(req.headers.authorization||'').replace(/^Bearer /i,'');
+  const a=Buffer.from(provided),b=Buffer.from(config.cameraApiKey);
+  if(a.length!==b.length||!timingSafeEqual(a,b))throw new AppError(401,'相機驗證失敗');
+  const data=await body(req);
+  const label=requireText(data.label,'QR 標籤',80);
+  const base64=String(data.imageBase64||'');
+  if(!/^[A-Za-z0-9+/]+={0,2}$/.test(base64)||base64.length>3500000)throw new AppError(400,'照片格式不正確');
+  const photo=Buffer.from(base64,'base64');
+  if(photo.length<100||photo.length>2500000||photo[0]!==255||photo[1]!==216||photo.at(-2)!==255||photo.at(-1)!==217)throw new AppError(400,'僅支援 2.5MB 以下 JPEG');
+  const id=randomUUID(),expiry=Math.floor(Date.now()/1000)+86400;
+  const signature=createHmac('sha256',config.cameraLinkKey).update(id+':'+expiry).digest('hex');
+  const url=config.origin+'/api/camera/image/'+id+'?expires='+expiry+'&sig='+signature;
+  await line.db.saveCameraPhoto(id,photo);
+  const result=await line.sendCameraPhoto(label,url,id);
+  return send(200,{...result,photoId:id});
+ }
+ if(req.method==='GET'&&path.startsWith('/api/camera/image/')){
+  if(!config.cameraLinkKey)throw new AppError(503,'相機金鑰尚未設定');
+  const id=path.slice('/api/camera/image/'.length),params=new URL(req.url,'http://localhost').searchParams;
+  const expiry=Number(params.get('expires')),sig=String(params.get('sig')||'');
+  if(!/^[0-9a-f-]{36}$/.test(id)||!Number.isSafeInteger(expiry)||expiry<Math.floor(Date.now()/1000)||expiry>Math.floor(Date.now()/1000)+86400||!/^[0-9a-f]{64}$/.test(sig))throw new AppError(403,'照片連結無效');
+  const expected=createHmac('sha256',config.cameraLinkKey).update(id+':'+expiry).digest('hex');
+  if(!timingSafeEqual(Buffer.from(sig),Buffer.from(expected)))throw new AppError(403,'照片連結驗證失敗');
+  const photo=await line.db.cameraPhoto(id);
+  if(!photo)throw new AppError(404,'照片已過期');
+  res.writeHead(200,{'Content-Type':'image/jpeg','Content-Length':photo.body.length,'Cache-Control':'private, max-age=60'});
+  res.end(photo.body);return;
+ }
  if(req.method==='GET'&&path==='/api/health'){await store.health();return send(200,{ok:true,service:'companybrain-api'})}
  if(req.method==='GET'&&['/','/index.html'].includes(path)){res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});res.end((await readFile(htmlPath,'utf8')).replace('</head>','<meta name="companybrain-runtime" content="nas"></head>'));return}
  if(!path.startsWith('/api/'))throw new AppError(404,'找不到頁面');
