@@ -1,4 +1,5 @@
 import {parseTaskCommand} from './tasks.mjs';
+import {cameraDestination,cameraImageMessages} from './camera-routing.mjs';
 import {createHmac,timingSafeEqual,createHash,randomUUID} from 'node:crypto';
 import {AppError,validateState,normalizeDraft,taskHistory} from './domain.mjs';
 import {AssistantStore} from './assistant-store.mjs';
@@ -44,6 +45,18 @@ export function createLineService({store,config,ai=understand,mediaAI=describeMe
    }
    continue;
   }const uid=e.source?.userId;if(e.source?.type!=='user'||typeof uid!=='string'||!permitted(uid))continue;if(!['message','follow','unfollow'].includes(e.type))continue;if(e.type==='unfollow'){await db.register(uid,'',false,e.timestamp||now().getTime());continue;}await db.register(uid,'',true,e.timestamp||now().getTime());if(typeof e.webhookEventId!=='string'||e.webhookEventId.length>100||typeof e.replyToken!=='string')continue;events.push(e);}await db.enqueue(events);return {ok:true};}
+ async function sendCameraPhoto(label,url,id){
+  const destination=cameraDestination(label);
+  if(!destination)throw new AppError(400,'QR 標籤無效');
+  let groupId=await db.cameraGroup(destination.hotel);
+  let warning=false;
+  if(!groupId){groupId=await db.cameraGroup('客衣');warning=true;}
+  if(!groupId)throw new AppError(409,'飯店及客衣群組均未綁定');
+  const messages=warning?[{type:'text',text:'⚠️ 未綁定飯店：'+destination.hotel+'，請管理員檢查 QR Code 與群組設定。'},...cameraImageMessages(url,destination.label)]:cameraImageMessages(url,destination.label);
+  const response=await callLine('push',{to:groupId,messages},id);
+  if(!response.ok)throw new AppError(502,'LINE 照片傳送失敗：HTTP '+response.status);
+  return {ok:true,hotel:destination.hotel,warning};
+ }
  async function callLine(path,data,retryKey){const r=await fetchImpl('https://api.line.me/v2/bot/message/'+path,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+config.lineToken,...(retryKey?{'X-Line-Retry-Key':retryKey}:{})},body:JSON.stringify(data),signal:AbortSignal.timeout(10000)});return r;}
  async function pushJob(id,uid,text){await db.notify('reply:'+id,uid,{messages:[{type:'text',text:text.slice(0,4900)}]},randomUUID());}
  async function deliver(job,text){text=cleanLineReply(text);let r;try{r=await callLine('reply',{replyToken:job.event.replyToken,messages:[{type:'text',text:text.slice(0,4900)}]});}catch{await db.finish(job.id,'reply_failed');return;}if(r.ok){await db.finish(job.id);return;}if(r.status===400&&config.linePushFallback!==false){await pushJob(job.id,job.event.source.userId,text);await db.finish(job.id,'push_queued');}else{console.error('LINE reply status:',r.status);await db.finish(job.id,'reply_failed');}}
@@ -65,5 +78,5 @@ export function createLineService({store,config,ai=understand,mediaAI=describeMe
  async function tick(){if(working||!enabled())return;working=true;try{const job=await db.claim();if(!job)return;const member=await db.member(job.event.source.userId);if(member&&!member.active){await db.finish(job.id,'blocked');return;}let answer=job.reply_text;if(!answer){try{answer=await handle(job);}catch(err){answer=(err.status?err.message:'處理失敗，請先查看網頁清單後重試。');console.error('LINE processing failed:',err.status||err.code||err.name);}await db.answer(job.id,answer);}await deliver(job,answer);}catch(err){console.error('LINE worker failed:',err.code||err.name);}finally{working=false;}}
  async function reminderTick(){if(notifying||!enabled())return;notifying=true;try{if(config.lineReminders!==false&&taipeiHour(now())>=Number(config.reminderHour??8)){const state=await store.read(),summary=expirySummary(state,taipeiDay(now()));if(summary.tasks.length||summary.contracts.length){const users=(await db.pool.query('SELECT user_id FROM cb_line_members WHERE active=true AND reminders=true')).rows;for(const u of users)if(permitted(u.user_id))await db.notify('daily:'+summary.day+':'+u.user_id,u.user_id,{messages:[{type:'text',text:expiryText(summary)}]},randomUUID());}}
  const notice=await db.claimNotice();if(notice){const member=await db.member(notice.user_id);if(!member?.active||!permitted(notice.user_id)||notice.id.startsWith('daily:')&&!member.reminders){await db.finishNotice(notice.id,'cancelled');return;}let response;try{response=await callLine('push',{to:notice.user_id,...notice.payload,messages:notice.payload.messages.map(message=>message.type==='text'?{...message,text:cleanLineReply(message.text)}:message)},notice.retry_key);}catch{await db.finishNotice(notice.id,'pending',true);return;}if(response.ok||response.status===409)await db.finishNotice(notice.id,'sent');else if(response.status===429||response.status>=500)await db.finishNotice(notice.id,'pending',true);else{console.error('LINE push status:',response.status);await db.finishNotice(notice.id,'failed');}}}catch(err){console.error('LINE reminder failed:',err.code||err.name);}finally{notifying=false;}}
- return {init:()=>db.init(),webhook,tick,reminderTick,db,start(){timer=setInterval(()=>void tick(),500);timer.unref();reminderTimer=setInterval(()=>void reminderTick(),30000);reminderTimer.unref();void tick();void reminderTick();},stop(){clearInterval(timer);clearInterval(reminderTimer);}};
+ return {init:()=>db.init(),webhook,sendCameraPhoto,tick,reminderTick,db,start(){timer=setInterval(()=>void tick(),500);timer.unref();reminderTimer=setInterval(()=>void reminderTick(),30000);reminderTimer.unref();void tick();void reminderTick();},stop(){clearInterval(timer);clearInterval(reminderTimer);}};
 }
