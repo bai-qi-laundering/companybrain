@@ -5,11 +5,13 @@ export class AssistantStore {
  constructor(store){this.store=store;this.pool=store.pool;}
  async init(){await this.pool.query(`
  CREATE TABLE IF NOT EXISTS cb_line_jobs(id text PRIMARY KEY,event jsonb NOT NULL,status text NOT NULL DEFAULT 'pending',lease_until timestamptz,reply_text text,created_at timestamptz NOT NULL DEFAULT now());
+ CREATE TABLE IF NOT EXISTS cb_camera_groups(hotel text PRIMARY KEY,group_id text NOT NULL UNIQUE,updated_at timestamptz NOT NULL DEFAULT now());
  CREATE TABLE IF NOT EXISTS cb_line_members(user_id text PRIMARY KEY,display_name text NOT NULL DEFAULT '',active boolean NOT NULL DEFAULT true,reminders boolean NOT NULL DEFAULT true,event_ms bigint NOT NULL DEFAULT 0);
  CREATE TABLE IF NOT EXISTS cb_media(id text PRIMARY KEY,mime text NOT NULL,name text NOT NULL,body bytea NOT NULL,owner_id text NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
  CREATE TABLE IF NOT EXISTS cb_notifications(id text PRIMARY KEY,user_id text NOT NULL,retry_key text NOT NULL,payload jsonb NOT NULL,status text NOT NULL DEFAULT 'pending',attempts integer NOT NULL DEFAULT 0,lease_until timestamptz,next_attempt timestamptz NOT NULL DEFAULT now(),created_at timestamptz NOT NULL DEFAULT now());
  CREATE INDEX IF NOT EXISTS cb_line_jobs_conversation ON cb_line_jobs ((event->'source'->>'userId'),created_at);
  CREATE INDEX IF NOT EXISTS cb_notifications_pending ON cb_notifications(status,next_attempt);`);}
+ async bindCameraGroup(hotel,groupId){const r=await this.pool.query('SELECT hotel,group_id FROM cb_camera_groups WHERE hotel=$1 OR group_id=$2',[hotel,groupId]);if(r.rows.some(x=>x.hotel===hotel&&x.group_id!==groupId))return 'conflict';if(r.rows.some(x=>x.group_id===groupId&&x.hotel!==hotel))return 'group_conflict';await this.pool.query('INSERT INTO cb_camera_groups(hotel,group_id) VALUES($1,$2) ON CONFLICT(hotel) DO UPDATE SET updated_at=now()',[hotel,groupId]);return 'ok';}
  async member(id){return (await this.pool.query('SELECT * FROM cb_line_members WHERE user_id=$1',[id])).rows[0];}
  async register(id,name='',active=true,ms=Date.now()){await this.pool.query(`INSERT INTO cb_line_members(user_id,display_name,active,event_ms) VALUES($1,$2,$3,$4) ON CONFLICT(user_id) DO UPDATE SET display_name=CASE WHEN excluded.display_name<>'' THEN excluded.display_name ELSE cb_line_members.display_name END,active=excluded.active,event_ms=excluded.event_ms WHERE cb_line_members.event_ms<=excluded.event_ms`,[id,name,active,ms]);}
  async subscription(id,on){await this.pool.query('UPDATE cb_line_members SET reminders=$2 WHERE user_id=$1',[id,on]);}
