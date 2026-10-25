@@ -12,6 +12,9 @@ export class AssistantStore {
  CREATE INDEX IF NOT EXISTS cb_line_jobs_conversation ON cb_line_jobs ((event->'source'->>'userId'),created_at);
  CREATE INDEX IF NOT EXISTS cb_notifications_pending ON cb_notifications(status,next_attempt);`);}
  async bindCameraGroup(hotel,groupId){const r=await this.pool.query('SELECT hotel,group_id FROM cb_camera_groups WHERE hotel=$1 OR group_id=$2',[hotel,groupId]);if(r.rows.some(x=>x.hotel===hotel&&x.group_id!==groupId))return 'conflict';if(r.rows.some(x=>x.group_id===groupId&&x.hotel!==hotel))return 'group_conflict';await this.pool.query('INSERT INTO cb_camera_groups(hotel,group_id) VALUES($1,$2) ON CONFLICT(hotel) DO UPDATE SET updated_at=now()',[hotel,groupId]);return 'ok';}
+ async unbindCameraGroup(hotel,groupId){const r=await this.pool.query('DELETE FROM cb_camera_groups WHERE hotel=$1 AND group_id=$2 RETURNING hotel',[hotel,groupId]);return r.rowCount>0;}
+ async cameraGroupNames(groupId){const r=await this.pool.query('SELECT hotel FROM cb_camera_groups WHERE group_id=$1 ORDER BY hotel',[groupId]);return r.rows.map(x=>x.hotel);}
+ async cameraGroup(hotel){const r=await this.pool.query('SELECT group_id FROM cb_camera_groups WHERE hotel=$1',[hotel]);return r.rows[0]?.group_id||null;}
  async member(id){return (await this.pool.query('SELECT * FROM cb_line_members WHERE user_id=$1',[id])).rows[0];}
  async register(id,name='',active=true,ms=Date.now()){await this.pool.query(`INSERT INTO cb_line_members(user_id,display_name,active,event_ms) VALUES($1,$2,$3,$4) ON CONFLICT(user_id) DO UPDATE SET display_name=CASE WHEN excluded.display_name<>'' THEN excluded.display_name ELSE cb_line_members.display_name END,active=excluded.active,event_ms=excluded.event_ms WHERE cb_line_members.event_ms<=excluded.event_ms`,[id,name,active,ms]);}
  async subscription(id,on){await this.pool.query('UPDATE cb_line_members SET reminders=$2 WHERE user_id=$1',[id,on]);}
