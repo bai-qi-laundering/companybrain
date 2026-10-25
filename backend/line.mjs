@@ -21,14 +21,26 @@ export function createLineService({store,config,ai=understand,mediaAI=describeMe
    if(e.source.userId!==GROUP_ADMIN_USER_ID)continue;
    if(e.type!=='message'||e.message?.type!=='text')continue;
    const command=String(e.message.text||'').replace(/[\u3000\s]+/g,'').trim();
-   const match=/^綁定([\p{L}\p{N}_-]{1,40})$/u.exec(command);
-   if(!match||typeof e.source.groupId!=='string'||!/^C[0-9a-f]{32}$/i.test(e.source.groupId))continue;
-   const name=match[1];
-   const result=await db.bindCameraGroup(name,e.source.groupId);
+   const bind=/^綁定([\p{L}\p{N}_-]{1,40})$/u.exec(command);
+   const unbind=/^解除綁定([\p{L}\p{N}_-]{1,40})$/u.exec(command);
+   const lookup=command==='查詢綁定'||command==='綁定查詢';
+   if(!bind&&!unbind&&!lookup)continue;
+   const groupId=e.source.groupId;
+   if(typeof groupId!=='string'||!/^C[0-9a-f]{32}$/i.test(groupId))continue;
+   let reply='';
+   if(bind){
+     const result=await db.bindCameraGroup(bind[1],groupId);
+     reply=result==='conflict'?'此飯店已綁定其他群組，請先到原群組解除綁定。':result==='group_conflict'?'此群組已綁定其他飯店，請先解除原綁定。':'✅ 已綁定：'+bind[1];
+   }else if(unbind){
+     const removed=await db.unbindCameraGroup(unbind[1],groupId);
+     reply=removed?'✅ 已解除綁定：'+unbind[1]:'此群組沒有該飯店的綁定紀錄。';
+   }else{
+     const names=await db.cameraGroupNames(groupId);
+     reply=names.length?'本群組已綁定：'+names.join('、'):'本群組尚未綁定飯店。';
+   }
    if(typeof e.replyToken==='string'){
-     const reply=result==='conflict'?'此名稱已綁定其他群組，請由管理員處理。':result==='group_conflict'?'此群組已綁定其他飯店，請由管理員處理。':'✅ 已綁定：'+name+'。往後本群組只接收監視器照片，不會啟動 AI 助理。';
      try{await callLine('reply',{replyToken:e.replyToken,messages:[{type:'text',text:reply}]});}
-     catch(err){console.error('LINE camera group bind reply failed:',err.name);}
+     catch(err){console.error('LINE camera group command reply failed:',err.name);}
    }
    continue;
   }const uid=e.source?.userId;if(e.source?.type!=='user'||typeof uid!=='string'||!permitted(uid))continue;if(!['message','follow','unfollow'].includes(e.type))continue;if(e.type==='unfollow'){await db.register(uid,'',false,e.timestamp||now().getTime());continue;}await db.register(uid,'',true,e.timestamp||now().getTime());if(typeof e.webhookEventId!=='string'||e.webhookEventId.length>100||typeof e.replyToken!=='string')continue;events.push(e);}await db.enqueue(events);return {ok:true};}
