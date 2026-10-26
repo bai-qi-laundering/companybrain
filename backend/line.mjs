@@ -9,12 +9,33 @@ export function stripTextUrls(text){return String(text||'').replace(/\[([^\]]+)\
 export function cleanLineReply(text){return String(text||'').split('\n').map(line=>/^查看照片：https?:\/\//.test(line)?line:stripTextUrls(line)).filter(Boolean).join('\n')}
 export function draftEntry(d,text,eventId){if(d.warnings?.length||!d.title||!['record','task'].includes(d.kind)||(d.kind==='record'&&(!d.orgId||!d.date)))return null;const common={id:'line-'+digest(eventId).slice(0,48),title:d.title,note:d.note||'',sourceText:text};return d.kind==='task'?{...common,org:d.orgId||null,dueDate:d.date||null,done:false}:{...common,org:d.orgId,date:d.date,endDate:d.endDate||null,relatedOrg:null,type:d.type,amount:d.amount??null};}
 export async function readLimited(response,max){const declared=Number(response.headers.get('content-length')||0);if(declared>max)throw new AppError(413,'附件太大，請縮短語音或縮小照片');let size=0,parts=[];for await(const b of response.body){size+=b.length;if(size>max)throw new AppError(413,'附件太大，請縮短語音或縮小照片');parts.push(Buffer.from(b));}return Buffer.concat(parts);}
+/** A group binding command is deliberately separate from AI chat. */
+export function garmentBindingCommand(text){
+ const normalized=String(text||'').normalize('NFKC').replace(/\\s+/g,'').trim();
+ return normalized==='綁定客衣群組'?'bind':normalized==='查詢客衣群組'?'status':null;
+}
 export function createLineService({store,config,ai=understand,mediaAI=describeMedia,answerAI=answerQuestion,fetchImpl=fetch,now=()=>new Date(),assistantStore=new AssistantStore(store)}){
  const db=assistantStore,allowed=new Set((config.lineAllowedUsers||'').split(',').map(x=>x.trim()).filter(Boolean));let working=false,notifying=false,timer,reminderTimer;
  const reminderTime='每天台灣時間'+Number(config.reminderHour??8)+'點';
  const enabled=()=>Boolean(config.lineSecret&&config.lineToken);
  const permitted=id=>config.lineAccess!=='allowlist'||allowed.has(id);
- async function webhook(req){if(!config.lineSecret)throw new AppError(503,'尚未設定 LINE Channel Secret');let size=0,parts=[];for await(const p of req){size+=p.length;if(size>1024*1024)throw new AppError(413,'LINE 訊息過大');parts.push(p);}const raw=Buffer.concat(parts);if(!validSignature(raw,req.headers['x-line-signature'],config.lineSecret))throw new AppError(401,'LINE 簽章不正確');let p;try{p=JSON.parse(raw.toString('utf8'));}catch{throw new AppError(400,'LINE 訊息格式不正確');}if(!Array.isArray(p.events)||p.events.length>100)throw new AppError(400,'LINE 事件格式不正確');if(p.events.length&&!enabled())throw new AppError(503,'請先設定 LINE Token');const events=[];for(const e of p.events){const uid=e.source?.userId;if(e.source?.type!=='user'||typeof uid!=='string'||!permitted(uid))continue;if(!['message','follow','unfollow'].includes(e.type))continue;if(e.type==='unfollow'){await db.register(uid,'',false,e.timestamp||now().getTime());continue;}await db.register(uid,'',true,e.timestamp||now().getTime());if(typeof e.webhookEventId!=='string'||e.webhookEventId.length>100||typeof e.replyToken!=='string')continue;events.push(e);}await db.enqueue(events);return {ok:true};}
+ async function webhook(req){if(!config.lineSecret)throw new AppError(503,'尚未設定 LINE Channel Secret');let size=0,parts=[];for await(const p of req){size+=p.length;if(size>1024*1024)throw new AppError(413,'LINE 訊息過大');parts.push(p);}const raw=Buffer.concat(parts);if(!validSignature(raw,req.headers['x-line-signature'],config.lineSecret))throw new AppError(401,'LINE 簽章不正確');let p;try{p=JSON.parse(raw.toString('utf8'));}catch{throw new AppError(400,'LINE 訊息格式不正確');}if(!Array.isArray(p.events)||p.events.length>100)throw new AppError(400,'LINE 事件格式不正確');if(p.events.length&&!enabled())throw new AppError(503,'請先設定 LINE Token');const events=[];for(const e of p.events){
+ // Only explicit group commands are handled here. Ordinary group chat stays out of CompanyBrain.
+ if(e.source?.type==='group'){
+   const uid=e.source.userId,groupId=e.source.groupId;
+   const command=e.type==='message'&&e.message?.type==='text'?garmentBindingCommand(e.message.text):null;
+   if(command&&typeof uid==='string'&&typeof groupId==='string'&&/^C[0-9a-f]{32}$/i.test(groupId)&&permitted(uid)){
+     const admins=new Set(String(config.garmentAdminUserIds||'').split(',').map(x=>x.trim()).filter(Boolean));
+     if(admins.has(uid)&&typeof e.webhookEventId==='string'&&e.webhookEventId.length<=100){
+       const result=await db.garmentGroupCommand(groupId,command,e.webhookEventId,uid);
+       if(result?.message){
+         await db.notify('garment-bind:'+e.webhookEventId,groupId,{messages:[{type:'text',text:result.message}]},randomUUID());
+       }
+     }
+   }
+   continue;
+ }
+ const uid=e.source?.userId;if(e.source?.type!=='user'||typeof uid!=='string'||!permitted(uid))continue;if(!['message','follow','unfollow'].includes(e.type))continue;if(e.type==='unfollow'){await db.register(uid,'',false,e.timestamp||now().getTime());continue;}await db.register(uid,'',true,e.timestamp||now().getTime());if(typeof e.webhookEventId!=='string'||e.webhookEventId.length>100||typeof e.replyToken!=='string')continue;events.push(e);}await db.enqueue(events);return {ok:true};}
  async function callLine(path,data,retryKey){const r=await fetchImpl('https://api.line.me/v2/bot/message/'+path,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+config.lineToken,...(retryKey?{'X-Line-Retry-Key':retryKey}:{})},body:JSON.stringify(data),signal:AbortSignal.timeout(10000)});return r;}
  async function pushJob(id,uid,text){await db.notify('reply:'+id,uid,{messages:[{type:'text',text:text.slice(0,4900)}]},randomUUID());}
  async function deliver(job,text){text=cleanLineReply(text);let r;try{r=await callLine('reply',{replyToken:job.event.replyToken,messages:[{type:'text',text:text.slice(0,4900)}]});}catch{await db.finish(job.id,'reply_failed');return;}if(r.ok){await db.finish(job.id);return;}if(r.status===400&&config.linePushFallback!==false){await pushJob(job.id,job.event.source.userId,text);await db.finish(job.id,'push_queued');}else{console.error('LINE reply status:',r.status);await db.finish(job.id,'reply_failed');}}
