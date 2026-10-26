@@ -54,7 +54,7 @@ export function createLineService({store,config,ai=understand,mediaAI=describeMe
   if(!groupId)throw new AppError(409,'飯店及客衣群組均未綁定');
   const messages=warning?[{type:'text',text:'⚠️ 未綁定飯店：'+destination.hotel+'，請管理員檢查 QR Code 與群組設定。'},...cameraImageMessages(url,destination.label)]:cameraImageMessages(url,destination.label);
   const response=await callLine('push',{to:groupId,messages},id);
-  if(!response.ok)throw new AppError(502,'LINE 照片傳送失敗：HTTP '+response.status);
+  if(!response.ok&&!(response.status===409&&response.headers.get('x-line-accepted-request-id')))throw new AppError(502,'LINE 照片傳送失敗：HTTP '+response.status);
   return {ok:true,hotel:destination.hotel,warning};
  }
  async function callLine(path,data,retryKey){const r=await fetchImpl('https://api.line.me/v2/bot/message/'+path,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+config.lineToken,...(retryKey?{'X-Line-Retry-Key':retryKey}:{})},body:JSON.stringify(data),signal:AbortSignal.timeout(10000)});return r;}
