@@ -5,11 +5,32 @@ export class AssistantStore {
  constructor(store){this.store=store;this.pool=store.pool;}
  async init(){await this.pool.query(`
  CREATE TABLE IF NOT EXISTS cb_line_jobs(id text PRIMARY KEY,event jsonb NOT NULL,status text NOT NULL DEFAULT 'pending',lease_until timestamptz,reply_text text,created_at timestamptz NOT NULL DEFAULT now());
+ CREATE TABLE IF NOT EXISTS cb_garment_group_binding(kind text PRIMARY KEY,group_id text NOT NULL,updated_by text NOT NULL,updated_at timestamptz NOT NULL DEFAULT now());
+ CREATE TABLE IF NOT EXISTS cb_garment_group_commands(event_id text PRIMARY KEY,result text NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
  CREATE TABLE IF NOT EXISTS cb_line_members(user_id text PRIMARY KEY,display_name text NOT NULL DEFAULT '',active boolean NOT NULL DEFAULT true,reminders boolean NOT NULL DEFAULT true,event_ms bigint NOT NULL DEFAULT 0);
  CREATE TABLE IF NOT EXISTS cb_media(id text PRIMARY KEY,mime text NOT NULL,name text NOT NULL,body bytea NOT NULL,owner_id text NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
  CREATE TABLE IF NOT EXISTS cb_notifications(id text PRIMARY KEY,user_id text NOT NULL,retry_key text NOT NULL,payload jsonb NOT NULL,status text NOT NULL DEFAULT 'pending',attempts integer NOT NULL DEFAULT 0,lease_until timestamptz,next_attempt timestamptz NOT NULL DEFAULT now(),created_at timestamptz NOT NULL DEFAULT now());
  CREATE INDEX IF NOT EXISTS cb_line_jobs_conversation ON cb_line_jobs ((event->'source'->>'userId'),created_at);
  CREATE INDEX IF NOT EXISTS cb_notifications_pending ON cb_notifications(status,next_attempt);`);}
+ async garmentGroupCommand(groupId,command,eventId,userId){
+   const client=await this.pool.connect();
+   try{
+     await client.query('BEGIN');
+     const existing=await client.query('SELECT result FROM cb_garment_group_commands WHERE event_id=$1 FOR UPDATE',[eventId]);
+     if(existing.rows.length){await client.query('COMMIT');return null;}
+     let message;
+     if(command==='bind'){
+       await client.query(`INSERT INTO cb_garment_group_binding(kind,group_id,updated_by,updated_at) VALUES('garment', $1, $2,now()) ON CONFLICT(kind) DO UPDATE SET group_id=excluded.group_id,updated_by=excluded.updated_by,updated_at=now()`,[groupId,userId]);
+       message='✅ 已綁定客衣通知群組。後續監視器通知將送到這個群組。';
+     }else{
+       const saved=await client.query("SELECT group_id FROM cb_garment_group_binding WHERE kind='garment'");
+       message=saved.rows[0]?.group_id===groupId?'✅ 本群組已綁定為客衣通知群組。':'⚠️ 本群組目前不是客衣通知群組。';
+     }
+     await client.query('INSERT INTO cb_garment_group_commands(event_id,result) VALUES($1,$2)',[eventId,message]);
+     await client.query('COMMIT');
+     return {message};
+   }catch(error){await client.query('ROLLBACK');throw error;}finally{client.release();}
+ }
  async member(id){return (await this.pool.query('SELECT * FROM cb_line_members WHERE user_id=$1',[id])).rows[0];}
  async register(id,name='',active=true,ms=Date.now()){await this.pool.query(`INSERT INTO cb_line_members(user_id,display_name,active,event_ms) VALUES($1,$2,$3,$4) ON CONFLICT(user_id) DO UPDATE SET display_name=CASE WHEN excluded.display_name<>'' THEN excluded.display_name ELSE cb_line_members.display_name END,active=excluded.active,event_ms=excluded.event_ms WHERE cb_line_members.event_ms<=excluded.event_ms`,[id,name,active,ms]);}
  async subscription(id,on){await this.pool.query('UPDATE cb_line_members SET reminders=$2 WHERE user_id=$1',[id,on]);}
