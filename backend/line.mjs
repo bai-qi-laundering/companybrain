@@ -11,7 +11,7 @@ export function draftEntry(d,text,eventId){if(d.warnings?.length||!d.title||!['r
 export async function readLimited(response,max){const declared=Number(response.headers.get('content-length')||0);if(declared>max)throw new AppError(413,'附件太大，請縮短語音或縮小照片');let size=0,parts=[];for await(const b of response.body){size+=b.length;if(size>max)throw new AppError(413,'附件太大，請縮短語音或縮小照片');parts.push(Buffer.from(b));}return Buffer.concat(parts);}
 /** A group binding command is deliberately separate from AI chat. */
 export function garmentBindingCommand(text){
- const normalized=String(text||'').normalize('NFKC').replace(/\\s+/g,'').trim();
+ const normalized=String(text||'').normalize('NFKC').replace(/\s+/g,'').trim();
  return normalized==='綁定客衣群組'?'bind':normalized==='查詢客衣群組'?'status':null;
 }
 export function createLineService({store,config,ai=understand,mediaAI=describeMedia,answerAI=answerQuestion,fetchImpl=fetch,now=()=>new Date(),assistantStore=new AssistantStore(store)}){
