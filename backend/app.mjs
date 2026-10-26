@@ -22,12 +22,19 @@ export function createHandler({store,config,htmlPath,line,ai=extractDraft,queryA
   if(!/^[A-Za-z0-9+/]+={0,2}$/.test(base64)||base64.length>3500000)throw new AppError(400,'照片格式不正確');
   const photo=Buffer.from(base64,'base64');
   if(photo.length<100||photo.length>2500000||photo[0]!==255||photo[1]!==216||photo.at(-2)!==255||photo.at(-1)!==217)throw new AppError(400,'僅支援 2.5MB 以下 JPEG');
-  const id=randomUUID(),expiry=Math.floor(Date.now()/1000)+86400;
+  const id=String(data.photoId||'');
+  if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id))throw new AppError(400,'缺少有效照片 ID');
+  const saved=await line.db.saveCameraPhoto(id,photo,label);
+  if(saved.status==='sent')return send(200,{ok:true,duplicate:true,photoId:id});
+  if(!await line.db.claimCameraPhoto(id))throw new AppError(503,'照片正在傳送，請稍後重試');
+  const expiry=Number(saved.expiry);
   const signature=createHmac('sha256',config.cameraLinkKey).update(id+':'+expiry).digest('hex');
   const url=config.origin+'/api/camera/image/'+id+'?expires='+expiry+'&sig='+signature;
-  await line.db.saveCameraPhoto(id,photo);
-  const result=await line.sendCameraPhoto(label,url,id);
-  return send(200,{...result,photoId:id});
+  try{
+   const result=await line.sendCameraPhoto(label,url,id);
+   await line.db.finishCameraPhoto(id,true);
+   return send(200,{...result,photoId:id});
+  }catch(error){await line.db.finishCameraPhoto(id,false);throw error;}
  }
  if(req.method==='GET'&&path.startsWith('/api/camera/image/')){
   if(!config.cameraLinkKey)throw new AppError(503,'相機金鑰尚未設定');
