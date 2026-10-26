@@ -1,4 +1,5 @@
 import http from 'node:http';
+import {randomBytes} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {Store} from './store.mjs';
 import {createHandler} from './app.mjs';
@@ -9,8 +10,8 @@ if(!env.PGPASSWORD||env.PGPASSWORD.startsWith('CHANGE_ME')||env.PGPASSWORD.lengt
 const origin=new URL(env.PUBLIC_ORIGIN).origin,secure=env.COOKIE_SECURE!=='false';
 if(secure&&!origin.startsWith('https://'))throw new Error('Secure mode requires an HTTPS PUBLIC_ORIGIN');
 const store=new Store();await store.init(env.ADMIN_USER||'admin1',env.ADMIN_PASSWORD);
-const config={origin,secure,key:env.GEMINI_API_KEY||'',model:env.GEMINI_MODEL||'gemini-3.1-flash-lite',lineSecret:env.LINE_CHANNEL_SECRET||'',lineToken:env.LINE_CHANNEL_ACCESS_TOKEN||'',lineAllowedUsers:env.LINE_ALLOWED_USER_IDS||'',lineAccess:env.LINE_ACCESS_MODE||'friends',lineReminders:env.LINE_REMINDERS_ENABLED!=='false',linePushFallback:env.LINE_PUSH_FALLBACK!=='false',reminderHour:Number(env.LINE_REMINDER_HOUR||8)};
+const config={origin,secure,key:env.GEMINI_API_KEY||'',model:env.GEMINI_MODEL||'gemini-3.1-flash-lite',lineSecret:env.LINE_CHANNEL_SECRET||'',lineToken:env.LINE_CHANNEL_ACCESS_TOKEN||'',lineAllowedUsers:env.LINE_ALLOWED_USER_IDS||'',lineAccess:env.LINE_ACCESS_MODE||'friends',lineReminders:env.LINE_REMINDERS_ENABLED!=='false',linePushFallback:env.LINE_PUSH_FALLBACK!=='false',reminderHour:Number(env.LINE_REMINDER_HOUR||8),cameraApiKey:env.CAMERA_API_KEY||'',cameraLinkKey:env.CAMERA_LINK_KEY||''};
 if(!Number.isInteger(config.reminderHour)||config.reminderHour<0||config.reminderHour>23)throw new Error('LINE_REMINDER_HOUR must be 0..23');
-const line=createLineService({store,config});await line.init();line.start();
+const line=createLineService({store,config});await line.init();line.start();setInterval(()=>void line.db.purgeCameraPhotos().catch(err=>console.error('Camera photo cleanup failed:',err.name)),3600000).unref();
 const server=http.createServer(createHandler({store,config,line,htmlPath:fileURLToPath(new URL('./public/index.html',import.meta.url))}));
 server.requestTimeout=60000;server.headersTimeout=15000;server.listen(Number(env.PORT||8788),'0.0.0.0',()=>console.log('companybrain-api ready on port '+(env.PORT||8788)));
