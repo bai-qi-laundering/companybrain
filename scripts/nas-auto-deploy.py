@@ -17,7 +17,7 @@ REPO = "bai-qi-laundering/companybrain"
 WORKFLOW = "companybrain-ci.yml"
 ROOT = Path(__file__).resolve().parent.parent
 STATE = ROOT / ".companybrain-deployed-sha"
-FILES = ("backend/app.mjs", "backend/assistant.mjs", "backend/assistant-store.mjs",
+FILES = ("backend/garment-notify.mjs", "backend/app.mjs", "backend/assistant.mjs", "backend/assistant-store.mjs",
          "backend/domain.mjs", "backend/gemini.mjs", "backend/line.mjs",
          "backend/organizations.mjs", "backend/security.mjs",
          "backend/server.mjs", "backend/store.mjs", "backend/tasks.mjs",
@@ -28,6 +28,7 @@ OVERRIDE_TEXT = """services:
   app:
     environment:
       GARMENT_ADMIN_LINE_USER_IDS: ${GARMENT_ADMIN_LINE_USER_IDS:-}
+      GARMENT_NOTIFY_TOKEN: ${GARMENT_NOTIFY_TOKEN:-}
 """
 
 def api(url):
