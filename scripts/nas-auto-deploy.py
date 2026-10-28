@@ -64,6 +64,21 @@ def wait_healthy(seconds=120):
         time.sleep(5)
     return False
 
+def replace_file(source, destination):
+    """Atomically replace via sibling rename, not writing root-owned inode."""
+    destination = Path(destination)
+    fd, temporary = tempfile.mkstemp(prefix=".companybrain-", dir=str(destination.parent))
+    try:
+        with os.fdopen(fd, "wb") as out, open(source, "rb") as inp:
+            shutil.copyfileobj(inp, out)
+            out.flush()
+            os.fsync(out.fileno())
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
 def main():
     if not (ROOT / "settings.env").is_file() or not (ROOT / "compose.yaml").is_file():
         raise RuntimeError("settings.env or compose.yaml missing; aborting")
@@ -120,7 +135,7 @@ def main():
             for name in FILES:
                 dest = ROOT / name
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(staged / name, dest)
+                replace_file(staged / name, dest)
             OVERRIDE.write_text(OVERRIDE_TEXT)
             compose("config", "-q")
             compose("up", "-d", "--build", "--no-deps", "app")
@@ -130,14 +145,20 @@ def main():
             print("Deployment healthy:", head[:12])
         except Exception:
             print("Deploy failed; restoring application files", file=sys.stderr)
+            restore_errors = []
             for name in FILES:
                 dest = ROOT / name
-                if previous[name]:
-                    shutil.copy2(backup / name, dest)
-                elif dest.exists():
-                    dest.unlink()
+                try:
+                    if previous[name]:
+                        replace_file(backup / name, dest)
+                    elif dest.exists():
+                        dest.unlink()
+                except Exception as restore_err:
+                    restore_errors.append(f"{name}: {restore_err}")
+            if restore_errors:
+                print("ROLLBACK FILE ERRORS:", "; ".join(restore_errors), file=sys.stderr)
             if override_existed:
-                shutil.copy2(backup / "compose.autodeploy.yaml", OVERRIDE)
+                replace_file(backup / "compose.autodeploy.yaml", OVERRIDE)
             elif OVERRIDE.exists():
                 OVERRIDE.unlink()
             try:
