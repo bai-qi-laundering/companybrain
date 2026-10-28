@@ -1,0 +1,29 @@
+name: CompanyBrain CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci
+      - name: Run all tests
+        working-directory: backend
+        run: npm test
+      - name: Validate Docker Compose
+        run: |
+          DB_PASSWORD=dummy ADMIN_PASSWORD=dummy PUBLIC_ORIGIN=https://example.invalid docker compose config -q
+      - name: Build application image
+        run: docker build -f backend/Dockerfile -t companybrain-ci:local .
