@@ -86,9 +86,9 @@ test('LINE sends links only for photo records; text, tasks, audio, help, queries
  await f.send('expiry','secretary',{type:'text',text:'查看到期'});assert(!last().includes('https://'));
 });
 
-test('reminders include only incomplete today and tomorrow tasks, with unchanged 30-day contracts across year boundaries',()=>{
+test('reminders include only incomplete today and tomorrow tasks, with open overdue and 30-day contracts across year boundaries',()=>{
  const day='2026-12-31',state={organizations:[{id:'today-contract',name:'當日到期',contractEndDate:day},{id:'limit',name:'三十天',contractEndDate:'2027-01-30'},{id:'future',name:'三十一天',contractEndDate:'2027-01-31'},{id:'old',name:'舊合約',contractEndDate:'2026-12-30'}],records:[],tasks:[{id:'old',title:'逾期',dueDate:'2026-12-30',done:false},{id:'today',title:'今天工作',dueDate:day,done:false},{id:'tomorrow',title:'明天工作',dueDate:'2027-01-01',done:false},{id:'later',title:'後天',dueDate:'2027-01-02',done:false},{id:'done',title:'已完成',dueDate:day,done:true},{id:'none',title:'未定日期',dueDate:null,done:false}]};
- const s=expirySummary(state,day);assert.deepEqual(s.tasks.map(t=>t.id),['today','tomorrow']);assert.deepEqual(s.contracts.map(c=>c.id),['today-contract','limit']);const text=expiryText(s);assert(text.includes('今日到期｜2026-12-31｜今天工作'));assert(text.includes('明日到期｜2027-01-01｜明天工作'));assert(!text.includes('逾期'));assert(!text.includes('後天'));assert.equal(expirySummary({...state,tasks:[]},day).contracts.length,2);
+ const s=expirySummary(state,day);assert.deepEqual(s.tasks.map(t=>t.id),['today','tomorrow']);assert.deepEqual(s.contracts.map(c=>c.id),['today-contract','limit','old']);const text=expiryText(s);assert(text.includes('今日到期｜2026-12-31｜今天工作'));assert(text.includes('明日到期｜2027-01-01｜明天工作'));assert(!text.includes('逾期'));assert(!text.includes('後天'));assert.equal(expirySummary({...state,tasks:[]},day).contracts.length,3);
  assert(expiryText(expirySummary({organizations:[],tasks:[],records:[]},day)).includes('今天／明天'));
 });
 
@@ -152,4 +152,30 @@ test('short AI reference labels map back to real source IDs without discarding a
  const state={organizations:[],records:[{id:'line-long-real-record-id',date:'2026-11-07',endDate:'2026-11-09',title:'越南出差',note:'11/9回國',type:'出差／展覽'}],tasks:[]};let sent;
  const r=await answerQuestion({text:'幾號回來',state,plan:{kind:'query',keywords:['越南'],orgIds:[],warnings:[]},key:'key',model:'model',origin:'https://company.test',fetchImpl:async(u,o)=>{sent=JSON.parse(JSON.parse(o.body).contents[0].parts[0].text);return Response.json({candidates:[{content:{parts:[{text:JSON.stringify({answer:'資料庫紀錄\n越南出差於2026/11/9回國。',sourceIds:['R1']})}]}}]})}});
  assert.equal(sent.evidence.items[0].ref,'R1');assert(r.answer.includes('2026/11/9回國'));assert(!r.answer.includes('候選'));assert.equal(r.sources[0].id,'line-long-real-record-id');
+});
+
+test('sent and non-renewing contracts stop for their own expiry only, including legacy date ranges',()=>{
+ const day='2026-11-12',endDate='2026-11-11',base={id:'hotel',name:'飯店',contract:'2025/11/12–2026/11/11'};
+ for(const status of ['quote-sent','not-renewing']){
+  const o={...base,renewal:{endDate,status,date:day}};
+  assert.equal(expirySummary({organizations:[o],tasks:[]},day).contracts.length,0);
+  const next=expirySummary({organizations:[{...o,contractEndDate:'2027-11-11'}],tasks:[]},'2027-10-12');
+  assert.equal(next.contracts[0].days,30);
+ }
+ assert.match(expiryText(expirySummary({organizations:[base],tasks:[]},day)),/已到期｜續約報價未送出/);
+});
+
+test('a queued daily retry does not send a contract marked sent before delivery',async t=>{
+ const f=await fixture(t);
+ await f.send('follow','secretary',undefined,'follow');
+ let state=await f.store.read();
+ await f.store.save(state.revision,{...state,organizations:[{...state.organizations[0],contractEndDate:'2026-10-08'}]},'test');
+ f.setPushStatus(503);await f.line.reminderTick();assert.equal(f.pushes.length,1);
+ assert.match(f.pushes[0].body.messages[0].text,/已到期｜續約報價未送出/);
+ state=await f.store.read();
+ await f.store.save(state.revision,{...state,organizations:[{...state.organizations[0],renewal:{endDate:'2026-10-08',date:'2026-10-09',status:'quote-sent'}}]},'test');
+ await f.pool.query("UPDATE cb_notifications SET next_attempt=now()-interval '1 minute' WHERE status='pending'");
+ f.setPushStatus(200);await f.line.reminderTick();assert.equal(f.pushes.length,1);
+ await f.send('expiry','secretary',{type:'text',text:'查看到期'});
+ assert.match(f.messages.at(-1).messages[0].text,/目前沒有/);
 });

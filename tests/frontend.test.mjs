@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import vm from 'node:vm';import {readFile} from 'node:fs/promises';import {webcrypto} from 'node:crypto';import {initialState} from '../backend/domain.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import vm from 'node:vm';import {readFile} from 'node:fs/promises';import {webcrypto} from 'node:crypto';import {initialState,validateState} from '../backend/domain.mjs';
 const script=(await readFile(new URL('../index.html',import.meta.url),'utf8')).match(/<script>([\s\S]*?)<\/script>/)[1];
 function sandbox(nas){const nodes={},persisted={};let conflict=false,state={revision:0,...structuredClone(initialState)};function element(){return {value:'',open:false,innerHTML:'',textContent:'',hidden:true,elements:new Proxy({}, {get:(o,k)=>k==='namedItem'?name=>o[name]??=element():o[k]??=element()}),classList:{toggle(){}},addEventListener(type,fn){this.listeners??={};this.listeners[type]=fn},querySelector(selector){return selector==='[type="submit"]'?this.submit??=element():null},reset(){},focus(){},reportValidity(){return true},setCustomValidity(){},showModal(){this.open=true},close(){this.open=false}}}const $=selector=>{if(selector.startsWith('meta['))return nas?{}:null;if(selector==='dialog[open]')return null;return nodes[selector]??=element()};const calls=[];const context={document:{querySelector:$,querySelectorAll:()=>[],addEventListener(){}},localStorage:{getItem:k=>persisted[k]||null,setItem:(k,v)=>persisted[k]=v},Intl,Date,console,AbortController,URLSearchParams,location:{search:''},crypto:webcrypto,setTimeout:()=>1,clearTimeout(){},setInterval:()=>1,URL,Blob,window:{scrollTo(){}},alert(){},confirm:()=>true,fetch:async(path,options)=>{calls.push({path,options});if(path==='/api/session')return {ok:true,json:async()=>({csrf:'csrf',username:'admin1'})};if(path==='/api/state'){if(options.method==='PUT'){if(conflict)return {ok:false,status:409,json:async()=>({error:'版本衝突'})};state={...JSON.parse(options.body),revision:state.revision+1}}return {ok:true,json:async()=>structuredClone(state)}}throw new Error(path)},FormData:class{constructor(f){this.f=f}get(k){return this.f.data[k]}}};vm.createContext(context);vm.runInContext(script,context);return {$,context,calls,persisted,setConflict:()=>conflict=true,setState:value=>state=value,read:()=>state}}
 test('NAS boot loads real data and writes only after acknowledgement',async()=>{const c=sandbox(true);await new Promise(r=>setTimeout(r,0));assert.equal(vm.runInContext('nasReady',c.context),true);assert(!c.$('#content').innerHTML.includes('準備合約續約'));assert(!c.$('#content').innerHTML.includes('class="org"'));const f=c.$('#task-form');f.data={title:'測試待辦',dueDate:'2026-10-07',org:'baiqi',note:'測試'};await f.onsubmit({preventDefault(){},target:f});assert.equal(c.read().tasks.length,1);assert.equal(c.read().records.length,1);assert.equal(c.read().records[0].linkedTaskId,c.read().tasks[0].id);assert.equal(c.read().revision,1);assert.equal(c.calls.at(-1).options.headers['X-CSRF-Token'],'csrf');assert.equal(Object.keys(c.persisted).length,0);c.setConflict();f.data.title='不應寫入';await f.onsubmit({preventDefault(){},target:f});assert.equal(c.read().tasks.length,1);assert(c.$('#sync-error').textContent.includes('衝突'));});
@@ -47,4 +47,28 @@ test('record deletion confirms, removes only the selected record and preserves u
 test('directory categories use a dropdown and explicit new-category input; aliases persist',async()=>{
  const c=sandbox(true);await new Promise(r=>setTimeout(r,0));vm.runInContext("openOrg('baiqi')",c.context);const f=c.$('#org-form');assert(f.elements.kind.innerHTML.includes('＋ 新增分類'));f.elements.kind.value='__custom__';vm.runInContext('updateCustomKind()',c.context);assert.equal(c.$('#custom-kind-label').hidden,false);assert.equal(f.elements.customKind.required,true);
  f.data={name:'百麒',kind:'__custom__',customKind:'物流夥伴',aliases:'百麒公司、百麒國際',contact:'',role:'',manager:'',contract:'',memo:'',prices:''};await f.onsubmit({preventDefault(){},target:f});assert.equal(c.read().organizations[0].kind,'物流夥伴');assert.deepEqual(c.read().organizations[0].aliases,['百麒公司','百麒國際']);vm.runInContext("openOrg('baiqi')",c.context);assert(f.elements.kind.innerHTML.includes('物流夥伴'));assert.equal(f.elements.kind.value,'物流夥伴');assert.equal(c.$('#custom-kind-label').hidden,true);assert.equal(f.elements.aliases.value,'百麒公司、百麒國際');
+});
+
+
+test('renewal action saves the date-bound status and a history record together and ignores repeat clicks',async()=>{
+ const c=sandbox(true),run=code=>vm.runInContext(code,c.context);
+ const initial=structuredClone(initialState);
+ initial.organizations.push({...initial.organizations[0],id:'hotel',name:'飯店',contract:'2025/11/12–2026/11/11'});
+ c.setState({revision:0,...initial});
+ await new Promise(r=>setTimeout(r,0));
+ run("selected='hotel'; tab='合約與價格'; render()");
+ assert.match(c.$('#content').innerHTML,/2026-11-11/);
+ assert.match(c.$('#content').innerHTML,/報價已送出/);
+ await run("updateRenewal('hotel','2026-11-11','quote-sent')");
+ await run("updateRenewal('hotel','2026-11-11','quote-sent')");
+ const saved=c.read();validateState(saved);
+ assert.equal(saved.revision,1);
+ assert.equal(saved.records.length,1);
+ assert.equal(saved.records[0].title,'已送出續約報價');
+ assert.equal(saved.records[0].date,saved.organizations[1].renewal.date);
+ assert.equal(saved.organizations[1].contract,initial.organizations[1].contract);
+ assert.match(c.$('#content').innerHTML,/已送報價，待續約/);
+ await run("updateRenewal('hotel','2026-11-11','reset')");
+ assert.equal(c.read().organizations[1].renewal,undefined);
+ assert.match(c.$('#content').innerHTML,/續約報價未送出/);
 });
