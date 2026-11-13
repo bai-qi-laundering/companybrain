@@ -298,6 +298,9 @@ test('salary import preview compares fixture rows and confirm writes only new an
     assert.equal(preview.counts.new, 1);
     assert.equal(preview.counts.same, 1);
     assert.equal(preview.counts.unmatched, 1);
+    assert.equal(preview.summaryCount, 4);
+    assert.equal(preview.activeEmployeeCount, 3);
+    assert.ok(preview.warnings.some((w) => w.includes('混了多個計算月份')));
     const confirmed = await (await ctx.api('/api/hr/salaries/import/confirm', 'POST', {month: '2026-10', rows: preview.rows})).json();
     assert.equal(confirmed.saved, 2);
     const state = await (await ctx.api('/api/hr/state')).json();
@@ -318,6 +321,33 @@ test('salary import preview compares fixture rows and confirm writes only new an
   }
 });
 
+
+test('salary import matches office O prefix to sheet 0 without renaming stored id', async () => {
+  const prev = process.env.HR_SALARY_SHEET_FIXTURE;
+  process.env.HR_SALARY_SHEET_FIXTURE = path.join(root, 'tests/fixtures/salary-sheet.csv');
+  const ctx = await start();
+  try {
+    await ctx.api('/api/hr/employees', 'POST', {id: 'O002', name: 'NANA', department: '辦公室', arrivalDate: '2020-01-01'});
+    const preview = await (await ctx.api('/api/hr/salaries/import/preview', 'POST', {month: '2026-10'})).json();
+    const row = preview.rows.find((r) => r.employeeId === 'O002' || r.sheetId === 'O002' || r.sheetId === '0002');
+    assert.ok(row);
+    assert.equal(row.employeeId, 'O002');
+    assert.equal(row.status, 'new');
+    const confirmed = await (await ctx.api('/api/hr/salaries/import/confirm', 'POST', {month: '2026-10', rows: preview.rows})).json();
+    assert.equal(confirmed.saved, 1);
+    const state = await (await ctx.api('/api/hr/state')).json();
+    const pay = state.salaries.find((s) => s.month === '2026-10' && s.employeeId === 'O002');
+    assert.equal(pay.netPay, 44571);
+    assert.equal(state.employees.some((e) => e.id === '0002'), false);
+    assert.ok(state.employees.some((e) => e.id === 'O002'));
+  } finally {
+    if (prev == null) delete process.env.HR_SALARY_SHEET_FIXTURE;
+    else process.env.HR_SALARY_SHEET_FIXTURE = prev;
+    await new Promise((r) => ctx.server.close(r));
+    await ctx.db.close();
+    await rm(ctx.docRoot, {recursive: true, force: true});
+  }
+});
 test('salary import degrades with setup instructions when not configured', async () => {
   const prevFix = process.env.HR_SALARY_SHEET_FIXTURE;
   const prevSa = process.env.GOOGLE_SA_JSON;

@@ -177,7 +177,7 @@ export async function handleHr(req, res, {hr, session, method, path: p, config =
     const month = body.month || parsed.months.at(-1) || '';
     const state = await hr.state();
     const compared = compareSalaryRows(parsed.rows, {employees: state.employees, salaries: state.salaries, month});
-    send(res, 200, {month: compared.month, months: parsed.months, columns: parsed.columns, headers: parsed.headers, rows: compared.rows, counts: compared.counts, skipped: parsed.skipped, configured: true});
+    send(res, 200, {month: compared.month, months: parsed.months, columns: parsed.columns, headers: parsed.headers, rows: compared.rows, counts: compared.counts, skipped: parsed.skipped, configured: true, summaryCount: compared.summaryCount, activeEmployeeCount: compared.activeEmployeeCount, warnings: compared.warnings});
     return true;
   }
   if (method === 'POST' && pathname === '/api/hr/salaries/import/confirm') {
@@ -201,7 +201,7 @@ export async function handleHr(req, res, {hr, session, method, path: p, config =
     const written = [];
     for (const r of rows) {
       const status = r.status || (empIds.has(r.employeeId) ? (existing.find((s) => s.employeeId === r.employeeId) ? 'changed' : 'new') : 'unmatched');
-      if (status === 'unmatched' || status === 'same') { skipped += 1; continue; }
+      if (status === 'unmatched' || status === 'same' || status === 'ambiguous') { skipped += 1; continue; }
       if (!empIds.has(r.employeeId)) { skipped += 1; continue; }
       const cur = existing.find((s) => s.employeeId === r.employeeId);
       const notes = cur?.notes || '由薪資計算明細匯入';

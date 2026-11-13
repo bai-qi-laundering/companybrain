@@ -784,27 +784,33 @@
   }
 
 
-  const STATUS_LABEL = {new: '新增', changed: '金額變更', same: '相同', unmatched: '對不到員工'};
+  const STATUS_LABEL = {new: '新增', changed: '金額變更', same: '相同', unmatched: '對不到員工', ambiguous: '編號對到多人'};
+  const baiqiSalaryId = (v) => String(v || '').trim().toUpperCase().replace(/O/g, '0');
   function demoSalaryPreview(body) {
     const month = body.month || '2026-10';
     const sample = [
       {month, employeeId: 'EMP-014', name: '陳志明', netPay: 43000},
       {month, employeeId: 'EMP-001', name: '黃淑芬', netPay: 38000},
       {month, employeeId: 'EMP-015', name: '張偉誠', netPay: 35000},
-      {month, employeeId: 'O002', name: 'NANA', netPay: 44571},
+      {month, employeeId: '0002', name: 'NANA', netPay: 44571},
     ];
     const rows = sample.map((r) => {
-      const emp = state.employees.find((e) => e.id === r.employeeId);
+      const matches = (state.employees || []).filter((e) => baiqiSalaryId(e.id) === baiqiSalaryId(r.employeeId));
+      const emp = matches.length === 1 ? matches[0] : null;
       const existing = emp ? (state.salaries || []).find((s) => s.employeeId === emp.id && s.month === r.month) : null;
       let status = 'unmatched';
-      if (emp && !existing) status = 'new';
+      if (matches.length > 1) status = 'ambiguous';
+      else if (emp && !existing) status = 'new';
       else if (emp && Number(existing.netPay) !== Number(r.netPay)) status = 'changed';
       else if (emp) status = 'same';
-      return {month: r.month, employeeId: r.employeeId, name: emp?.name || r.name, netPay: r.netPay, existingPay: existing ? Number(existing.netPay) : null, status};
+      return {month: r.month, employeeId: emp?.id || r.employeeId, sheetId: r.employeeId, name: emp?.name || r.name, netPay: r.netPay, existingPay: existing ? Number(existing.netPay) : null, status};
     });
-    const counts = {new: 0, changed: 0, same: 0, unmatched: 0};
+    const counts = {new: 0, changed: 0, same: 0, unmatched: 0, ambiguous: 0};
     for (const r of rows) counts[r.status] += 1;
-    return {month, months: [month], columns: {month: '計算月份', employeeId: '員工編號', name: '員工姓名', amount: '實領薪資'}, headers: ['計算月份', '員工編號', '員工姓名', '實領薪資'], rows, counts, skipped: 2, configured: true};
+    const today = new Date().toLocaleDateString('en-CA', {timeZone: 'Asia/Taipei'});
+    const activeEmployeeCount = (state.employees || []).filter((e) => (!e.arrivalDate || e.arrivalDate <= today) && (!e.departureDate || e.departureDate >= today)).length;
+    const warnings = rows.length < activeEmployeeCount ? ['本月彙總列有 ' + rows.length + ' 筆，少於目前在職員工 ' + activeEmployeeCount + ' 人。試算表可能只算了部分部門或個別員工（每次計算會整表覆寫）。確認後只會更新對得到的人，其他人的薪資不會被清空。'] : [];
+    return {month, months: [month], columns: {month: '計算月份', employeeId: '員工編號', name: '員工姓名', amount: '實領薪資'}, headers: ['計算月份', '員工編號', '員工姓名', '實領薪資'], rows, counts, skipped: 2, configured: true, summaryCount: rows.length, activeEmployeeCount, warnings};
   }
   async function openSalaryImport(root) {
     if (!$('#hr-dialogs', root)) root.insertAdjacentHTML('beforeend', '<div id="hr-dialogs"></div>');
@@ -828,7 +834,9 @@
         const actionable = rows.filter((r) => r.status === 'new' || r.status === 'changed');
         host.innerHTML = `<dialog class="hr-dlg wide" open><h2>匯入本月薪資</h2>
           <div class="dlg-body">
-            <p class="muted">只帶入員工彙總列的實領薪資，每日打卡明細會略過。對得到的「新增／金額變更」要按確認才會寫入，金額相同或對不到員工的不會改現有資料。</p>
+            <p class="muted">只帶入彙總列的實領薪資（計算月份為 yyyy/mm，員工編號不是打卡列或「—」）。對得到的「新增／金額變更」要按確認才會寫入；金額相同、對不到員工、或編號對到多人的，不會改現有資料。系統內的員工編號不會被改寫。</p>
+            <p>計算月份 <strong>${esc(preview.month || '')}</strong>：彙總列 ${preview.summaryCount ?? rows.length} 筆，目前在職員工 ${preview.activeEmployeeCount ?? '—'} 人。${preview.skipped ? '另略過 ' + preview.skipped + ' 列。' : ''}</p>
+            ${(preview.warnings || []).map((w) => `<p class="import-warning">${esc(w)}</p>`).join('')}
             <div class="inline-grid">
               <div class="field"><span>月份</span><select name="month">${months.map((m) => `<option ${m === preview.month ? 'selected' : ''}>${esc(m)}</option>`).join('') || `<option>${esc(preview.month || '')}</option>`}</select></div>
               <div class="field"><span>月份欄</span><input name="colMonth" value="${esc(columns.month || '')}"></div>
@@ -836,9 +844,9 @@
               <div class="field"><span>姓名欄</span><input name="colName" value="${esc(columns.name || '')}"></div>
               <div class="field"><span>金額欄</span><input name="colAmount" value="${esc(columns.amount || '')}"></div>
             </div>
-            <p class="muted">新增 ${counts.new || 0}、金額變更 ${counts.changed || 0}、相同 ${counts.same || 0}、對不到員工 ${counts.unmatched || 0}${preview.skipped ? '、略過 ' + preview.skipped + ' 列' : ''}。</p>
+            <p class="muted">新增 ${counts.new || 0}、金額變更 ${counts.changed || 0}、相同 ${counts.same || 0}、對不到員工 ${counts.unmatched || 0}${counts.ambiguous ? '、編號對到多人 ' + counts.ambiguous : ''}。</p>
             <div class="import-table-wrap"><table class="hr-table salary-table"><thead><tr><th>月份</th><th>員工</th><th>金額</th><th>狀態</th></tr></thead>
-            <tbody>${rows.map((r) => `<tr class="st-${esc(r.status)}"><td>${esc(r.month)}</td><td>${esc(r.employeeId)} ${esc(r.name || '')}</td><td class="num">${money(r.netPay)}${r.status === 'changed' && r.existingPay != null ? ' <span class="muted">（現為 ' + money(r.existingPay) + '）</span>' : ''}</td><td><span class="pill ${r.status === 'new' ? 'ok' : r.status === 'changed' ? 'warn' : ''}">${esc(STATUS_LABEL[r.status] || r.status)}</span></td></tr>`).join('') || '<tr><td colspan="4">這個月份沒有可匯入的列。</td></tr>'}</tbody></table></div>
+            <tbody>${rows.map((r) => `<tr class="st-${esc(r.status)}"><td>${esc(r.month)}</td><td>${esc(r.employeeId)} ${esc(r.name || '')}${r.sheetId && r.sheetId !== r.employeeId ? ' <span class="muted">（表上 ' + esc(r.sheetId) + '）</span>' : ''}</td><td class="num">${money(r.netPay)}${r.status === 'changed' && r.existingPay != null ? ' <span class="muted">（現為 ' + money(r.existingPay) + '）</span>' : ''}</td><td><span class="pill ${r.status === 'new' ? 'ok' : r.status === 'changed' ? 'warn' : ''}">${esc(STATUS_LABEL[r.status] || r.status)}</span></td></tr>`).join('') || '<tr><td colspan="4">這個月份沒有可匯入的列。</td></tr>'}</tbody></table></div>
             <div class="hr-toolbar" style="margin-top:12px">
               <button class="hr-btn" type="button" data-confirm ${actionable.length ? '' : 'disabled'}>確認寫入 ${actionable.length} 筆</button>
               <button class="hr-btn ghost" type="button" data-reload>依欄位重新預覽</button>
