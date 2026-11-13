@@ -611,10 +611,11 @@
     const exp = box ? $('[data-exp]', box)?.value : '';
     try {
       const saved = await uploadFile(employeeId, cat, file, exp);
-      toast('已存到 ' + (saved.displayPath || saved.path || saved.filename));
-      if (saved.ocr && saved.ocr.skipped === 'no-gemini') toast('檔案已存。尚未設定 Gemini，無法自動辨識，請自行核對。');
-      else if (saved.ocr && saved.ocr.skipped === 'ocr-error') toast(saved.ocr.message || '檔案已存，自動辨識暫時無法使用。');
-      else if (saved.ocr && saved.ocr.review) toast('已預填辨識結果，請核對後按確認才會寫入。');
+      let msg = '已存到 ' + (saved.displayPath || saved.path || saved.filename);
+      if (saved.ocr && saved.ocr.skipped === 'no-gemini') msg += '。尚未設定 Gemini，無法自動辨識，請自行核對。';
+      else if (saved.ocr && saved.ocr.skipped === 'ocr-error') msg += '。' + (saved.ocr.message || '自動辨識暫時無法使用。');
+      else if (saved.ocr && saved.ocr.review) msg += '。已預填辨識結果，請核對後按確認才會寫入。';
+      toast(msg);
       await refresh();
       paintProfile(root, employeeId);
     } catch (e) { toast(e.message); }
