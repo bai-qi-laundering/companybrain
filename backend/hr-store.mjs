@@ -194,7 +194,7 @@ export class HrStore {
   }
 
   async state() {
-    const [employees, records, documents, candidates, events, goals, leaveExcel, salaries, attendance, audit, settings, lastImport, leaveYears, leaveEntries, pii, ocrReviews] = await Promise.all([
+    const [employees, records, documents, candidates, events, goals, leaveExcel, salaries, audit, settings, lastImport, leaveYears, leaveEntries, pii, ocrReviews] = await Promise.all([
       this.pool.query('SELECT id, payload, revision FROM hr_employees ORDER BY id'),
       this.pool.query('SELECT id, employee_id, kind, payload, created_at FROM hr_records ORDER BY created_at DESC, id'),
       this.pool.query('SELECT * FROM hr_documents ORDER BY category, filename'),
@@ -202,8 +202,7 @@ export class HrStore {
       this.pool.query('SELECT * FROM hr_recruitment_events ORDER BY created_at DESC, id DESC'),
       this.pool.query('SELECT department, payload, revision FROM hr_recruitment_goals ORDER BY department'),
       this.pool.query('SELECT id, employee_id, payload, created_at FROM hr_leave_import_rows ORDER BY created_at DESC, id'),
-      this.pool.query('SELECT id, employee_id, month, version, status, payload FROM hr_salaries ORDER BY month DESC'),
-      this.pool.query('SELECT id, employee_id, payload FROM hr_attendance'),
+      this.pool.query('SELECT id, employee_id, month, version, status, payload FROM hr_salaries ORDER BY month DESC, id'),
       this.pool.query('SELECT created_at, actor, action, target, detail FROM hr_audit ORDER BY id DESC LIMIT 200'),
       this.pool.query('SELECT key, value FROM hr_settings'),
       this.pool.query("SELECT value FROM hr_settings WHERE key='lastImport'"),
@@ -226,8 +225,7 @@ export class HrStore {
       recruitmentEvents: events.rows.map((r) => ({id: r.id, candidateId: r.candidate_id, kind: r.kind, created: r.created_at, ...r.payload})),
       recruitmentGoals: goals.rows.map((r) => this.decorateGoal(r.department, r.payload, employees.rows.map(mapEmp))),
       leaveExcel: leaveExcel.rows.map((r) => ({id: r.id, employeeId: r.employee_id, created: r.created_at, ...r.payload})),
-      salaries: salaries.rows.map((r) => ({id: r.id, employeeId: r.employee_id, month: r.month, version: r.version, status: r.status})),
-      attendanceCount: attendance.rows.length,
+      salaries: salaries.rows.map(mapSalary),
       audit: audit.rows.map((r) => ({created: r.created_at, actor: r.actor, action: r.action, target: r.target, detail: r.detail})),
       settings: Object.fromEntries(settings.rows.map((r) => [r.key, r.value])),
       lastImport: lastImport.rows[0]?.value || null,
@@ -533,6 +531,49 @@ export class HrStore {
     await this.pool.query('UPDATE hr_employees SET payload=$1, revision=revision+1, updated_at=now() WHERE id=$2', [next, employeeId]);
     await this.audit(this.pool, actor, '由特休Excel帶入到職日', employeeId, (emp.arrivalDate || '') + ' → ' + arrival);
     return {employeeId, arrivalDate: arrival};
+  }
+
+
+  async upsertSalary(body, actor) {
+    const employeeId = String(body.employeeId || '').trim();
+    if (!employeeId) throw new AppError(400, '請指定員工');
+    await this.getEmployee(employeeId);
+    const month = String(body.month || '').slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(month)) throw new AppError(400, '請填月份（YYYY-MM）');
+    const netPay = Number(body.netPay);
+    if (!Number.isFinite(netPay) || netPay < 0 || netPay > 1e9) throw new AppError(400, '請填實發金額');
+    const remittance = body.remittance === '已匯' ? '已匯' : '未匯';
+    const notes = String(body.notes || '').slice(0, 500);
+    const payload = {netPay, notes, remittance, source: 'ledger'};
+    if (body.id) {
+      const cur = await this.pool.query('SELECT * FROM hr_salaries WHERE id=$1', [body.id]);
+      if (!cur.rowCount) throw new AppError(404, '找不到薪資紀錄');
+      const other = await this.pool.query("SELECT id FROM hr_salaries WHERE employee_id=$1 AND month=$2 AND digest='ledger' AND id<>$3", [employeeId, month, body.id]);
+      if (other.rowCount) throw new AppError(409, '這個月份已有薪資紀錄');
+      await this.pool.query(
+        "UPDATE hr_salaries SET month=$1, status=$2, payload=$3::jsonb, digest='ledger' WHERE id=$4",
+        [month, remittance, JSON.stringify(payload), body.id]
+      );
+      await this.audit(this.pool, actor, '修改薪資紀錄', employeeId, month + ' ' + remittance);
+      return mapSalary((await this.pool.query('SELECT * FROM hr_salaries WHERE id=$1', [body.id])).rows[0]);
+    }
+    const exists = await this.pool.query("SELECT id FROM hr_salaries WHERE employee_id=$1 AND month=$2 AND digest='ledger'", [employeeId, month]);
+    if (exists.rowCount) throw new AppError(409, '這個月份已有薪資紀錄，請直接修改');
+    const id = newId('SAL-');
+    await this.pool.query(
+      "INSERT INTO hr_salaries(id, employee_id, month, digest, version, status, payload) VALUES($1,$2,$3,'ledger',1,$4,$5::jsonb)",
+      [id, employeeId, month, remittance, JSON.stringify(payload)]
+    );
+    await this.audit(this.pool, actor, '新增薪資紀錄', employeeId, month + ' ' + netPay);
+    return mapSalary((await this.pool.query('SELECT * FROM hr_salaries WHERE id=$1', [id])).rows[0]);
+  }
+
+  async deleteSalary(id, actor) {
+    const cur = await this.pool.query('SELECT * FROM hr_salaries WHERE id=$1', [id]);
+    if (!cur.rowCount) throw new AppError(404, '找不到薪資紀錄');
+    await this.pool.query('DELETE FROM hr_salaries WHERE id=$1', [id]);
+    await this.audit(this.pool, actor, '刪除薪資紀錄', cur.rows[0].employee_id, cur.rows[0].month);
+    return {ok: true};
   }
 
   async insertSalary(row) {
@@ -909,6 +950,21 @@ function publicPii(row) {
     birthDate: birth,
   };
 }
+
+function mapSalary(r) {
+  const p = r.payload || {};
+  const net = Number(p.netPay ?? p.net ?? p.amount);
+  const remittance = (r.status === '已匯' || p.remittance === '已匯') ? '已匯' : '未匯';
+  return {
+    id: r.id,
+    employeeId: r.employee_id,
+    month: r.month,
+    netPay: Number.isFinite(net) ? net : 0,
+    notes: String(p.notes || p.source || '').slice(0, 500),
+    remittance,
+  };
+}
+
 
 function pickEmp(data, prev = {}) {
   const o = {...prev};

@@ -1,4 +1,5 @@
 import {writeFile, mkdir} from 'node:fs/promises';
+import {spawnSync} from 'node:child_process';
 import path from 'node:path';
 import {today} from '../backend/hr-store.mjs';
 
@@ -68,6 +69,68 @@ export async function seedHr(hr) {
       category: 'bank',
       extracted: {bankCode: '004', branch: '台灣銀行南京東路分行', account: '12345678901234', accountName: '陳志明', warnings: []},
       status: 'pending',
+    }, 'seed');
+  }
+  const haveSal = (await hr.state()).salaries?.some((s) => s.employeeId === 'EMP-014');
+  if (!haveSal) {
+    await hr.upsertSalary({employeeId: 'EMP-014', month: '2026-09', netPay: 42000, notes: '示意', remittance: '已匯'}, 'seed');
+    await hr.upsertSalary({employeeId: 'EMP-014', month: '2026-10', netPay: 41500, notes: '', remittance: '未匯'}, 'seed');
+    await hr.upsertSalary({employeeId: 'EMP-001', month: '2026-10', netPay: 38000, notes: '', remittance: '已匯'}, 'seed');
+  }
+  await seedDocFiles(hr);
+}
+
+
+function writeLabeledJpeg(dest, title, bg) {
+  const q = (v) => JSON.stringify(String(v));
+  const py = [
+    'from PIL import Image, ImageDraw, ImageFont',
+    'im = Image.new("RGB", (480, 320), ' + q(bg) + ')',
+    'd = ImageDraw.Draw(im)',
+    'd.rectangle((16,16,463,303), outline="#182c39", width=6)',
+    'try:',
+    '    font = ImageFont.truetype("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 36)',
+    '    small = ImageFont.truetype("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 18)',
+    'except Exception:',
+    '    font = ImageFont.load_default()',
+    '    small = font',
+    'd.text((240, 130), ' + q(title) + ', fill="#182c39", font=font, anchor="mm")',
+    'd.text((240, 180), "示意證件（本機種子）", fill="#4a5a63", font=small, anchor="mm")',
+    'im.save(' + q(dest) + ', quality=85)',
+  ].join('\n');
+  const r = spawnSync('python3', ['-c', py], {encoding: 'utf8'});
+  if (r.status !== 0) throw new Error('無法產生示意圖片：' + (r.stderr || r.stdout));
+}
+
+async function seedDocFiles(hr) {
+  const identity = process.env.NAS_IDENTITY_PATH;
+  const bank = process.env.NAS_BANK_PATH;
+  const license = process.env.NAS_LICENSE_PATH;
+  if (!identity || !bank || !license) return;
+  const files = [
+    {category: 'identity', dir: identity, filename: 'EMP-014_陳志明_身分證_20260501T100000_aabbccddeeff.jpg', title: '身分證示意', bg: '#f3efe4'},
+    {category: 'bank', dir: bank, filename: 'EMP-014_陳志明_存摺_20260501T100100_ffeeddccbbaa.jpg', title: '存摺示意', bg: '#e7f0e8'},
+  ];
+  const state = await hr.state();
+  const have = new Set((state.documents || []).map((d) => d.filename));
+  for (const f of files) {
+    const dest = path.join(f.dir, f.filename);
+    writeLabeledJpeg(dest, f.title, f.bg);
+    if (have.has(f.filename)) continue;
+    const st = await (await import('node:fs/promises')).stat(dest);
+    await hr.insertDocument({
+      id: 'D-seed-' + f.category, category: f.category, relativePath: f.filename, filename: f.filename,
+      size: st.size, mtime: Math.trunc(st.mtimeMs), available: true, employeeId: 'EMP-014', suggestions: [],
+    }, 'seed');
+  }
+  const pdfName = 'EMP-014_陳志明_駕照_20260501T100200_abc123abc123.pdf';
+  const pdfDest = path.join(license, pdfName);
+  await writeFile(pdfDest, Buffer.from('%PDF-1.1\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 200]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n'));
+  if (!have.has(pdfName)) {
+    const st = await (await import('node:fs/promises')).stat(pdfDest);
+    await hr.insertDocument({
+      id: 'D-seed-license', category: 'license', relativePath: pdfName, filename: pdfName,
+      size: st.size, mtime: Math.trunc(st.mtimeMs), available: true, employeeId: 'EMP-014', suggestions: [], expiresOn: '2026-12-05',
     }, 'seed');
   }
 }

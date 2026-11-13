@@ -84,7 +84,6 @@ function countsOf(data) {
     recruitmentGoals: data.recruitmentGoals.length,
     leaveImportRows: data.leaveImportRows.length,
     salaries: data.salaries.length,
-    attendance: data.attendance.length,
     audit: data.audit.length,
     settings: data.settings.length,
   };
@@ -101,6 +100,7 @@ console.log(dryRun ? '【預演 --dry-run】只讀舊人資 SQLite，不寫入 P
 console.log('來源：' + sqlitePath);
 console.log('筆數：');
 for (const [k, v] of Object.entries(counts)) console.log('  ' + k + ': ' + v);
+console.log('  attendance: 略過（來源 ' + data.attendance.length + ' 筆，不遷移打卡紀錄）');
 
 // Preview leave ledger mapping even in dry-run
 function plannedLedgers() {
@@ -235,25 +235,29 @@ for (const row of data.leaveImportRows) {
   result.leaveImportRows[st === 'inserted' ? 'inserted' : 'exists'] += 1;
 }
 for (const row of data.salaries) {
-  const payload = parseJson(row.data, {});
-  const exists = await pool.query('SELECT 1 FROM hr_salaries WHERE id=$1', [row.id]);
+  const raw = parseJson(row.data, {});
+  const month = String(row.month || raw.month || '').slice(0, 7);
+  if (!/^\d{4}-\d{2}$/.test(month)) { result.salaries.skipped += 1; continue; }
+  const net = Number(raw.netPay ?? raw.net ?? raw.amount);
+  const remittance = (raw.remittance === '已匯' || row.status === '已匯') ? '已匯' : '未匯';
+  const payload = {
+    netPay: Number.isFinite(net) ? net : 0,
+    notes: String(raw.notes || raw.source || '').slice(0, 500),
+    remittance,
+    source: 'migrated',
+  };
+  const exists = await pool.query("SELECT 1 FROM hr_salaries WHERE (id=$1) OR (employee_id=$2 AND month=$3 AND digest='ledger')", [row.id, row.employee_id, month]);
   if (exists.rowCount) result.salaries.exists += 1;
   else {
     await pool.query(
-      'INSERT INTO hr_salaries(id, employee_id, month, digest, version, status, payload, created_at) VALUES($1,$2,$3,$4,$5,$6,$7,COALESCE($8::timestamptz, now())) ON CONFLICT(employee_id, month, digest) DO NOTHING',
-      [row.id, row.employee_id, row.month, row.digest, row.version, row.status, payload, row.created || null]
+      "INSERT INTO hr_salaries(id, employee_id, month, digest, version, status, payload, created_at) VALUES($1,$2,$3,'ledger',1,$4,$5::jsonb,COALESCE($6::timestamptz, now())) ON CONFLICT(employee_id, month, digest) DO NOTHING",
+      [row.id, row.employee_id, month, remittance, JSON.stringify(payload), row.created || null]
     );
     result.salaries.inserted += 1;
   }
 }
-for (const row of data.attendance) {
-  const payload = parseJson(row.data, {});
-  const st = await skipOr('hr_attendance', row.id, () => pool.query(
-    'INSERT INTO hr_attendance(id, employee_id, payload) VALUES($1,$2,$3)',
-    [row.id, row.employee_id, payload]
-  ));
-  result.attendance[st === 'inserted' ? 'inserted' : 'exists'] += 1;
-}
+result.attendance = {inserted: 0, exists: 0, skipped: data.attendance.length};
+console.log('打卡紀錄不遷移：來源 ' + data.attendance.length + ' 筆已略過（舊表若已存在則保留不動）。');
 for (const row of data.settings) {
   if (row.key === 'leaveYearBasis') continue;
   const exists = await pool.query('SELECT 1 FROM hr_settings WHERE key=$1', [row.key]);

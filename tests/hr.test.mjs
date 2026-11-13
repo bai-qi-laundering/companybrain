@@ -138,6 +138,12 @@ test('upload uses the original filename rule and binds to the employee', async (
     assert.match(saved.filename, /^EMP-014_陳志明_存摺_\d{8}T\d{6}_[a-f0-9]{12}\.jpg$/);
     assert.match(saved.displayPath, /存摺\/EMP-014_陳志明_存摺_/);
     assert.equal(saved.ocr.skipped, 'no-gemini');
+    const file = await fetch(ctx.url + '/api/hr/documents/' + saved.id + '/file', {headers: {Cookie: ctx.cookie}});
+    assert.equal(file.status, 200);
+    assert.match(file.headers.get('cache-control') || '', /private/);
+    assert.match(file.headers.get('content-type') || '', /image\/jpeg/);
+    const anon = await fetch(ctx.url + '/api/hr/documents/' + saved.id + '/file');
+    assert.equal(anon.status, 401);
   } finally {
     await new Promise((r) => ctx.server.close(r));
     await ctx.db.close();
@@ -237,6 +243,38 @@ test('identity confirm rejects a bad checksum and batch-scan creates pending ite
   } finally {
     if (prev == null) delete process.env.HR_PII_KEY;
     else process.env.HR_PII_KEY = prev;
+    await new Promise((r) => ctx.server.close(r));
+    await ctx.db.close();
+    await rm(ctx.docRoot, {recursive: true, force: true});
+  }
+});
+
+
+test('monthly salary ledger stores net pay and remittance, with no attendance in state', async () => {
+  const ctx = await start();
+  try {
+    await ctx.api('/api/hr/employees', 'POST', {id: 'EMP-014', name: '陳志明', department: '物流', arrivalDate: '2022-05-20'});
+    const created = await (await ctx.api('/api/hr/salaries', 'POST', {
+      employeeId: 'EMP-014', month: '2026-10', netPay: 41500, notes: '十月', remittance: '未匯',
+    })).json();
+    assert.equal(created.month, '2026-10');
+    assert.equal(created.netPay, 41500);
+    assert.equal(created.remittance, '未匯');
+    const dup = await ctx.api('/api/hr/salaries', 'POST', {employeeId: 'EMP-014', month: '2026-10', netPay: 1});
+    assert.equal(dup.status, 409);
+    const updated = await (await ctx.api('/api/hr/salaries/' + created.id, 'PATCH', {employeeId: 'EMP-014', month: '2026-10', netPay: 42000, remittance: '已匯', notes: '已匯出'})).json();
+    assert.equal(updated.netPay, 42000);
+    assert.equal(updated.remittance, '已匯');
+    const state = await (await ctx.api('/api/hr/state')).json();
+    assert.equal(state.attendanceCount, undefined);
+    assert.ok(!('attendance' in state) || state.attendance == null);
+    const row = state.salaries.find((s) => s.employeeId === 'EMP-014' && s.month === '2026-10');
+    assert.equal(row.netPay, 42000);
+    const del = await ctx.api('/api/hr/salaries/' + created.id, 'DELETE');
+    assert.equal(del.status, 200);
+    const after = await (await ctx.api('/api/hr/state')).json();
+    assert.equal(after.salaries.filter((s) => s.id === created.id).length, 0);
+  } finally {
     await new Promise((r) => ctx.server.close(r));
     await ctx.db.close();
     await rm(ctx.docRoot, {recursive: true, force: true});

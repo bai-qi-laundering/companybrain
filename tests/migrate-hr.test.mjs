@@ -22,7 +22,8 @@ test('migrate --dry-run prints counts and does not need Postgres', () => {
   assert.match(run.stdout, /leaveRecords: 2/);
   assert.match(run.stdout, /candidates: 1/);
   assert.match(run.stdout, /salaries: 1/);
-  assert.match(run.stdout, /attendance: 1/);
+  assert.match(run.stdout, /attendance: 略過/);
+  assert.match(run.stdout, /不遷移打卡/);
   assert.match(run.stdout, /leaveLedgers/);
   assert.match(run.stdout, /arrivalFilled \(空到職日由最早加保日帶入\): 1/);
   assert.match(run.stdout, /arrivalStillMissing \(無到職日也無加保日\): 1/);

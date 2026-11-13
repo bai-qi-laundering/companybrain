@@ -17,7 +17,7 @@
   let demo = true;
 
   function emptyState() {
-    return {employees: [], records: [], documents: [], candidates: [], recruitmentEvents: [], recruitmentGoals: [], leaveExcel: [], salaries: [], attendanceCount: 0, audit: [], lastImport: null, leaveYears: [], leaveEntries: [], leaveYearBasis: 'anniversary', leaveSettleDefault: '未休完已折現', leaveExpiryReminders: [], ocrReviews: [], ocr: {geminiConfigured: false, piiKeyConfigured: false}};
+    return {employees: [], records: [], documents: [], candidates: [], recruitmentEvents: [], recruitmentGoals: [], leaveExcel: [], salaries: [], audit: [], lastImport: null, leaveYears: [], leaveEntries: [], leaveYearBasis: 'anniversary', leaveSettleDefault: '未休完已折現', leaveExpiryReminders: [], ocrReviews: [], ocr: {geminiConfigured: false, piiKeyConfigured: false}};
   }
   function today() {
     return new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit'}).format(new Date());
@@ -105,7 +105,8 @@
     ];
     const documents = [
       {id: 'D-demo-1', category: 'identity', filename: 'EMP-014_陳志明_身分證_20260501T100000_aabbccddeeff.jpg', relativePath: 'EMP-014_陳志明_身分證_20260501T100000_aabbccddeeff.jpg', employeeId: 'EMP-014', size: 120000, mtime: Date.now(), available: true, suggestions: [], expiresOn: ''},
-      {id: 'D-demo-2', category: 'license', filename: 'EMP-014_陳志明_駕照_20260501T100100_ffeeddccbbaa.jpg', relativePath: 'EMP-014_陳志明_駕照_20260501T100100_ffeeddccbbaa.jpg', employeeId: 'EMP-014', size: 140000, mtime: Date.now(), available: true, suggestions: [], expiresOn: '2026-12-05'},
+      {id: 'D-demo-2', category: 'bank', filename: 'EMP-014_陳志明_存摺_20260501T100100_ffeeddccbbaa.jpg', relativePath: 'EMP-014_陳志明_存摺_20260501T100100_ffeeddccbbaa.jpg', employeeId: 'EMP-014', size: 140000, mtime: Date.now(), available: true, suggestions: [], expiresOn: ''},
+      {id: 'D-demo-3', category: 'license', filename: 'EMP-014_陳志明_駕照_20260501T100200_abc123abc123.pdf', relativePath: 'EMP-014_陳志明_駕照_20260501T100200_abc123abc123.pdf', employeeId: 'EMP-014', size: 8000, mtime: Date.now(), available: true, suggestions: [], expiresOn: '2026-12-05'},
     ];
     const candidates = [
       {id: 'R-01', name: '吳佳穎', phone: '0988-100-001', department: '物流', job: '物流司機', source: '1111', status: '待面試', followupDate: today(), interviewAt: today() + 'T14:00', contactPerson: '黃淑芬', availableDate: '', notes: '', employeeId: ''},
@@ -142,7 +143,12 @@
       prev.status = '未休完已折現'; prev.settledOn = '2026-03-02'; prev.settledBy = '黃淑芬'; prev.notes = '年度結束未休完，依慣例折現（不記金額）';
       leaveEntries.push({id: 'LV-demo-4', employeeId: 'EMP-001', leaveYearId: prev.id, takenOn: '2025-07-10', days: 5, notes: '去年已休'});
     }
-    return {employees, records, documents, candidates, recruitmentEvents: [], recruitmentGoals, leaveExcel: [], salaries: [], attendanceCount: 0, audit: [], lastImport: null, leaveYearBasis: 'anniversary', leaveSettleDefault: '未休完已折現', leaveYears: leaveYears.map((y) => decorateLeave(y, leaveEntries)), leaveEntries, leaveExpiryReminders: []};
+    const salaries = [
+      {id: 'SAL-demo-1', employeeId: 'EMP-014', month: '2026-09', netPay: 42000, notes: '示意', remittance: '已匯'},
+      {id: 'SAL-demo-2', employeeId: 'EMP-014', month: '2026-10', netPay: 41500, notes: '', remittance: '未匯'},
+      {id: 'SAL-demo-3', employeeId: 'EMP-001', month: '2026-10', netPay: 38000, notes: '', remittance: '已匯'},
+    ];
+    return {employees, records, documents, candidates, recruitmentEvents: [], recruitmentGoals, leaveExcel: [], salaries, audit: [], lastImport: null, leaveYearBasis: 'anniversary', leaveSettleDefault: '未休完已折現', leaveYears: leaveYears.map((y) => decorateLeave(y, leaveEntries)), leaveEntries, leaveExpiryReminders: []};
   }
   function decorateGoal(g, employees, day = today()) {
     const current = employees.filter((e) => e.department === g.department && active(e, day)).length;
@@ -341,7 +347,28 @@
       saveDemo();
       return {ok: true};
     }
+    if (path === '/api/hr/salaries' && method === 'POST') {
+      const month = String(body.month || '').slice(0, 7);
+      if (!/^\d{4}-\d{2}$/.test(month)) throw new Error('請填月份（YYYY-MM）');
+      if ((state.salaries || []).some((s) => s.employeeId === body.employeeId && s.month === month)) throw new Error('這個月份已有薪資紀錄，請直接修改');
+      const row = {id: 'SAL-' + Date.now(), employeeId: body.employeeId, month, netPay: Number(body.netPay) || 0, notes: body.notes || '', remittance: body.remittance === '已匯' ? '已匯' : '未匯'};
+      state.salaries = state.salaries || [];
+      state.salaries.push(row); saveDemo(); return row;
+    }
+    if ((m = path.match(/^\/api\/hr\/salaries\/([^/]+)$/)) && method === 'PATCH') {
+      const row = (state.salaries || []).find((s) => s.id === m[1]);
+      if (!row) throw new Error('找不到薪資紀錄');
+      const month = String(body.month || row.month).slice(0, 7);
+      if ((state.salaries || []).some((s) => s.id !== row.id && s.employeeId === row.employeeId && s.month === month)) throw new Error('這個月份已有薪資紀錄');
+      Object.assign(row, {month, netPay: body.netPay != null ? Number(body.netPay) : row.netPay, notes: body.notes != null ? body.notes : row.notes, remittance: body.remittance === '已匯' || body.remittance === '未匯' ? body.remittance : row.remittance});
+      saveDemo(); return row;
+    }
+    if ((m = path.match(/^\/api\/hr\/salaries\/([^/]+)$/)) && method === 'DELETE') {
+      state.salaries = (state.salaries || []).filter((s) => s.id !== m[1]);
+      saveDemo(); return {ok: true};
+    }
     throw new Error('示範模式不支援 ' + method + ' ' + path);
+
 
 
   }
@@ -461,7 +488,6 @@
     const docs = state.documents.filter((d) => d.employeeId === id);
     const recs = (k) => state.records.filter((r) => r.employeeId === id && r.kind === k);
     const miss = missingPaper(e);
-    const sal = (state.salaries || []).filter((s) => s.employeeId === id).length;
     root.innerHTML = `
       <div class="hr-toolbar"><button class="hr-btn ghost" data-act="back">← 返回員工名錄</button><span class="muted">${esc(e.id)}</span></div>
       <div class="profile">
@@ -508,16 +534,25 @@
                 <div class="muted">拖放或點此選檔（JPG／PNG／WEBP／PDF，12MB 內）</div>
                 ${cat === 'license' ? '<div class="field" style="margin-top:8px;text-align:left"><span>駕照效期</span><input type="date" data-exp="license"></div>' : ''}
                 <input type="file" accept="image/jpeg,image/png,image/webp,application/pdf" hidden data-file="${cat}">
-                ${docs.filter((d) => d.category === cat).map((d) => `<div class="doc" style="margin-top:8px;text-align:left"><div><div>${esc(d.filename)}</div><div class="path">已存到 ${esc(d.displayPath || d.path || ('/volume1/人事資料/' + DOC[cat] + '/' + d.filename))}</div>${d.expiresOn ? `<div class="muted">效期 ${esc(d.expiresOn)}</div>` : ''}</div>${!demo ? `<a href="/api/hr/documents/${esc(d.id)}/file" target="_blank">查看</a>` : ''}</div>`).join('')}
+                ${docs.filter((d) => d.category === cat).map((d) => docRow(d, cat)).join('')}
               </div>`).join('')}
           </section>
-          <section class="hr-card">
-            <h2 class="section-title">薪資與打卡</h2>
-            <p class="muted">資料已保存（薪資筆數 ${sal}，打卡列於系統中），此畫面先不操作，也不新增排班／工時／薪資功能。</p>
+          <section class="hr-card" id="salary-ledger">
+            ${salaryBlock(id)}
           </section>
         </div>
       </div>
-      <div id="hr-dialogs"></div>`;
+      <div id="hr-dialogs"></div>
+      <div id="hr-lightbox" class="hr-lightbox" hidden>
+        <div class="hr-lightbox-backdrop" data-lb="close"></div>
+        <div class="hr-lightbox-box" role="dialog" aria-modal="true" aria-label="證件預覽">
+          <button type="button" class="hr-lightbox-close" data-lb="close" aria-label="關閉">×</button>
+          <button type="button" class="hr-lightbox-nav prev" data-lb="prev" aria-label="上一張">‹</button>
+          <img alt="">
+          <button type="button" class="hr-lightbox-nav next" data-lb="next" aria-label="下一張">›</button>
+          <p class="hr-lightbox-cap"></p>
+        </div>
+      </div>`;
     $('[data-act="back"]', root).onclick = () => { route = {page: 'list'}; paintStaff(root); };
     $('#emp-inline', root).onsubmit = async (ev) => {
       ev.preventDefault();
@@ -531,6 +566,8 @@
     $('[data-act="add-chg"]', root).onclick = () => openRecord(root, id, 'change');
     $$('[data-drop]', root).forEach((box) => bindDrop(box, id, root));
     bindOcrCards(root, id);
+    bindLightbox(root, id);
+    bindSalary(root, id);
   }
 
 
@@ -592,6 +629,130 @@
     } catch (e) { toast(e.message); }
   }
 
+
+  function docKind(d) {
+    const ext = String(d.filename || d.relativePath || '').split('.').pop().toLowerCase();
+    if (['jpg', 'jpeg', 'png', 'webp'].includes(ext)) return 'image';
+    if (ext === 'pdf') return 'pdf';
+    return 'other';
+  }
+  function placeholderThumb(d) {
+    const label = DOC[d.category] || '證件';
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="480" height="320" viewBox="0 0 480 320"><rect width="480" height="320" fill="#e8eef2"/><rect x="16" y="16" width="448" height="288" fill="none" stroke="#182c39" stroke-width="4"/><text x="240" y="150" text-anchor="middle" font-size="28" font-family="sans-serif" fill="#182c39">${label}示意</text><text x="240" y="190" text-anchor="middle" font-size="14" font-family="sans-serif" fill="#64717e">示範預覽，非正式檔案</text></svg>`;
+    return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  }
+  function fileHref(d) {
+    return '/api/hr/documents/' + encodeURIComponent(d.id) + '/file';
+  }
+  function docRow(d, cat) {
+    const kind = docKind(d);
+    const pathText = d.displayPath || d.path || ('/volume1/人事資料/' + DOC[cat] + '/' + d.filename);
+    let thumb = '';
+    if (kind === 'image') {
+      const src = demo ? placeholderThumb(d) : fileHref(d);
+      thumb = `<button type="button" class="doc-thumb" data-lightbox="${esc(d.id)}" aria-label="放大查看 ${esc(d.filename)}"><img src="${src}" alt="${esc(d.filename)}" loading="lazy"></button>`;
+    } else if (kind === 'pdf') {
+      thumb = demo
+        ? `<button type="button" class="doc-thumb doc-pdf" data-pdf-demo aria-label="PDF ${esc(d.filename)}"><span>PDF</span></button>`
+        : `<a class="doc-thumb doc-pdf" href="${esc(fileHref(d))}" target="_blank" rel="noopener" aria-label="開啟 PDF ${esc(d.filename)}"><span>PDF</span></a>`;
+    }
+    const view = demo
+      ? (kind === 'image'
+        ? `<button type="button" class="hr-btn ghost" data-lightbox="${esc(d.id)}">查看</button>`
+        : `<button type="button" class="hr-btn ghost" data-pdf-demo>查看</button>`)
+      : `<a href="${esc(fileHref(d))}" target="_blank" rel="noopener">查看</a>`;
+    return `<div class="doc"><div class="doc-main">${thumb}<div class="doc-meta"><div>${esc(d.filename)}</div><div class="path">已存到 ${esc(pathText)}</div>${d.expiresOn ? `<div class="muted">效期 ${esc(d.expiresOn)}</div>` : ''}</div></div>${view}</div>`;
+  }
+  function employeeImages(employeeId) {
+    const order = {identity: 0, bank: 1, license: 2};
+    return (state.documents || []).filter((d) => d.employeeId === employeeId && docKind(d) === 'image')
+      .sort((a, b) => (order[a.category] ?? 9) - (order[b.category] ?? 9) || String(a.filename).localeCompare(String(b.filename)));
+  }
+  function bindLightbox(root, employeeId) {
+    const box = $('#hr-lightbox', root);
+    if (!box) return;
+    const img = $('img', box);
+    const cap = $('.hr-lightbox-cap', box);
+    const list = () => employeeImages(employeeId);
+    let idx = 0;
+    const show = (i) => {
+      const items = list();
+      if (!items.length) return close();
+      idx = (i + items.length) % items.length;
+      const d = items[idx];
+      img.src = demo ? placeholderThumb(d) : fileHref(d);
+      img.alt = d.filename || '';
+      cap.textContent = (DOC[d.category] || '') + '　' + (d.filename || '');
+      const many = items.length > 1;
+      $$('.hr-lightbox-nav', box).forEach((b) => b.hidden = !many);
+      box.hidden = false;
+    };
+    const close = () => { box.hidden = true; img.removeAttribute('src'); };
+    $$('[data-lightbox]', root).forEach((el) => {
+      el.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); show(list().findIndex((d) => d.id === el.dataset.lightbox)); });
+    });
+    $$('[data-pdf-demo]', root).forEach((el) => {
+      el.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); toast('示範模式沒有實際 PDF 檔案。'); });
+    });
+    $$('[data-lb="close"]', box).forEach((el) => el.onclick = close);
+    const prev = $('[data-lb="prev"]', box);
+    const next = $('[data-lb="next"]', box);
+    if (prev) prev.onclick = (ev) => { ev.stopPropagation(); show(idx - 1); };
+    if (next) next.onclick = (ev) => { ev.stopPropagation(); show(idx + 1); };
+    box.onkeydown = (ev) => {
+      if (box.hidden) return;
+      if (ev.key === 'Escape') close();
+      if (ev.key === 'ArrowLeft') show(idx - 1);
+      if (ev.key === 'ArrowRight') show(idx + 1);
+    };
+    if (document._hrLightboxKey) document.removeEventListener('keydown', document._hrLightboxKey);
+    document.addEventListener('keydown', document._hrLightboxKey = (ev) => {
+      if (box.hidden) return;
+      if (ev.key === 'Escape') { ev.preventDefault(); close(); }
+      if (ev.key === 'ArrowLeft') show(idx - 1);
+      if (ev.key === 'ArrowRight') show(idx + 1);
+    });
+  }
+  function money(n) {
+    return new Intl.NumberFormat('zh-TW', {maximumFractionDigits: 2}).format(Number(n) || 0);
+  }
+  function salaryBlock(employeeId) {
+    const rows = (state.salaries || []).filter((s) => s.employeeId === employeeId).sort((a, b) => String(b.month).localeCompare(String(a.month)));
+    const body = rows.map((s) => `<tr>
+      <td>${esc(s.month)}</td>
+      <td class="num">${money(s.netPay)}</td>
+      <td>${esc(s.notes || '—')}</td>
+      <td>${s.remittance === '已匯' ? '<span class="pill ok">已匯</span>' : '<span class="pill warn">未匯</span>'}</td>
+      <td><button type="button" class="hr-btn ghost" data-sal-edit="${esc(s.id)}">修改</button> <button type="button" class="hr-btn ghost" data-sal-del="${esc(s.id)}">刪除</button></td>
+    </tr>`).join('') || '<tr><td colspan="5" class="muted">尚無薪資紀錄。</td></tr>';
+    return `<h2 class="section-title">薪資</h2>
+      <p class="muted">按月登記實發金額與匯款狀態。不匯入打卡紀錄，也不串接打卡算薪水試算表。</p>
+      <table class="hr-table salary-table"><thead><tr><th>月份</th><th>實發金額</th><th>備註</th><th>匯款狀態</th><th></th></tr></thead><tbody>${body}</tbody></table>
+      <button class="hr-btn ghost" data-act="add-salary" style="margin-top:8px">＋ 新增薪資紀錄</button>`;
+  }
+  function bindSalary(root, employeeId) {
+    const open = (existing) => {
+      const s = existing || {month: today().slice(0, 7), netPay: '', notes: '', remittance: '未匯'};
+      dlg(root, existing ? '修改薪資紀錄' : '新增薪資紀錄',
+        field('month', '月份', s.month, 'month') + field('netPay', '實發金額', s.netPay === '' ? '' : s.netPay, 'number') + field('notes', '備註（選填）', s.notes || '') + sel('remittance', '匯款狀態', ['未匯', '已匯'], s.remittance || '未匯'),
+        async (f) => {
+          const body = {employeeId, month: f.elements.month.value, netPay: f.elements.netPay.value, notes: f.elements.notes.value, remittance: f.elements.remittance.value};
+          if (existing) await write('/api/hr/salaries/' + existing.id, 'PATCH', body);
+          else await write('/api/hr/salaries', 'POST', body);
+          toast('已儲存薪資紀錄');
+          await refresh();
+          paintProfile(root, employeeId);
+        });
+    };
+    $('[data-act="add-salary"]', root).onclick = () => open(null);
+    $$('[data-sal-edit]', root).forEach((b) => b.onclick = () => open((state.salaries || []).find((s) => s.id === b.dataset.salEdit)));
+    $$('[data-sal-del]', root).forEach((b) => b.onclick = async () => {
+      if (!confirm('確定刪除這筆薪資紀錄？')) return;
+      try { await write('/api/hr/salaries/' + b.dataset.salDel, 'DELETE'); toast('已刪除'); await refresh(); paintProfile(root, employeeId); }
+      catch (err) { toast(err.message); }
+    });
+  }
+
   function field(name, label, value, type = 'text') {
     return `<div class="field"><span>${esc(label)}</span><input name="${name}" type="${type}" value="${esc(value || '')}"></div>`;
   }
@@ -601,7 +762,7 @@
   function bindDrop(box, employeeId, root) {
     const cat = box.dataset.drop;
     const input = $('[data-file]', box);
-    box.addEventListener('click', (e) => { if (e.target.closest('a,input')) return; input.click(); });
+    box.addEventListener('click', (e) => { if (e.target.closest('a,input,button,.doc,.doc-thumb')) return; input.click(); });
     box.addEventListener('dragover', (e) => { e.preventDefault(); box.classList.add('over'); });
     box.addEventListener('dragleave', () => box.classList.remove('over'));
     box.addEventListener('drop', (e) => { e.preventDefault(); box.classList.remove('over'); if (e.dataTransfer.files[0]) doUpload(employeeId, cat, e.dataTransfer.files[0], root, box); });

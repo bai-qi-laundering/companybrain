@@ -155,6 +155,21 @@ export async function handleHr(req, res, {hr, session, method, path: p, config =
     return true;
   }
 
+  if (method === 'POST' && pathname === '/api/hr/salaries') {
+    const body = JSON.parse(await readRaw(req, 50_000));
+    send(res, 200, await hr.upsertSalary(body, actor));
+    return true;
+  }
+  if (method === 'PATCH' && (m = pathname.match(/^\/api\/hr\/salaries\/([^/]+)$/))) {
+    const body = JSON.parse(await readRaw(req, 50_000));
+    send(res, 200, await hr.upsertSalary({...body, id: decodeURIComponent(m[1])}, actor));
+    return true;
+  }
+  if (method === 'DELETE' && (m = pathname.match(/^\/api\/hr\/salaries\/([^/]+)$/))) {
+    send(res, 200, await hr.deleteSalary(decodeURIComponent(m[1]), actor));
+    return true;
+  }
+
   if (method === 'POST' && pathname === '/api/hr/documents/scan') {
     const state = await hr.state();
     send(res, 200, await scanFolders(hr, state.employees));
@@ -222,7 +237,12 @@ export async function handleHr(req, res, {hr, session, method, path: p, config =
     try {
       const st = await stat(abs);
       const type = extMime(path.extname(abs));
-      res.writeHead(200, {'content-type': type, 'content-length': st.size, 'content-disposition': 'inline; filename="' + encodeURIComponent(doc.filename) + '"'});
+      res.writeHead(200, {
+        'content-type': type,
+        'content-length': st.size,
+        'content-disposition': 'inline; filename="' + encodeURIComponent(doc.filename) + '"',
+        'cache-control': 'private, max-age=3600',
+      });
       createReadStream(abs).pipe(res);
     } catch {
       throw new AppError(404, '檔案不在資料夾裡');

@@ -63,3 +63,23 @@
 #hr-root .ocr-confirm{border:1px solid #d4a017;background:#fffaf0;box-shadow:0 1px 0 rgba(24,44,57,.06)}
 #hr-root .ocr-confirm .section-title{color:#7a4d00}
 #hr-root .arrival-note{margin:0}
+
+#hr-root .doc-main{display:flex;gap:10px;align-items:center;min-width:0;flex:1}
+#hr-root .doc-meta{min-width:0}
+#hr-root .doc-thumb{flex:0 0 88px;width:88px;height:66px;padding:0;border:1px solid var(--hr-line);border-radius:6px;overflow:hidden;background:#e8eef2;display:block;cursor:zoom-in}
+#hr-root a.doc-thumb{cursor:pointer}
+#hr-root .doc-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+#hr-root .doc-thumb.doc-pdf{display:flex;align-items:center;justify-content:center;background:#182c39;color:#fff;text-decoration:none;cursor:pointer}
+#hr-root .doc-thumb.doc-pdf span{font-size:13px;font-weight:700;letter-spacing:.04em}
+#hr-root .salary-table .num{text-align:right;font-variant-numeric:tabular-nums}
+#hr-root .hr-lightbox{position:fixed;inset:0;z-index:80;display:flex;align-items:center;justify-content:center}
+#hr-root .hr-lightbox[hidden]{display:none !important}
+#hr-root .hr-lightbox-backdrop{position:absolute;inset:0;background:rgba(16,24,32,.72)}
+#hr-root .hr-lightbox-box{position:relative;z-index:1;max-width:min(960px,92vw);max-height:92vh;display:flex;flex-direction:column;align-items:center;gap:10px}
+#hr-root .hr-lightbox-box img{max-width:92vw;max-height:80vh;border-radius:8px;background:#111;box-shadow:0 8px 32px rgba(0,0,0,.35)}
+#hr-root .hr-lightbox-cap{color:#fff;margin:0;text-align:center;font-size:13px}
+#hr-root .hr-lightbox-close,#hr-root .hr-lightbox-nav{position:absolute;background:rgba(255,255,255,.92);color:#182c39;border:0;border-radius:99px;width:40px;height:40px;font-size:24px;line-height:40px;padding:0;cursor:pointer}
+#hr-root .hr-lightbox-close{top:-8px;right:-8px}
+#hr-root .hr-lightbox-nav.prev{left:-8px;top:50%;transform:translateY(-50%)}
+#hr-root .hr-lightbox-nav.next{right:-8px;top:50%;transform:translateY(-50%)}
+#hr-root .hr-lightbox-nav[hidden]{display:none}
