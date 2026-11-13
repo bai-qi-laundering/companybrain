@@ -1,0 +1,798 @@
+(() => {
+  const STATUSES = ['待聯絡', '待面試', '待回覆', '錄取', '待報到', '已報到', '未錄取', '放棄'];
+  const OPEN = ['待聯絡', '待面試', '待回覆', '錄取', '待報到'];
+  const DOC = {identity: '身分證', bank: '存摺', license: '駕照'};
+  const PHONE = ['已接通', '未接', '忙線', '停話／錯號', '婉拒', '約定面試', '待回覆'];
+  const INTERVIEW = ['已面試', '未到場', '改期', '錄取', '未錄取', '待回覆'];
+  const TYPES = ['正職', '時薪', '兼職'];
+  const PAY_TYPES = ['正職', '兼職'];
+  const PAY_METHODS = ['匯款', '現金'];
+  const DEFAULT_PREFIXES = {物流:'D',摺疊:'F',撐開:'H',洗滓:'W',辦公室:'O',行政:'O'};
+  const PREFIX_CHOICES = {洗滓:['W','E']};
+  const KEY = 'companybrain-hr-demo-v1';
+
+  let ctx = {};
+  let state = emptyState();
+  let route = {page: 'list', id: null};
+  let demo = true;
+
+  function emptyState() {
+    return {employees: [], records: [], documents: [], candidates: [], recruitmentEvents: [], recruitmentGoals: [], leaveExcel: [], salaries: [], attendanceCount: 0, audit: [], lastImport: null, leaveYears: [], leaveEntries: [], leaveYearBasis: 'anniversary', leaveSettleDefault: '未休完已折現', leaveExpiryReminders: []};
+  }
+  function today() {
+    return new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit'}).format(new Date());
+  }
+
+  function addYears(date, n) {
+    if (!date) return '';
+    const [y, m, d] = date.split('-').map(Number);
+    const last = new Date(Date.UTC(y + n, m, 0)).getUTCDate();
+    const pad = (x) => String(x).padStart(2, '0');
+    return `${y + n}-${pad(m)}-${pad(Math.min(d, last))}`;
+  }
+  function addMonths(date, n) {
+    if (!date) return '';
+    const [y, m, d] = date.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1 + n, 1));
+    const yy = dt.getUTCFullYear(), mm = dt.getUTCMonth() + 1;
+    const last = new Date(Date.UTC(yy, mm, 0)).getUTCDate();
+    const pad = (x) => String(x).padStart(2, '0');
+    return `${yy}-${pad(mm)}-${pad(Math.min(d, last))}`;
+  }
+  function addDays(date, n) {
+    const [y, m, d] = date.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d + n));
+    const pad = (x) => String(x).padStart(2, '0');
+    return `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`;
+  }
+  function statutoryDays(hire, start) {
+    if (!hire || start < addMonths(hire, 6)) return 0;
+    let years = 0;
+    while (addYears(hire, years + 1) <= start) years += 1;
+    if (years < 1) return 3;
+    if (years < 2) return 7;
+    if (years < 3) return 10;
+    if (years < 5) return 14;
+    if (years < 10) return 15;
+    return Math.min(30, 15 + (years - 9));
+  }
+  function plannedYears(hire, asOf) {
+    if (!hire || asOf < addMonths(hire, 6)) return [];
+    const out = [];
+    const first = addMonths(hire, 6);
+    out.push({yearKey: first, startsOn: first, endsOn: addDays(addYears(hire, 1), -1), statutory: statutoryDays(hire, first)});
+    for (let n = 1; n < 80; n++) {
+      const start = addYears(hire, n);
+      if (start > asOf) break;
+      out.push({yearKey: start, startsOn: start, endsOn: addDays(addYears(hire, n + 1), -1), statutory: statutoryDays(hire, start)});
+    }
+    return out;
+  }
+  function decorateLeave(y, entries) {
+    const used = Math.round((entries.filter((e) => e.leaveYearId === y.id).reduce((n, e) => n + Number(e.days || 0), 0)) * 1000) / 1000;
+    const entitled = Number(y.entitled), carried = Number(y.carriedIn || 0);
+    const remaining = Math.round((entitled + carried - used) * 1000) / 1000;
+    const grant = carried ? `${entitled} 天 + 遞延 ${carried} 天` : `${entitled} 天`;
+    return {...y, used, remaining, carriedIn: carried, summary: `${grant}，用了 ${used} 天，剩 ${remaining} 天，${y.status || '未結算'}`};
+  }
+  function leaveReminders(asOf = today()) {
+    const limit = addDays(asOf, 60);
+    return (state.leaveYears || []).filter((y) => y.status === '未結算' && y.remaining > 0 && y.endsOn >= asOf && y.endsOn <= limit);
+  }
+
+  function esc(s) {
+    return String(s ?? '').replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+  }
+  function $(sel, el) { return (el || document).querySelector(sel); }
+  function $$(sel, el) { return [...(el || document).querySelectorAll(sel)]; }
+  function active(e, day = today()) {
+    return (!e.arrivalDate || e.arrivalDate <= day) && (!e.departureDate || e.departureDate >= day);
+  }
+  function q() { return (ctx.query || '').trim().toLowerCase(); }
+  function match(obj, keys) {
+    const s = keys.map((k) => obj[k] || '').join(' ').toLowerCase();
+    return !q() || s.includes(q());
+  }
+  function toast(t) { if (ctx.notify) ctx.notify(t); }
+
+  function seed() {
+    const employees = [
+      {id: 'EMP-001', name: '黃淑芬', department: '行政', job: '人資行政', employmentType: '正職', arrivalDate: '2019-03-01', departureDate: '', phone: '0912-000-001', emergencyContact: '黃先生 0912-111-001', paperLocation: '行政櫃 3 層', notes: '', lineBound: ''},
+      {id: 'EMP-003', name: '王建宏', department: '廠務', job: '廠務主管', employmentType: '正職', arrivalDate: '2018-07-16', departureDate: '', phone: '0912-000-003', emergencyContact: '王太太 0912-111-003', paperLocation: '廠務室', notes: '', lineBound: ''},
+      {id: 'EMP-008', name: '林雅婷', department: '客服對帳', job: '客服對帳', employmentType: '正職', arrivalDate: '2024-02-01', departureDate: '', phone: '0912-000-008', emergencyContact: '', paperLocation: '', notes: '示意：缺緊急聯絡人與紙本位置', lineBound: ''},
+      {id: 'EMP-014', name: '陳志明', department: '物流', job: '物流司機', employmentType: '正職', arrivalDate: '2022-05-20', departureDate: '', phone: '0912-000-014', emergencyContact: '陳太太 0912-111-014', paperLocation: '司機室', notes: '', lineBound: ''},
+      {id: 'EMP-015', name: '張偉誠', department: '物流', job: '物流司機', employmentType: '正職', arrivalDate: '2023-09-11', departureDate: '', phone: '0912-000-015', emergencyContact: '張先生 0912-111-015', paperLocation: '司機室', notes: '', lineBound: ''},
+    ];
+    const documents = [
+      {id: 'D-demo-1', category: 'identity', filename: 'EMP-014_陳志明_身分證_20260501T100000_aabbccddeeff.jpg', relativePath: 'EMP-014_陳志明_身分證_20260501T100000_aabbccddeeff.jpg', employeeId: 'EMP-014', size: 120000, mtime: Date.now(), available: true, suggestions: [], expiresOn: ''},
+      {id: 'D-demo-2', category: 'license', filename: 'EMP-014_陳志明_駕照_20260501T100100_ffeeddccbbaa.jpg', relativePath: 'EMP-014_陳志明_駕照_20260501T100100_ffeeddccbbaa.jpg', employeeId: 'EMP-014', size: 140000, mtime: Date.now(), available: true, suggestions: [], expiresOn: '2026-12-05'},
+    ];
+    const candidates = [
+      {id: 'R-01', name: '吳佳穎', phone: '0988-100-001', department: '物流', job: '物流司機', source: '1111', status: '待面試', followupDate: today(), interviewAt: today() + 'T14:00', contactPerson: '黃淑芬', availableDate: '', notes: '', employeeId: ''},
+      {id: 'R-02', name: '周柏翰', phone: '0988-100-002', department: '廠務', job: '廠務助理', source: '介紹', status: '待聯絡', followupDate: today(), interviewAt: '', contactPerson: '王建宏', availableDate: '', notes: '', employeeId: ''},
+      {id: 'R-03', name: '許雅琪', phone: '0988-100-003', department: '行政', job: '人資行政', source: '104', status: '待報到', followupDate: today(), interviewAt: '', contactPerson: '黃淑芬', availableDate: today(), notes: '', employeeId: ''},
+      {id: 'R-04', name: '鄭文傑', phone: '0988-100-004', department: '物流', job: '物流司機', source: '1111', status: '待回覆', followupDate: '2026-11-10', interviewAt: '', contactPerson: '黃淑芬', availableDate: '', notes: '', employeeId: ''},
+      {id: 'R-05', name: '蔡佩珊', phone: '0988-100-005', department: '客服對帳', job: '客服', source: '104', status: '錄取', followupDate: today(), interviewAt: '', contactPerson: '林雅婷', availableDate: '', notes: '', employeeId: ''},
+      {id: 'R-06', name: '林書廷', phone: '0988-100-006', department: '廠務', job: '廠務', source: '介紹', status: '未錄取', followupDate: '', interviewAt: '', contactPerson: '', availableDate: '', notes: '', employeeId: ''},
+    ];
+    const recruitmentGoals = [
+      decorateGoal({department: '物流', baseline: 2, required: 4, history: []}, employees),
+      decorateGoal({department: '廠務', baseline: 1, required: 2, history: []}, employees),
+      decorateGoal({department: '行政', baseline: 1, required: 1, history: []}, employees),
+    ];
+    const records = [
+      {id: 'REC-demo-2', employeeId: 'EMP-001', kind: 'insurance', labor: '加保', health: '加保', laborGrade: '', healthGrade: '', date: '2019-03-01', note: ''},
+    ];
+    const leaveYears = [];
+    const leaveEntries = [];
+    for (const e of employees) {
+      for (const y of plannedYears(e.arrivalDate, today())) {
+        const row = {id: 'LY-' + e.id + '-' + y.yearKey, employeeId: e.id, ...y, entitled: y.statutory, entitledSource: 'statutory', carriedIn: 0, status: '未結算', settledOn: '', settledBy: '', notes: ''};
+        leaveYears.push(row);
+      }
+    }
+    const cur = leaveYears.find((y) => y.employeeId === 'EMP-001' && y.startsOn === '2026-03-01');
+    if (cur) {
+      leaveEntries.push({id: 'LV-demo-1', employeeId: 'EMP-001', leaveYearId: cur.id, takenOn: '2026-06-02', days: 2, notes: '示意請假'});
+      leaveEntries.push({id: 'LV-demo-2', employeeId: 'EMP-001', leaveYearId: cur.id, takenOn: '2026-08-18', days: 3.5, notes: '示意請假（含半天）'});
+      leaveEntries.push({id: 'LV-demo-3', employeeId: 'EMP-001', leaveYearId: cur.id, takenOn: '2026-10-05', days: 0.5, notes: '半天'});
+    }
+    const prev = leaveYears.find((y) => y.employeeId === 'EMP-001' && y.startsOn === '2025-03-01');
+    if (prev) {
+      prev.status = '未休完已折現'; prev.settledOn = '2026-03-02'; prev.settledBy = '黃淑芬'; prev.notes = '年度結束未休完，依慣例折現（不記金額）';
+      leaveEntries.push({id: 'LV-demo-4', employeeId: 'EMP-001', leaveYearId: prev.id, takenOn: '2025-07-10', days: 5, notes: '去年已休'});
+    }
+    return {employees, records, documents, candidates, recruitmentEvents: [], recruitmentGoals, leaveExcel: [], salaries: [], attendanceCount: 0, audit: [], lastImport: null, leaveYearBasis: 'anniversary', leaveSettleDefault: '未休完已折現', leaveYears: leaveYears.map((y) => decorateLeave(y, leaveEntries)), leaveEntries, leaveExpiryReminders: []};
+  }
+  function decorateGoal(g, employees, day = today()) {
+    const current = employees.filter((e) => e.department === g.department && active(e, day)).length;
+    const baseline = Number(g.baseline || 0);
+    const required = Number(g.required || 0);
+    const net = current - baseline;
+    const percent = required ? Math.max(0, Math.min(100, Math.round((net / required) * 100))) : 0;
+    return {...g, current, netFilled: net, percent, remaining: Math.max(required - net, 0), filled: Math.max(net, 0), asOf: day};
+  }
+  function loadDemo() {
+    try {
+      const raw = localStorage.getItem(KEY);
+      if (raw) { state = JSON.parse(raw); refreshLeave(); return; }
+    } catch {}
+    state = seed();
+    refreshLeave();
+    saveDemo();
+  }
+  function refreshLeave() {
+    state.leaveYears = (state.leaveYears || []).map((y) => decorateLeave(y, state.leaveEntries || []));
+    state.leaveExpiryReminders = leaveReminders().map((y) => {
+      const emp = state.employees.find((e) => e.id === y.employeeId);
+      return {employeeId: y.employeeId, name: emp?.name || y.employeeId, endsOn: y.endsOn, remaining: y.remaining, summary: y.summary};
+    });
+  }
+  function saveDemo() {
+    try { localStorage.setItem(KEY, JSON.stringify(state)); } catch {}
+  }
+
+  async function refresh() {
+    if (!demo && ctx.api) {
+      state = await ctx.api('/api/hr/state');
+    } else {
+      loadDemo();
+    }
+  }
+
+  async function write(path, method, body) {
+    if (!demo && ctx.api) return ctx.api(path, method, body);
+    return demoWrite(path, method, body);
+  }
+
+  function deptPrefixes() { return {...DEFAULT_PREFIXES, ...(state.deptPrefixes || {})}; }
+  function prefixFor(department, prefix) {
+    if (prefix) return String(prefix).toUpperCase();
+    return deptPrefixes()[department] || '';
+  }
+  function nextEmpId(department, prefix) {
+    const p = prefixFor(department, prefix);
+    if (!p) return '';
+    const re = new RegExp('^' + p + '(\\d+)$', 'i');
+    let max = 0;
+    for (const e of state.employees) {
+      const m = String(e.id).match(re);
+      if (m) max = Math.max(max, parseInt(m[1], 10));
+    }
+    return p + String(max + 1).padStart(3, '0');
+  }
+
+  function demoWrite(path, method, body) {
+    const idOf = (p) => decodeURIComponent((p.match(/\/([^/]+)(?:\/[^/]+)?$/) || [])[1] || '');
+    if (path === '/api/hr/employees' && method === 'POST') {
+      const id = (body.id || nextEmpId(body.department, body.prefix) || ('X' + Date.now())).toUpperCase();
+      if (state.employees.some((e) => e.id === id)) throw new Error('員工編號已存在');
+      const row = {id, ...body};
+      state.employees.push(row); saveDemo(); return row;
+    }
+    let m;
+    if ((m = path.match(/^\/api\/hr\/employees\/([^/]+)$/)) && method === 'PATCH') {
+      const e = state.employees.find((x) => x.id === m[1]);
+      if (!e) throw new Error('找不到員工');
+      Object.assign(e, body); saveDemo(); return e;
+    }
+    if (path === '/api/hr/records' && method === 'POST') {
+      const row = {id: 'REC-' + Date.now(), ...body};
+      state.records.unshift(row); saveDemo(); return row;
+    }
+    if (path === '/api/hr/candidates' && method === 'POST') {
+      const row = {id: 'R-' + Date.now(), status: '待聯絡', ...body, employeeId: ''};
+      state.candidates.push(row); saveDemo(); return row;
+    }
+    if ((m = path.match(/^\/api\/hr\/candidates\/([^/]+)$/)) && method === 'PATCH') {
+      const c = state.candidates.find((x) => x.id === m[1]);
+      if (!c) throw new Error('找不到應徵者');
+      if (body.status === '已報到' && !c.employeeId) throw new Error('尚未建立員工檔案，不能標示為已報到。請使用「報到並轉為員工」。');
+      Object.assign(c, body);
+      if (c.employeeId) c.status = '已報到';
+      saveDemo(); return c;
+    }
+    if ((m = path.match(/^\/api\/hr\/candidates\/([^/]+)\/events$/)) && method === 'POST') {
+      const c = state.candidates.find((x) => x.id === m[1]);
+      if (!c) throw new Error('找不到應徵者');
+      const ev = {id: 'E-' + Date.now(), candidateId: c.id, kind: body.kind, at: new Date().toISOString(), ...body};
+      state.recruitmentEvents.unshift(ev);
+      if (body.outcome === '約定面試') c.status = '待面試';
+      if (body.outcome === '錄取') c.status = '錄取';
+      if (body.outcome === '未錄取') c.status = '未錄取';
+      if (body.nextFollowup) c.followupDate = body.nextFollowup;
+      if (body.nextInterviewAt) c.interviewAt = body.nextInterviewAt;
+      saveDemo(); return ev;
+    }
+    if ((m = path.match(/^\/api\/hr\/candidates\/([^/]+)\/convert$/)) && method === 'POST') {
+      const c = state.candidates.find((x) => x.id === m[1]);
+      if (!c) throw new Error('找不到應徵者');
+      if (c.employeeId) throw new Error('這位應徵者已轉為員工 ' + c.employeeId);
+      const id = body.employeeId || nextEmpId(body.department || (state.candidates.find((x)=>x.id===m[1])||{}).department, body.prefix);
+      const employee = {id, name: c.name, department: body.department || c.department, job: body.job || c.job, employmentType: body.employmentType || '正職', payType: body.payType || (body.employmentType === '兼職' || body.employmentType === '時薪' ? '兼職' : '正職'), paymentMethod: body.paymentMethod || '匯款', arrivalDate: body.arrivalDate || c.availableDate || today(), departureDate: '', phone: body.phone || c.phone, emergencyContact: '', paperLocation: '', notes: '由徵人資料轉入；招募歷程保留於徵人頁。', lineBound: '', lineId: body.lineId || ''};
+      state.employees.push(employee);
+      c.employeeId = id; c.status = '已報到'; c.followupDate = '';
+      saveDemo(); return {employee, candidate: c};
+    }
+    if (path === '/api/hr/goals' && method === 'POST') {
+      let g = state.recruitmentGoals.find((x) => x.department === body.department);
+      const additional = Number(body.additional || body.required || 0);
+      if (!g) {
+        const baseline = state.employees.filter((e) => e.department === body.department && active(e)).length;
+        g = {department: body.department, baseline, required: 0, history: []};
+        state.recruitmentGoals.push(g);
+      }
+      g.required = (g.required || 0) + additional;
+      g.history = g.history || []; g.history.push({at: new Date().toISOString(), additional, notes: body.notes || ''});
+      Object.assign(g, decorateGoal(g, state.employees));
+      saveDemo(); return g;
+    }
+    if ((m = path.match(/^\/api\/hr\/documents\/([^/]+)$/)) && method === 'PATCH') {
+      const d = state.documents.find((x) => x.id === m[1]);
+      if (!d) throw new Error('找不到文件');
+      if (body.employeeId) d.employeeId = body.employeeId;
+      if (body.expiresOn !== undefined) d.expiresOn = body.expiresOn;
+      saveDemo(); return d;
+    }
+    if (path === '/api/hr/leave-entries' && method === 'POST') {
+      const days = Number(body.days);
+      if (!days || days <= 0 || Math.round(days * 2) !== days * 2) throw new Error('請假天數只接受 0.5 天的倍數');
+      const y = state.leaveYears.find((x) => x.id === body.leaveYearId);
+      if (!y) throw new Error('找不到特休年度');
+      if (y.status !== '未結算') throw new Error('這個特休年度已結算，不能再登記請假');
+      const row = {id: 'LV-' + Date.now(), employeeId: body.employeeId, leaveYearId: body.leaveYearId, takenOn: body.takenOn, days, notes: body.notes || ''};
+      state.leaveEntries.push(row); refreshLeave(); saveDemo(); return row;
+    }
+    let lm;
+    if ((lm = path.match(/^\/api\/hr\/leave-entries\/([^/]+)$/)) && method === 'DELETE') {
+      state.leaveEntries = state.leaveEntries.filter((e) => e.id !== lm[1]); refreshLeave(); saveDemo(); return {ok: true};
+    }
+    if ((lm = path.match(/^\/api\/hr\/leave-years\/([^/]+)$/)) && method === 'PATCH') {
+      const y = state.leaveYears.find((x) => x.id === lm[1]);
+      if (!y) throw new Error('找不到特休年度');
+      if (body.entitled != null) { y.entitled = Number(body.entitled); y.entitledSource = 'manual'; }
+      refreshLeave(); saveDemo(); return decorateLeave(y, state.leaveEntries);
+    }
+    if ((lm = path.match(/^\/api\/hr\/leave-years\/([^/]+)\/settle$/)) && method === 'POST') {
+      const y = state.leaveYears.find((x) => x.id === lm[1]);
+      if (!y) throw new Error('找不到特休年度');
+      const dec = decorateLeave(y, state.leaveEntries);
+      const status = body.status || (dec.remaining <= 0 ? '已休完' : '未休完已折現');
+      if (status === '已休完' && dec.remaining > 0) throw new Error('尚有剩餘天數，無法標示已休完。請改為未休完已折現，或遞延到明年。');
+      y.status = status; y.settledOn = body.settledOn || today(); y.settledBy = body.settledBy || ''; y.notes = body.notes || '';
+      if (status === '遞延到明年' && dec.remaining > 0) {
+        const emp = state.employees.find((e) => e.id === y.employeeId);
+        const nextStarts = addDays(y.endsOn, 1);
+        let nxt = state.leaveYears.find((x) => x.employeeId === y.employeeId && x.startsOn === nextStarts);
+        if (!nxt && emp) {
+          const planned = plannedYears(emp.arrivalDate, nextStarts).find((p) => p.startsOn === nextStarts);
+          if (planned) {
+            nxt = {id: 'LY-' + emp.id + '-' + planned.yearKey, employeeId: emp.id, ...planned, entitled: planned.statutory, entitledSource: 'statutory', carriedIn: 0, status: '未結算', settledOn: '', settledBy: '', notes: ''};
+            state.leaveYears.push(nxt);
+          }
+        }
+        if (nxt) nxt.carriedIn = Number(nxt.carriedIn || 0) + dec.remaining;
+      }
+      refreshLeave(); saveDemo(); return decorateLeave(y, state.leaveEntries);
+    }
+    throw new Error('示範模式不支援 ' + method + ' ' + path);
+
+  }
+
+  async function uploadFile(employeeId, category, file, expiresOn) {
+    if (!demo && ctx.api) {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('employeeId', employeeId);
+      fd.append('category', category);
+      if (expiresOn) fd.append('expiresOn', expiresOn);
+      const r = await fetch('/api/hr/documents/upload', {method: 'POST', credentials: 'same-origin', headers: ctx.csrf ? {'X-CSRF-Token': ctx.csrf} : {}, body: fd});
+      const result = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(result.error || '上傳失敗');
+      return result;
+    }
+    const emp = state.employees.find((e) => e.id === employeeId);
+    const safe = (emp?.name || '未命名').replace(/[^\w\u3400-\u9fff-]/g, '_').slice(0, 60);
+    const ext = (file.name.match(/\.[a-zA-Z0-9]+$/) || ['.jpg'])[0];
+    const stamp = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const taipei = new Date(stamp.toLocaleString('en-US', {timeZone: 'Asia/Taipei'}));
+    const ts = `${taipei.getFullYear()}${pad(taipei.getMonth() + 1)}${pad(taipei.getDate())}T${pad(taipei.getHours())}${pad(taipei.getMinutes())}${pad(taipei.getSeconds())}`;
+    const token = Array.from(crypto.getRandomValues(new Uint8Array(6))).map((b) => b.toString(16).padStart(2, '0')).join('');
+    const filename = `${employeeId}_${safe}_${DOC[category]}_${ts}_${token}${ext}`;
+    const folder = {identity: '/volume1/人事資料/身分證', bank: '/volume1/人事資料/存摺', license: '/volume1/人事資料/駕照'}[category];
+    const displayPath = folder + '/' + filename;
+    const row = {id: 'D-' + Date.now(), category, filename, relativePath: filename, employeeId, size: file.size, mtime: Date.now(), available: true, suggestions: [], expiresOn: expiresOn || '', displayPath, path: displayPath};
+    state.documents.push(row); saveDemo();
+    return row;
+  }
+
+  function missingPaper(e) {
+    const miss = [];
+    if (!e.emergencyContact) miss.push('緊急聯絡人');
+    if (!e.paperLocation) miss.push('紙本位置');
+    const docs = state.documents.filter((d) => d.employeeId === e.id && d.available);
+    if (!docs.some((d) => d.category === 'identity')) miss.push('身分證');
+    return miss;
+  }
+  function expirySoon(day = today()) {
+    const limit = new Date(day); limit.setDate(limit.getDate() + 60);
+    const until = limit.toISOString().slice(0, 10);
+    return state.documents.filter((d) => d.expiresOn && d.expiresOn <= until);
+  }
+
+  function onNavigate(view, opts) {
+    ctx.view = view;
+    if (!(opts && opts.keepRoute)) route = {page: 'list', id: null};
+  }
+  function render(root, next) {
+    ctx = Object.assign({}, ctx, next || {});
+    demo = !ctx.nasMode;
+    const view = ctx.view || 'staff';
+    refresh().then(() => {
+      if (route.page === 'profile' && route.id) return paintProfile(root, route.id);
+      if (route.page === 'candidate' && route.id && view === 'recruitment') return paintCandidate(root, route.id);
+      if (view === 'recruitment') paintRecruitment(root);
+      else paintStaff(root);
+    }).catch((e) => { root.innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
+  }
+
+  function renderHome(root, next) {
+    ctx = Object.assign({}, ctx, next || {});
+    demo = !ctx.nasMode;
+    refresh().then(() => {
+      const t = today();
+      const follow = state.candidates.filter((c) => OPEN.includes(c.status) && c.followupDate === t);
+      const overdue = state.candidates.filter((c) => OPEN.includes(c.status) && c.followupDate && c.followupDate < t);
+      const exp = expirySoon();
+      const onboard = state.employees.filter((e) => e.arrivalDate && e.arrivalDate >= t && missingPaper(e).length);
+      const leaveSoon = state.leaveExpiryReminders || leaveReminders();
+      root.innerHTML = `<section class="hr-home"><h2 class="section-title" style="margin:18px 0 8px">人事與徵人待辦</h2>
+        <div class="hr-grid">
+          <button class="hr-card today" type="button" data-go="recruitment"><div class="k">今日待聯絡</div><div class="n">${follow.length}</div></button>
+          <button class="hr-card overdue" type="button" data-go="recruitment"><div class="k">已過期未跟</div><div class="n">${overdue.length}</div></button>
+          <button class="hr-card" type="button" data-go="staff"><div class="k">證件即將到期</div><div class="n">${exp.length}</div></button>
+          <button class="hr-card ${leaveSoon.length ? 'overdue' : ''}" type="button" data-go="staff"><div class="k">特休將到期未休</div><div class="n">${leaveSoon.length}</div></button>
+          <button class="hr-card" type="button" data-go="staff"><div class="k">報到資料未齊</div><div class="n">${onboard.length}</div></button>
+        </div>
+        ${leaveSoon.length ? `<p class="muted">特休年度將在 60 天內結束且尚有剩餘：${leaveSoon.map((x) => esc(x.name) + ' 剩 ' + x.remaining + ' 天（'+esc(x.endsOn)+' 止）').join('、')}。年底未休完預設結算為「未休完已折現」（只記狀態，不記金額）。</p>` : ''}
+        </section>`;
+      $$('[data-go]', root).forEach((b) => b.onclick = () => ctx.go && ctx.go(b.dataset.go));
+    }).catch(() => { root.innerHTML = ''; });
+  }
+
+  function paintStaff(root) {
+    if (route.page === 'profile' && route.id) return paintProfile(root, route.id);
+    const list = state.employees.filter((e) => match(e, ['id', 'name', 'department', 'job', 'phone'])).sort((a, b) => a.id.localeCompare(b.id));
+    const exp = expirySoon();
+    root.innerHTML = `
+      <div class="hr-grid">
+        <div class="hr-card"><div class="k">在職人數</div><div class="n">${state.employees.filter((e) => active(e)).length}</div></div>
+        <div class="hr-card"><div class="k">證件即將到期（60天）</div><div class="n">${exp.length}</div></div>
+        <div class="hr-card"><div class="k">資料未齊</div><div class="n">${state.employees.filter((e) => missingPaper(e).length).length}</div></div>
+      </div>
+      ${exp.length ? `<p class="muted">效期提醒：${exp.map((d) => esc((state.employees.find((e) => e.id === d.employeeId) || {}).name || d.filename) + ' ' + DOC[d.category] + ' ' + d.expiresOn).join('、')}</p>` : ''}
+      <div class="hr-toolbar">
+        <button class="hr-btn" data-act="add-emp">＋ 新增員工</button>
+        <button class="hr-btn ghost" data-act="scan">掃描舊文件並配對</button>
+        <button class="hr-btn ghost" data-act="leave-excel">匯入特休 Excel</button>
+        <span class="spacer"></span>
+        <span class="muted">點列即可開啟單頁檔案；欄位可直接改。</span>
+      </div>
+      <table class="hr-table"><thead><tr><th>編號</th><th>姓名</th><th>部門</th><th>職稱</th><th>電話</th><th>到職</th><th>狀態</th></tr></thead>
+      <tbody>${list.map((e) => `<tr data-open="${esc(e.id)}"><td>${esc(e.id)}</td><td>${esc(e.name)}</td><td>${esc(e.department)}</td><td>${esc(e.job)}</td><td>${esc(e.phone)}</td><td>${esc(e.arrivalDate)}</td><td>${active(e) ? '<span class="pill ok">在職</span>' : '<span class="pill">離職</span>'}${missingPaper(e).length ? ' <span class="pill warn">未齊</span>' : ''}</td></tr>`).join('') || '<tr><td colspan="7">沒有符合的員工。</td></tr>'}</tbody></table>`;
+    $$('[data-open]', root).forEach((tr) => tr.onclick = () => { route = {page: 'profile', id: tr.dataset.open}; paintProfile(root, tr.dataset.open); });
+    $('[data-act="add-emp"]', root).onclick = () => openEmpForm(root);
+    $('[data-act="scan"]', root).onclick = () => doScan(root);
+    $('[data-act="leave-excel"]', root).onclick = () => openExcel(root, 'leave');
+  }
+
+  function paintProfile(root, id) {
+    const e = state.employees.find((x) => x.id === id);
+    if (!e) { route = {page: 'list'}; return paintStaff(root); }
+    const docs = state.documents.filter((d) => d.employeeId === id);
+    const recs = (k) => state.records.filter((r) => r.employeeId === id && r.kind === k);
+    const miss = missingPaper(e);
+    const sal = (state.salaries || []).filter((s) => s.employeeId === id).length;
+    root.innerHTML = `
+      <div class="hr-toolbar"><button class="hr-btn ghost" data-act="back">← 返回員工名錄</button><span class="muted">${esc(e.id)}</span></div>
+      <div class="profile">
+        <div class="profile-main">
+          <section class="hr-card">
+            <h2 class="section-title">基本資料（可直接改）</h2>
+            <form id="emp-inline" class="inline-grid">
+              ${field('name', '姓名', e.name)}${field('department', '部門', e.department)}
+              ${field('job', '職稱', e.job)}${sel('employmentType', '雇用型態', TYPES, e.employmentType)}
+              ${sel('payType', '計薪型態', PAY_TYPES, e.payType || (e.employmentType === '兼職' || e.employmentType === '時薪' ? '兼職' : '正職'))}${sel('paymentMethod', '匯款類型', PAY_METHODS, e.paymentMethod || '匯款')}
+              ${field('arrivalDate', '到職日', e.arrivalDate, 'date')}${field('departureDate', '離職日', e.departureDate, 'date')}
+              ${field('phone', '電話', e.phone)}${field('emergencyContact', '緊急聯絡人', e.emergencyContact)}
+              ${field('paperLocation', '紙本位置', e.paperLocation)}${field('lineId', 'LINE ID', e.lineId)}
+              ${field('lineBound', 'LINE 綁定狀態', e.lineBound)}
+              <div class="field" style="grid-column:1/-1"><span>備註</span><textarea name="notes">${esc(e.notes)}</textarea></div>
+              <div style="grid-column:1/-1"><button class="hr-btn" type="submit">儲存基本資料</button></div>
+            </form>
+            ${miss.length ? `<p class="muted">報到清單未完成：${miss.map(esc).join('、')}</p>` : '<p class="muted">報到清單已齊（緊急聯絡人、紙本位置、身分證）。</p>'}
+          </section>
+          <section class="hr-card" id="leave-ledger">
+            ${leaveBlock(e)}
+          </section>
+          <section class="hr-card">
+            <h2 class="section-title">勞健保</h2>
+            ${recs('insurance').map((r) => `<div class="doc"><div>勞保 ${esc(r.labor || '—')}　健保 ${esc(r.health || '—')}　${esc(r.date || '')}</div><div class="muted">${esc(r.note || '')}${r.laborGrade || r.healthGrade ? '（級距已保存）' : ''}</div></div>`).join('') || '<p class="muted">尚無保險紀錄。</p>'}
+            <button class="hr-btn ghost" data-act="add-ins" style="margin-top:8px">＋ 新增保險紀錄</button>
+          </section>
+          <section class="hr-card">
+            <h2 class="section-title">人事異動</h2>
+            ${recs('change').map((r) => `<div class="doc"><div>${esc(r.date || '')}　${esc(r.title || r.type || '異動')}</div><div class="muted">${esc(r.note || '')}</div></div>`).join('') || '<p class="muted">尚無異動紀錄。</p>'}
+            <button class="hr-btn ghost" data-act="add-chg" style="margin-top:8px">＋ 新增異動</button>
+          </section>
+        </div>
+        <div class="profile-side">
+          <section class="hr-card">
+            <h2 class="section-title">證件文件</h2>
+            <p class="muted">在這上傳就會自動綁到這位員工，檔名規則與舊系統相同。舊檔保留，不會覆蓋。</p>
+            ${['identity', 'bank', 'license'].map((cat) => `
+              <div class="drop" data-drop="${cat}" style="margin:8px 0">
+                <strong>${DOC[cat]}</strong>
+                <div class="muted">拖放或點此選檔（JPG／PNG／WEBP／PDF，12MB 內）</div>
+                ${cat === 'license' ? '<div class="field" style="margin-top:8px;text-align:left"><span>駕照效期</span><input type="date" data-exp="license"></div>' : ''}
+                <input type="file" accept="image/jpeg,image/png,image/webp,application/pdf" hidden data-file="${cat}">
+                ${docs.filter((d) => d.category === cat).map((d) => `<div class="doc" style="margin-top:8px;text-align:left"><div><div>${esc(d.filename)}</div><div class="path">已存到 ${esc(d.displayPath || d.path || ('/volume1/人事資料/' + DOC[cat] + '/' + d.filename))}</div>${d.expiresOn ? `<div class="muted">效期 ${esc(d.expiresOn)}</div>` : ''}</div>${!demo ? `<a href="/api/hr/documents/${esc(d.id)}/file" target="_blank">查看</a>` : ''}</div>`).join('')}
+              </div>`).join('')}
+          </section>
+          <section class="hr-card">
+            <h2 class="section-title">薪資與打卡</h2>
+            <p class="muted">資料已保存（薪資筆數 ${sal}，打卡列於系統中），此畫面先不操作，也不新增排班／工時／薪資功能。</p>
+          </section>
+        </div>
+      </div>
+      <div id="hr-dialogs"></div>`;
+    $('[data-act="back"]', root).onclick = () => { route = {page: 'list'}; paintStaff(root); };
+    $('#emp-inline', root).onsubmit = async (ev) => {
+      ev.preventDefault();
+      const f = ev.target;
+      const body = Object.fromEntries(['name', 'department', 'job', 'employmentType', 'payType', 'paymentMethod', 'arrivalDate', 'departureDate', 'phone', 'emergencyContact', 'paperLocation', 'lineId', 'lineBound', 'notes'].map((k) => [k, f.elements[k].value]));
+      try { await write('/api/hr/employees/' + id, 'PATCH', body); toast('已儲存 ' + body.name); await refresh(); paintProfile(root, id); }
+      catch (err) { toast(err.message); }
+    };
+    bindLeave(root, id);
+    $('[data-act="add-ins"]', root).onclick = () => openRecord(root, id, 'insurance');
+    $('[data-act="add-chg"]', root).onclick = () => openRecord(root, id, 'change');
+    $$('[data-drop]', root).forEach((box) => bindDrop(box, id, root));
+  }
+
+  function field(name, label, value, type = 'text') {
+    return `<div class="field"><span>${esc(label)}</span><input name="${name}" type="${type}" value="${esc(value || '')}"></div>`;
+  }
+  function sel(name, label, opts, value) {
+    return `<div class="field"><span>${esc(label)}</span><select name="${name}">${opts.map((o) => `<option ${o === value ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></div>`;
+  }
+  function bindDrop(box, employeeId, root) {
+    const cat = box.dataset.drop;
+    const input = $('[data-file]', box);
+    box.addEventListener('click', (e) => { if (e.target.closest('a,input')) return; input.click(); });
+    box.addEventListener('dragover', (e) => { e.preventDefault(); box.classList.add('over'); });
+    box.addEventListener('dragleave', () => box.classList.remove('over'));
+    box.addEventListener('drop', (e) => { e.preventDefault(); box.classList.remove('over'); if (e.dataTransfer.files[0]) doUpload(employeeId, cat, e.dataTransfer.files[0], root, box); });
+    input.addEventListener('change', () => { if (input.files[0]) doUpload(employeeId, cat, input.files[0], root, box); input.value = ''; });
+  }
+  async function doUpload(employeeId, cat, file, root, box) {
+    const exp = box ? $('[data-exp]', box)?.value : '';
+    try {
+      const saved = await uploadFile(employeeId, cat, file, exp);
+      toast('已存到 ' + (saved.displayPath || saved.path || saved.filename));
+      await refresh();
+      paintProfile(root, employeeId);
+    } catch (e) { toast(e.message); }
+  }
+
+  function paintRecruitment(root) {
+    if (route.page === 'candidate' && route.id) return paintCandidate(root, route.id);
+    const t = today();
+    const open = state.candidates.filter((c) => OPEN.includes(c.status));
+    const todayList = open.filter((c) => c.followupDate === t);
+    const overdue = open.filter((c) => c.followupDate && c.followupDate < t);
+    const cols = ['待聯絡', '待面試', '待回覆', '錄取', '待報到'];
+    root.innerHTML = `
+      <div class="hr-grid">
+        <div class="hr-card today"><div class="k">今日待聯絡</div><div class="n">${todayList.length}</div></div>
+        <div class="hr-card overdue"><div class="k">已過期未跟</div><div class="n">${overdue.length}</div></div>
+        <div class="hr-card"><div class="k">進行中</div><div class="n">${open.length}</div></div>
+      </div>
+      <section class="hr-card" style="margin-bottom:16px">
+        <h2 class="section-title">部門補足進度</h2>
+        ${(state.recruitmentGoals || []).map((g) => `<div style="margin:8px 0"><div style="display:flex;justify-content:space-between"><strong>${esc(g.department)}</strong><span class="muted">在職 ${g.current}　淨補足 ${g.netFilled}／需求 ${g.required}　${g.percent}%</span></div><div class="progress"><i style="width:${g.percent}%"></i></div></div>`).join('') || '<p class="muted">尚未設定需求。</p>'}
+        <div class="hr-toolbar" style="margin-top:10px">
+          <button class="hr-btn ghost" data-act="goal">＋ 增加需求人數</button>
+          <button class="hr-btn" data-act="add-cand">＋ 新增應徵者</button>
+          <button class="hr-btn ghost" data-act="excel">匯入徵人 Excel</button>
+        </div>
+      </section>
+      <div class="kanban">
+        ${cols.map((s) => {
+          const items = state.candidates.filter((c) => c.status === s && match(c, ['name', 'phone', 'department', 'job']));
+          return `<div class="kanban-col" data-col="${s}"><h3>${s} <span class="muted">${items.length}</span></h3>${items.map((c) => `<article class="kanban-item${c.followupDate && c.followupDate < t ? ' overdue' : ''}" draggable="true" data-open="${esc(c.id)}"><div class="name">${esc(c.name)}</div><div class="meta">${esc(c.department || '')} ${esc(c.job || '')}<br>${esc(c.phone)} ${c.followupDate ? '跟進 ' + esc(c.followupDate) : ''}</div></article>`).join('')}</div>`;
+        }).join('')}
+      </div>`;
+    $$('[data-open]', root).forEach((el) => el.onclick = () => { route = {page: 'candidate', id: el.dataset.open}; paintCandidate(root, el.dataset.open); });
+    $$('.kanban-item', root).forEach((el) => {
+      el.addEventListener('dragstart', (ev) => ev.dataTransfer.setData('text/plain', el.dataset.open));
+    });
+    $$('.kanban-col', root).forEach((col) => {
+      col.addEventListener('dragover', (ev) => ev.preventDefault());
+      col.addEventListener('drop', async (ev) => {
+        ev.preventDefault();
+        const id = ev.dataTransfer.getData('text/plain');
+        const status = col.dataset.col;
+        try { await write('/api/hr/candidates/' + id, 'PATCH', {status}); toast('已改為 ' + status); await refresh(); paintRecruitment(root); }
+        catch (e) { toast(e.message); }
+      });
+    });
+    $('[data-act="add-cand"]', root).onclick = () => openCandForm(root);
+    $('[data-act="goal"]', root).onclick = () => openGoal(root);
+    $('[data-act="excel"]', root).onclick = () => openExcel(root, 'recruitment');
+  }
+
+  function paintCandidate(root, id) {
+    const c = state.candidates.find((x) => x.id === id);
+    if (!c) { route = {page: 'list'}; return paintRecruitment(root); }
+    const evs = state.recruitmentEvents.filter((e) => e.candidateId === id);
+    root.innerHTML = `
+      <div class="hr-toolbar"><button class="hr-btn ghost" data-act="back">← 返回徵人看板</button></div>
+      <div class="profile">
+        <section class="hr-card">
+          <h2 class="section-title">${esc(c.name)} <span class="pill st-${esc(c.status)}">${esc(c.status)}</span></h2>
+          <form id="cand-inline" class="inline-grid">
+            ${field('name', '姓名', c.name)}${field('phone', '電話', c.phone)}
+            ${field('department', '部門', c.department)}${field('job', '職缺', c.job)}
+            ${field('source', '來源', c.source)}${field('contactPerson', '窗口', c.contactPerson)}
+            ${field('availableDate', '可到職', c.availableDate, 'date')}${field('followupDate', '下次跟進', c.followupDate, 'date')}
+            ${field('interviewAt', '面試時間', c.interviewAt)}
+            ${sel('status', '進度', STATUSES, c.status)}
+            <div class="field" style="grid-column:1/-1"><span>備註</span><textarea name="notes">${esc(c.notes)}</textarea></div>
+            <div style="grid-column:1/-1"><button class="hr-btn" type="submit">儲存</button> <span class="muted">「已報到」只能透過報到轉員工完成。</span></div>
+          </form>
+        </section>
+        <div class="profile-side">
+          <section class="hr-card">
+            <h2 class="section-title">快速紀錄</h2>
+            <div class="hr-toolbar">
+              <button class="hr-btn" data-act="call">記錄電話</button>
+              <button class="hr-btn ghost" data-act="iv">記錄面試</button>
+            </div>
+            ${c.status === '待報到' || c.status === '錄取' ? `<button class="hr-btn" data-act="convert" style="width:100%;margin-top:8px">報到並轉為員工</button>` : ''}
+            ${c.employeeId ? `<p>已轉為員工 <button class="hr-btn ghost" data-act="goto-emp">${esc(c.employeeId)}</button></p>` : ''}
+          </section>
+          <section class="hr-card">
+            <h2 class="section-title">聯絡與面試歷程</h2>
+            ${evs.map((e) => `<div class="doc"><div>${esc(e.kind === 'phone' ? '電話' : '面試')}　${esc(e.outcome || '')}</div><div class="muted">${esc(e.notes || '')} ${esc(e.created || e.at || '')}</div></div>`).join('') || '<p class="muted">尚無紀錄，可用上方快速記錄。</p>'}
+          </section>
+        </div>
+      </div>
+      <div id="hr-dialogs"></div>`;
+    $('[data-act="back"]', root).onclick = () => { route = {page: 'list'}; paintRecruitment(root); };
+    $('#cand-inline', root).onsubmit = async (ev) => {
+      ev.preventDefault();
+      const f = ev.target;
+      const body = Object.fromEntries(['name', 'phone', 'department', 'job', 'source', 'contactPerson', 'availableDate', 'followupDate', 'interviewAt', 'status', 'notes'].map((k) => [k, f.elements[k].value]));
+      try { await write('/api/hr/candidates/' + id, 'PATCH', body); toast('已儲存'); await refresh(); paintCandidate(root, id); }
+      catch (err) { toast(err.message); }
+    };
+    $('[data-act="call"]', root).onclick = () => openLog(root, id, 'phone');
+    $('[data-act="iv"]', root).onclick = () => openLog(root, id, 'interview');
+    $('[data-act="convert"]', root)?.addEventListener('click', () => openConvert(root, id));
+    $('[data-act="goto-emp"]', root)?.addEventListener('click', () => {
+      ctx.view = 'staff'; route = {page: 'profile', id: c.employeeId};
+      if (window.navigate) { /* stay in module */ }
+      paintProfile(root, c.employeeId);
+    });
+  }
+
+  function dlg(root, title, inner, onsubmit) {
+    const host = $('#hr-dialogs', root) || root;
+    host.innerHTML = `<dialog class="hr-dlg" open><h2>${esc(title)}</h2><form class="dlg-body">${inner}<div class="hr-toolbar" style="margin-top:12px"><button class="hr-btn" type="submit">儲存</button><button class="hr-btn ghost" type="button" data-cancel>取消</button></div></form></dialog>`;
+    const form = $('form', host);
+    $('[data-cancel]', host).onclick = () => { host.innerHTML = ''; };
+    form.onsubmit = async (e) => { e.preventDefault(); await onsubmit(form); host.innerHTML = ''; };
+  }
+  function openEmpForm(root) {
+    if (!$('#hr-dialogs', root)) root.insertAdjacentHTML('beforeend', '<div id="hr-dialogs"></div>');
+    dlg(root, '新增員工', field('name', '姓名', '') + field('department', '部門', '') + field('job', '職稱', '') + sel('employmentType', '雇用型態', TYPES, '正職') + sel('payType', '計薪型態', PAY_TYPES, '正職') + sel('paymentMethod', '匯款類型', PAY_METHODS, '匯款') + field('phone', '電話', '') + field('lineId', 'LINE ID', '') + field('arrivalDate', '到職日', today(), 'date'), async (f) => {
+      const body = Object.fromEntries(['name', 'department', 'job', 'employmentType', 'payType', 'paymentMethod', 'phone', 'lineId', 'arrivalDate'].map((k) => [k, f.elements[k].value]));
+      const row = await write('/api/hr/employees', 'POST', body);
+      toast('已新增 ' + row.id); await refresh(); route = {page: 'profile', id: row.id}; paintProfile(root, row.id);
+    });
+  }
+  function openCandForm(root) {
+    if (!$('#hr-dialogs', root)) root.insertAdjacentHTML('beforeend', '<div id="hr-dialogs"></div>');
+    dlg(root, '新增應徵者', field('name', '姓名', '') + field('phone', '電話', '') + field('department', '部門', '') + field('job', '職缺', '') + field('source', '來源', '') + field('followupDate', '下次跟進', today(), 'date'), async (f) => {
+      const body = Object.fromEntries(['name', 'phone', 'department', 'job', 'source', 'followupDate'].map((k) => [k, f.elements[k].value]));
+      body.status = '待聯絡';
+      const row = await write('/api/hr/candidates', 'POST', body);
+      toast('已新增應徵者'); await refresh(); route = {page: 'candidate', id: row.id}; paintCandidate(root, row.id);
+    });
+  }
+  function openLog(root, id, kind) {
+    const outcomes = kind === 'phone' ? PHONE : INTERVIEW;
+    dlg(root, kind === 'phone' ? '記錄電話' : '記錄面試',
+      sel('outcome', '結果', outcomes, outcomes[0]) + field('contactPerson', '窗口', '') + field('notes', '備註', '') + field('nextFollowup', '下次跟進', today(), 'date') + (kind === 'phone' ? field('nextInterviewAt', '若約定面試，時間', '') : ''),
+      async (f) => {
+        await write('/api/hr/candidates/' + id + '/events', 'POST', {kind, outcome: f.elements.outcome.value, contactPerson: f.elements.contactPerson.value, notes: f.elements.notes.value, nextFollowup: f.elements.nextFollowup.value, nextInterviewAt: f.elements.nextInterviewAt?.value || ''});
+        toast('已記錄'); await refresh(); paintCandidate(root, id);
+      });
+  }
+  function openConvert(root, id) {
+    const c = state.candidates.find((x) => x.id === id);
+    const choices = PREFIX_CHOICES[c.department] || (prefixFor(c.department) ? [prefixFor(c.department)] : ['D','F','H','W','E','O']);
+    const preview = nextEmpId(c.department, choices[0]);
+    dlg(root, '報到並轉為員工',
+      `<p class="muted">員工編號依打卡計薪規則自動給「部門字首＋流水號」（物流 D、摺疊 F、撐開 H、洗滓 W／E、辦公室／行政 O）。既有編號原樣保留。預覽：<strong>${esc(preview || '請選擇字首')}</strong>。並帶入報到清單。</p>` + field('department', '部門', c.department) + `<div class="field"><span>編號字首</span><select name="prefix">${choices.map((p) => `<option>${p}</option>`).join('')}</select></div>` + field('job', '職稱', c.job) + sel('employmentType', '雇用型態', TYPES, '正職') + sel('payType', '計薪型態', PAY_TYPES, '正職') + sel('paymentMethod', '匯款類型', PAY_METHODS, '匯款') + field('lineId', 'LINE ID', '') + field('arrivalDate', '到職日', c.availableDate || today(), 'date') + field('phone', '電話', c.phone),
+      async (f) => {
+        const body = Object.fromEntries(['department', 'job', 'employmentType', 'payType', 'paymentMethod', 'lineId', 'arrivalDate', 'phone', 'prefix'].map((k) => [k, f.elements[k].value]));
+        const r = await write('/api/hr/candidates/' + id + '/convert', 'POST', body);
+        toast('已轉為 ' + r.employee.id);
+        await refresh();
+        route = {page: 'profile', id: r.employee.id};
+        ctx.view = 'staff';
+        if (ctx.go) ctx.go('staff', {keepRoute: true});
+        else paintProfile(root, r.employee.id);
+      });
+  }
+  function openGoal(root) {
+    if (!$('#hr-dialogs', root)) root.insertAdjacentHTML('beforeend', '<div id="hr-dialogs"></div>');
+    dlg(root, '增加徵人需求', field('department', '部門', '') + field('additional', '要再補幾人', '1', 'number') + field('notes', '備註', ''), async (f) => {
+      await write('/api/hr/goals', 'POST', {department: f.elements.department.value, additional: Number(f.elements.additional.value), notes: f.elements.notes.value});
+      toast('已更新需求'); await refresh(); paintRecruitment(root);
+    });
+  }
+
+  function leaveBlock(e) {
+    const years = (state.leaveYears || []).filter((y) => y.employeeId === e.id).sort((a, b) => b.startsOn.localeCompare(a.startsOn));
+    const t = today();
+    const current = years.find((y) => y.startsOn <= t && t <= y.endsOn) || years[0];
+    const history = years.filter((y) => current && y.id !== current.id);
+    const entriesOf = (id) => (state.leaveEntries || []).filter((x) => x.leaveYearId === id).sort((a, b) => b.takenOn.localeCompare(a.takenOn));
+    const yearHtml = (y, isCurrent) => {
+      const entries = entriesOf(y.id);
+      return `<div class="doc" style="align-items:flex-start;flex-direction:column">
+        <div style="width:100%;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
+          <div><strong>${isCurrent ? '本年度（到職日週年）' : '過往年度'}</strong><div class="muted">${esc(y.startsOn)} ～ ${esc(y.endsOn)}</div>
+          <div style="margin-top:6px;font-size:16px">${esc(y.summary)}</div>
+          <div class="muted">法定應有 ${esc(y.statutory)} 天${y.entitledSource === 'manual' ? '；已手動調整為 ' + esc(y.entitled) + ' 天' : ''}${y.settledOn ? '　結算日 ' + esc(y.settledOn) + '　經手 ' + esc(y.settledBy || '') : ''}</div></div>
+          <div>${y.status === '未結算' ? `<button class="hr-btn ghost" data-leave-entry="${esc(y.id)}">＋ 登記請假</button> <button class="hr-btn ghost" data-leave-override="${esc(y.id)}">調整應有天數</button> <button class="hr-btn" data-leave-settle="${esc(y.id)}">結算</button>` : `<span class="pill">${esc(y.status)}</span>`}</div>
+        </div>
+        ${entries.length ? `<table class="hr-table" style="margin-top:8px"><thead><tr><th>日期</th><th>天數</th><th>備註</th><th></th></tr></thead><tbody>${entries.map((en) => `<tr><td>${esc(en.takenOn)}</td><td>${esc(en.days)}</td><td>${esc(en.notes || '')}</td><td>${y.status === '未結算' ? `<button class="hr-btn ghost" data-leave-del="${esc(en.id)}">刪除</button>` : ''}</td></tr>`).join('')}</tbody></table>` : '<p class="muted" style="margin-top:8px">尚無請假紀錄。</p>'}
+      </div>`;
+    };
+    return `<h2 class="section-title">特休台帳</h2>
+      <p class="muted">特休年度以到職日週年計算（勞基法第 38 條自動核給；可手動調整）。請假可登記 0.5 天。結算只記狀態、日期與經手人，不記金額；年度結束未休完時，預設為「未休完已折現」。</p>
+      ${!e.arrivalDate ? '<p class="muted">尚未填到職日，無法核給特休。</p>' : (current ? yearHtml(current, true) : '<p class="muted">到職未滿六個月，尚未核給特休。</p>')}
+      ${history.length ? `<h3 class="section-title" style="margin-top:12px">歷年紀錄</h3>${history.map((y) => yearHtml(y, false)).join('')}` : ''}`;
+  }
+  function bindLeave(root, employeeId) {
+    $$('[data-leave-entry]', root).forEach((b) => b.onclick = () => openLeaveEntry(root, employeeId, b.dataset.leaveEntry));
+    $$('[data-leave-override]', root).forEach((b) => b.onclick = () => openLeaveOverride(root, employeeId, b.dataset.leaveOverride));
+    $$('[data-leave-settle]', root).forEach((b) => b.onclick = () => openLeaveSettle(root, employeeId, b.dataset.leaveSettle));
+    $$('[data-leave-del]', root).forEach((b) => b.onclick = async () => {
+      try { await write('/api/hr/leave-entries/' + b.dataset.leaveDel, 'DELETE'); toast('已刪除'); await refresh(); paintProfile(root, employeeId); }
+      catch (e) { toast(e.message); }
+    });
+  }
+  function openLeaveEntry(root, employeeId, leaveYearId) {
+    dlg(root, '登記請假', field('takenOn', '日期', today(), 'date') + field('days', '天數（可 0.5）', '1', 'number') + field('notes', '備註', ''), async (f) => {
+      await write('/api/hr/leave-entries', 'POST', {employeeId, leaveYearId, takenOn: f.elements.takenOn.value, days: Number(f.elements.days.value), notes: f.elements.notes.value});
+      toast('已登記請假'); await refresh(); paintProfile(root, employeeId);
+    });
+  }
+  function openLeaveOverride(root, employeeId, id) {
+    const y = state.leaveYears.find((x) => x.id === id);
+    dlg(root, '調整應有天數', `<p class="muted">法定應有 ${esc(y.statutory)} 天。調整後仍以你輸入的天數為準。</p>` + field('entitled', '應有天數', y.entitled, 'number'), async (f) => {
+      await write('/api/hr/leave-years/' + id, 'PATCH', {entitled: Number(f.elements.entitled.value)});
+      toast('已調整應有天數'); await refresh(); paintProfile(root, employeeId);
+    });
+  }
+  function openLeaveSettle(root, employeeId, id) {
+    const y = state.leaveYears.find((x) => x.id === id);
+    const def = Number(y.remaining) <= 0 ? '已休完' : '未休完已折現';
+    dlg(root, '結算特休年度',
+      `<p class="muted">${esc(y.summary)}。未休完時預設「未休完已折現」（公司慣例）；仍可改為遞延到明年或已休完。只記錄狀態、結算日與經手人，不登記金額。</p>`
+      + `<div class="field"><span>結算狀態</span><select name="status">${['未休完已折現', '遞延到明年', '已休完'].map((s) => `<option ${s === def ? 'selected' : ''}>${s}</option>`).join('')}</select></div>`
+      + field('settledOn', '結算日期', today(), 'date') + field('settledBy', '經手人', '') + field('notes', '備註', ''),
+      async (f) => {
+        await write('/api/hr/leave-years/' + id + '/settle', 'POST', {status: f.elements.status.value, settledOn: f.elements.settledOn.value, settledBy: f.elements.settledBy.value, notes: f.elements.notes.value});
+        toast('已結算'); await refresh(); paintProfile(root, employeeId);
+      });
+  }
+
+  function openRecord(root, employeeId, kind) {
+    const title = {leave: '新增特休', insurance: '新增保險紀錄', change: '新增人事異動'}[kind];
+    let fields = field('date', '日期', today(), 'date') + field('note', '備註', '');
+    if (kind === 'leave') fields = field('year', '年度', String(new Date().getFullYear()), 'number') + field('days', '給假天數', '', 'number') + field('used', '已用天數', '0', 'number') + field('note', '備註', '');
+    if (kind === 'insurance') fields = field('date', '日期', today(), 'date') + sel('labor', '勞保', ['加保', '退保', '異動', '—'], '加保') + sel('health', '健保', ['加保', '退保', '異動', '—'], '加保') + field('note', '備註', '');
+    if (kind === 'change') fields = field('date', '日期', today(), 'date') + field('title', '異動摘要', '') + field('note', '備註', '');
+    dlg(root, title, fields, async (f) => {
+      const body = {kind, employeeId};
+      [...f.elements].forEach((el) => { if (el.name) body[el.name] = el.value; });
+      await write('/api/hr/records', 'POST', body);
+      toast('已新增'); await refresh(); paintProfile(root, employeeId);
+    });
+  }
+  async function doScan(root) {
+    if (demo) { toast('示範模式不掃描本機資料夾；正式環境會掃描 NAS 指定路徑並自動配對。'); return; }
+    try {
+      const r = await write('/api/hr/documents/scan', 'POST', {});
+      toast('已掃描 ' + r.count + ' 個檔案');
+      await refresh();
+      paintStaff(root);
+    } catch (e) { toast(e.message); }
+  }
+  function openExcel(root, kind) {
+    if (!$('#hr-dialogs', root)) root.insertAdjacentHTML('beforeend', '<div id="hr-dialogs"></div>');
+    const extra = kind === 'recruitment' ? field('start', '起始日', '2026-07-01', 'date') + field('end', '結束日', today(), 'date') : '';
+    dlg(root, kind === 'recruitment' ? '匯入徵人 Excel' : '匯入特休 Excel', extra + `<div class="field"><span>檔案（.xlsx / .xls）</span><input type="file" name="file" accept=".xlsx,.xls,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"></div>`, async (f) => {
+      const file = f.elements.file.files[0];
+      if (!file) throw new Error('請選擇檔案');
+      if (demo) { toast('示範模式不寫入 Excel；請在 NAS 正式環境匯入。'); return; }
+      const fd = new FormData();
+      fd.append('file', file);
+      if (kind === 'recruitment') { fd.append('start', f.elements.start.value); fd.append('end', f.elements.end.value); }
+      const previewPath = kind === 'recruitment' ? '/api/hr/recruitment/excel/preview' : '/api/hr/leave/excel/preview';
+      const importPath = kind === 'recruitment' ? '/api/hr/recruitment/excel/import' : '/api/hr/leave/excel/import';
+      const prev = await fetch(previewPath, {method: 'POST', credentials: 'same-origin', headers: ctx.csrf ? {'X-CSRF-Token': ctx.csrf} : {}, body: fd});
+      const data = await prev.json();
+      if (!prev.ok) throw new Error(data.error || '預覽失敗');
+      const rows = data.rows || data;
+      const ok = confirm('預覽 ' + (Array.isArray(rows) ? rows.length : JSON.stringify(data).slice(0, 80)) + ' 筆，確定匯入？');
+      if (!ok) return;
+      await write(importPath, 'POST', {rows: Array.isArray(rows) ? rows : (data.items || [])});
+      toast('已匯入'); await refresh(); kind === 'recruitment' ? paintRecruitment(root) : paintStaff(root);
+    });
+  }
+
+  window.CompanyHr = {
+    render,
+    renderHome,
+    onNavigate,
+    resetDemo() { localStorage.removeItem(KEY); state = seed(); saveDemo(); },
+  };
+})();

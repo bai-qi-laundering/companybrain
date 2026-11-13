@@ -43,6 +43,13 @@ services:
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.1-flash-lite}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?請先填寫 PUBLIC_ORIGIN}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      NAS_IDENTITY_PATH: ${NAS_IDENTITY_PATH:-/volume1/人事資料/身分證}
+      NAS_BANK_PATH: ${NAS_BANK_PATH:-/volume1/人事資料/存摺}
+      NAS_LICENSE_PATH: ${NAS_LICENSE_PATH:-/volume1/人事資料/駕照}
+    volumes:
+      - ${NAS_IDENTITY_PATH:-/volume1/人事資料/身分證}:${NAS_IDENTITY_PATH:-/volume1/人事資料/身分證}
+      - ${NAS_BANK_PATH:-/volume1/人事資料/存摺}:${NAS_BANK_PATH:-/volume1/人事資料/存摺}
+      - ${NAS_LICENSE_PATH:-/volume1/人事資料/駕照}:${NAS_LICENSE_PATH:-/volume1/人事資料/駕照}
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8788}:8788"
     healthcheck:
