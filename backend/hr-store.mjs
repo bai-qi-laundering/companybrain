@@ -2,6 +2,7 @@ import {randomBytes} from 'node:crypto';
 import {AppError} from './domain.mjs';
 import {encryptSecret, decryptSecret, hasPiiKey, last4} from './hr-crypto.mjs';
 import {maskTaiwanId} from './hr-twid.mjs';
+import {DEFAULT_SALARY_IMPORT} from './hr-salary-import.mjs';
 import {yearsForEmployee, decorateYear, defaultSettlement, SETTLEMENTS, DEFAULT_BASIS, endingSoon} from './hr-leave.mjs';
 import {DEFAULT_DEPT_PREFIXES, nextPrefixedId, prefixForDepartment, isUsableEmployeeId, PAY_TYPES, PAYMENT_METHODS} from './hr-ids.mjs';
 
@@ -184,6 +185,7 @@ export class HrStore {
     await this.setSettingIfAbsent('leaveYearBasis', 'anniversary');
     await this.setSettingIfAbsent('leaveSettleDefault', '未休完已折現');
     await this.setSettingIfAbsent('deptPrefixes', DEFAULT_DEPT_PREFIXES);
+    await this.setSettingIfAbsent('salaryImport', DEFAULT_SALARY_IMPORT);
   }
 
   async audit(client, actor, action, target, detail = '') {
@@ -501,6 +503,33 @@ export class HrStore {
       'INSERT INTO hr_settings(key, value) VALUES($1,$2::jsonb) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
       [key, json]
     );
+  }
+
+  async getSalaryImport() {
+    const r = await this.pool.query("SELECT value FROM hr_settings WHERE key='salaryImport'");
+    const v = r.rows[0]?.value || {};
+    const columns = {...DEFAULT_SALARY_IMPORT.columns, ...(v.columns || {})};
+    return {
+      spreadsheetId: String(v.spreadsheetId || DEFAULT_SALARY_IMPORT.spreadsheetId).trim() || DEFAULT_SALARY_IMPORT.spreadsheetId,
+      sheetTab: String(v.sheetTab || DEFAULT_SALARY_IMPORT.sheetTab).trim() || DEFAULT_SALARY_IMPORT.sheetTab,
+      columns,
+    };
+  }
+  async saveSalaryImport(body, actor) {
+    const cur = await this.getSalaryImport();
+    const next = {
+      spreadsheetId: String(body.spreadsheetId || cur.spreadsheetId).trim() || cur.spreadsheetId,
+      sheetTab: String(body.sheetTab || cur.sheetTab).trim() || cur.sheetTab,
+      columns: {
+        month: String(body.columns?.month || body.month || cur.columns.month).trim() || cur.columns.month,
+        employeeId: String(body.columns?.employeeId || body.employeeId || cur.columns.employeeId).trim() || cur.columns.employeeId,
+        name: String(body.columns?.name || body.name || cur.columns.name).trim() || cur.columns.name,
+        amount: String(body.columns?.amount || body.amount || cur.columns.amount).trim() || cur.columns.amount,
+      },
+    };
+    await this.setSetting('salaryImport', next);
+    if (actor) await this.audit(this.pool, actor, '更新薪資匯入設定', 'salaryImport', next.sheetTab);
+    return next;
   }
 
   async insertLeaveRow(id, employeeId, payload) {

@@ -280,3 +280,65 @@ test('monthly salary ledger stores net pay and remittance, with no attendance in
     await rm(ctx.docRoot, {recursive: true, force: true});
   }
 });
+
+
+test('salary import preview compares fixture rows and confirm writes only new and changed', async () => {
+  const prev = process.env.HR_SALARY_SHEET_FIXTURE;
+  process.env.HR_SALARY_SHEET_FIXTURE = path.join(root, 'tests/fixtures/salary-sheet.csv');
+  const ctx = await start();
+  try {
+    await ctx.api('/api/hr/employees', 'POST', {id: 'EMP-014', name: '陳志明', department: '物流', arrivalDate: '2022-05-20'});
+    await ctx.api('/api/hr/employees', 'POST', {id: 'EMP-001', name: '黃淑芬', department: '行政', arrivalDate: '2019-03-01'});
+    await ctx.api('/api/hr/employees', 'POST', {id: 'EMP-015', name: '張偉誠', department: '物流', arrivalDate: '2023-09-11'});
+    await ctx.api('/api/hr/salaries', 'POST', {employeeId: 'EMP-014', month: '2026-10', netPay: 41500, remittance: '未匯'});
+    await ctx.api('/api/hr/salaries', 'POST', {employeeId: 'EMP-001', month: '2026-10', netPay: 38000, remittance: '已匯'});
+    const preview = await (await ctx.api('/api/hr/salaries/import/preview', 'POST', {month: '2026-10'})).json();
+    assert.equal(preview.month, '2026-10');
+    assert.equal(preview.counts.changed, 1);
+    assert.equal(preview.counts.new, 1);
+    assert.equal(preview.counts.same, 1);
+    assert.equal(preview.counts.unmatched, 1);
+    const confirmed = await (await ctx.api('/api/hr/salaries/import/confirm', 'POST', {month: '2026-10', rows: preview.rows})).json();
+    assert.equal(confirmed.saved, 2);
+    const state = await (await ctx.api('/api/hr/state')).json();
+    const a = state.salaries.find((s) => s.employeeId === 'EMP-014' && s.month === '2026-10');
+    const b = state.salaries.find((s) => s.employeeId === 'EMP-015' && s.month === '2026-10');
+    const c = state.salaries.find((s) => s.employeeId === 'EMP-001' && s.month === '2026-10');
+    assert.equal(a.netPay, 43000);
+    assert.equal(b.netPay, 35000);
+    assert.equal(c.netPay, 38000);
+    assert.equal(c.remittance, '已匯');
+    assert.equal(state.salaries.some((s) => s.employeeId === 'O002'), false);
+  } finally {
+    if (prev == null) delete process.env.HR_SALARY_SHEET_FIXTURE;
+    else process.env.HR_SALARY_SHEET_FIXTURE = prev;
+    await new Promise((r) => ctx.server.close(r));
+    await ctx.db.close();
+    await rm(ctx.docRoot, {recursive: true, force: true});
+  }
+});
+
+test('salary import degrades with setup instructions when not configured', async () => {
+  const prevFix = process.env.HR_SALARY_SHEET_FIXTURE;
+  const prevSa = process.env.GOOGLE_SA_JSON;
+  delete process.env.HR_SALARY_SHEET_FIXTURE;
+  delete process.env.GOOGLE_SA_JSON;
+  const ctx = await start();
+  try {
+    const status = await (await ctx.api('/api/hr/state')).json();
+    assert.equal(status.salaryImport.configured, false);
+    assert.match(status.salaryImport.instructions || '', /GOOGLE_SA_JSON/);
+    const preview = await ctx.api('/api/hr/salaries/import/preview', 'POST', {});
+    assert.equal(preview.status, 400);
+    const body = await preview.json();
+    assert.match(body.error || '', /GOOGLE_SA_JSON|服務帳戶/);
+  } finally {
+    if (prevFix == null) delete process.env.HR_SALARY_SHEET_FIXTURE;
+    else process.env.HR_SALARY_SHEET_FIXTURE = prevFix;
+    if (prevSa == null) delete process.env.GOOGLE_SA_JSON;
+    else process.env.GOOGLE_SA_JSON = prevSa;
+    await new Promise((r) => ctx.server.close(r));
+    await ctx.db.close();
+    await rm(ctx.docRoot, {recursive: true, force: true});
+  }
+});

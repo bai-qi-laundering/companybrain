@@ -17,7 +17,7 @@
   let demo = true;
 
   function emptyState() {
-    return {employees: [], records: [], documents: [], candidates: [], recruitmentEvents: [], recruitmentGoals: [], leaveExcel: [], salaries: [], audit: [], lastImport: null, leaveYears: [], leaveEntries: [], leaveYearBasis: 'anniversary', leaveSettleDefault: '未休完已折現', leaveExpiryReminders: [], ocrReviews: [], ocr: {geminiConfigured: false, piiKeyConfigured: false}};
+    return {employees: [], records: [], documents: [], candidates: [], recruitmentEvents: [], recruitmentGoals: [], leaveExcel: [], salaries: [], audit: [], lastImport: null, leaveYears: [], leaveEntries: [], leaveYearBasis: 'anniversary', leaveSettleDefault: '未休完已折現', leaveExpiryReminders: [], ocrReviews: [], ocr: {geminiConfigured: false, piiKeyConfigured: false}, salaryImport: {configured: false}};
   }
   function today() {
     return new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit'}).format(new Date());
@@ -148,7 +148,7 @@
       {id: 'SAL-demo-2', employeeId: 'EMP-014', month: '2026-10', netPay: 41500, notes: '', remittance: '未匯'},
       {id: 'SAL-demo-3', employeeId: 'EMP-001', month: '2026-10', netPay: 38000, notes: '', remittance: '已匯'},
     ];
-    return {employees, records, documents, candidates, recruitmentEvents: [], recruitmentGoals, leaveExcel: [], salaries, audit: [], lastImport: null, leaveYearBasis: 'anniversary', leaveSettleDefault: '未休完已折現', leaveYears: leaveYears.map((y) => decorateLeave(y, leaveEntries)), leaveEntries, leaveExpiryReminders: []};
+    return {employees, records, documents, candidates, recruitmentEvents: [], recruitmentGoals, leaveExcel: [], salaries, audit: [], lastImport: null, leaveYearBasis: 'anniversary', leaveSettleDefault: '未休完已折現', leaveYears: leaveYears.map((y) => decorateLeave(y, leaveEntries)), leaveEntries, leaveExpiryReminders: [], salaryImport: {configured: true, source: 'demo', spreadsheetId: '', sheetTab: '薪資計算明細', columns: {month: '計算月份', employeeId: '員工編號', name: '員工姓名', amount: '實領薪資'}}};
   }
   function decorateGoal(g, employees, day = today()) {
     const current = employees.filter((e) => e.department === g.department && active(e, day)).length;
@@ -367,7 +367,31 @@
       state.salaries = (state.salaries || []).filter((s) => s.id !== m[1]);
       saveDemo(); return {ok: true};
     }
+    if (path === '/api/hr/salaries/import/preview' && method === 'POST') {
+      return demoSalaryPreview(body);
+    }
+    if (path === '/api/hr/salaries/import/confirm' && method === 'POST') {
+      const month = body.month;
+      let saved = 0, skipped = 0;
+      for (const r of (body.rows || [])) {
+        if (r.status === 'unmatched' || r.status === 'same' || !state.employees.some((e) => e.id === r.employeeId)) { skipped += 1; continue; }
+        const cur = (state.salaries || []).find((s) => s.employeeId === r.employeeId && s.month === (r.month || month));
+        if (cur) { cur.netPay = Number(r.netPay); if (!cur.notes) cur.notes = '由薪資計算明細匯入'; }
+        else {
+          state.salaries = state.salaries || [];
+          state.salaries.push({id: 'SAL-' + Date.now() + '-' + r.employeeId, employeeId: r.employeeId, month: r.month || month, netPay: Number(r.netPay), notes: '由薪資計算明細匯入', remittance: '未匯'});
+        }
+        saved += 1;
+      }
+      saveDemo();
+      return {ok: true, month, saved, skipped};
+    }
+    if (path === '/api/hr/settings/salaryImport' && method === 'PATCH') {
+      state.salaryImport = Object.assign({}, state.salaryImport || {}, body, {configured: Boolean((state.salaryImport || {}).configured)});
+      saveDemo(); return state.salaryImport;
+    }
     throw new Error('示範模式不支援 ' + method + ' ' + path);
+
 
 
 
@@ -470,6 +494,7 @@
         <button class="hr-btn ghost" data-act="scan">掃描舊文件並配對</button>
         <button class="hr-btn ghost" data-act="ocr-bank">批次辨識既有存摺</button>
         <button class="hr-btn ghost" data-act="leave-excel">匯入特休 Excel</button>
+        <button class="hr-btn ghost" data-act="salary-import">匯入本月薪資</button>
         <span class="spacer"></span>
         <span class="muted">點列即可開啟單頁檔案；欄位可直接改。</span>
       </div>
@@ -480,6 +505,7 @@
     $('[data-act="scan"]', root).onclick = () => doScan(root);
     $('[data-act="ocr-bank"]', root).onclick = () => doBatchBank(root);
     $('[data-act="leave-excel"]', root).onclick = () => openExcel(root, 'leave');
+    $('[data-act="salary-import"]', root).onclick = () => openSalaryImport(root);
   }
 
   function paintProfile(root, id) {
@@ -726,9 +752,12 @@
       <td><button type="button" class="hr-btn ghost" data-sal-edit="${esc(s.id)}">修改</button> <button type="button" class="hr-btn ghost" data-sal-del="${esc(s.id)}">刪除</button></td>
     </tr>`).join('') || '<tr><td colspan="5" class="muted">尚無薪資紀錄。</td></tr>';
     return `<h2 class="section-title">薪資</h2>
-      <p class="muted">按月登記實發金額與匯款狀態。不匯入打卡紀錄，也不串接打卡算薪水試算表。</p>
+      <p class="muted">按月登記實發金額與匯款狀態。可用「匯入本月薪資」從打卡算薪水試算表帶入實領金額，不匯入打卡明細。</p>
       <table class="hr-table salary-table"><thead><tr><th>月份</th><th>實發金額</th><th>備註</th><th>匯款狀態</th><th></th></tr></thead><tbody>${body}</tbody></table>
-      <button class="hr-btn ghost" data-act="add-salary" style="margin-top:8px">＋ 新增薪資紀錄</button>`;
+      <div class="hr-toolbar" style="margin-top:8px">
+        <button class="hr-btn ghost" data-act="add-salary">＋ 新增薪資紀錄</button>
+        <button class="hr-btn ghost" data-act="salary-import">匯入本月薪資</button>
+      </div>`;
   }
   function bindSalary(root, employeeId) {
     const open = (existing) => {
@@ -745,12 +774,114 @@
         });
     };
     $('[data-act="add-salary"]', root).onclick = () => open(null);
+    $('[data-act="salary-import"]', root).onclick = () => openSalaryImport(root);
     $$('[data-sal-edit]', root).forEach((b) => b.onclick = () => open((state.salaries || []).find((s) => s.id === b.dataset.salEdit)));
     $$('[data-sal-del]', root).forEach((b) => b.onclick = async () => {
       if (!confirm('確定刪除這筆薪資紀錄？')) return;
       try { await write('/api/hr/salaries/' + b.dataset.salDel, 'DELETE'); toast('已刪除'); await refresh(); paintProfile(root, employeeId); }
       catch (err) { toast(err.message); }
     });
+  }
+
+
+  const STATUS_LABEL = {new: '新增', changed: '金額變更', same: '相同', unmatched: '對不到員工'};
+  function demoSalaryPreview(body) {
+    const month = body.month || '2026-10';
+    const sample = [
+      {month, employeeId: 'EMP-014', name: '陳志明', netPay: 43000},
+      {month, employeeId: 'EMP-001', name: '黃淑芬', netPay: 38000},
+      {month, employeeId: 'EMP-015', name: '張偉誠', netPay: 35000},
+      {month, employeeId: 'O002', name: 'NANA', netPay: 44571},
+    ];
+    const rows = sample.map((r) => {
+      const emp = state.employees.find((e) => e.id === r.employeeId);
+      const existing = emp ? (state.salaries || []).find((s) => s.employeeId === emp.id && s.month === r.month) : null;
+      let status = 'unmatched';
+      if (emp && !existing) status = 'new';
+      else if (emp && Number(existing.netPay) !== Number(r.netPay)) status = 'changed';
+      else if (emp) status = 'same';
+      return {month: r.month, employeeId: r.employeeId, name: emp?.name || r.name, netPay: r.netPay, existingPay: existing ? Number(existing.netPay) : null, status};
+    });
+    const counts = {new: 0, changed: 0, same: 0, unmatched: 0};
+    for (const r of rows) counts[r.status] += 1;
+    return {month, months: [month], columns: {month: '計算月份', employeeId: '員工編號', name: '員工姓名', amount: '實領薪資'}, headers: ['計算月份', '員工編號', '員工姓名', '實領薪資'], rows, counts, skipped: 2, configured: true};
+  }
+  async function openSalaryImport(root) {
+    if (!$('#hr-dialogs', root)) root.insertAdjacentHTML('beforeend', '<div id="hr-dialogs"></div>');
+    const host = $('#hr-dialogs', root);
+    const info = state.salaryImport || {};
+    const close = () => { host.innerHTML = ''; };
+    if (!info.configured && !demo) {
+      host.innerHTML = `<dialog class="hr-dlg wide" open><h2>匯入本月薪資</h2><div class="dlg-body"><pre class="setup-help">${esc(info.instructions || '尚未設定 Google 服務帳戶，無法讀取試算表。請在 NAS 的 settings.env 設定 GOOGLE_SA_JSON，並把服務帳戶加成試算表檢視者。')}</pre><div class="hr-toolbar" style="margin-top:12px"><button class="hr-btn ghost" type="button" data-cancel>關閉</button></div></div></dialog>`;
+      $('[data-cancel]', host).onclick = close;
+      return;
+    }
+    host.innerHTML = `<dialog class="hr-dlg wide" open><h2>匯入本月薪資</h2><div class="dlg-body"><p class="muted">正在讀取試算表…</p></div></dialog>`;
+    try {
+      const cols = (info.columns || {month: '計算月份', employeeId: '員工編號', name: '員工姓名', amount: '實領薪資'});
+      let data = await write('/api/hr/salaries/import/preview', 'POST', {columns: cols, month: ''});
+      const paint = (preview) => {
+        const counts = preview.counts || {};
+        const months = preview.months || [];
+        const columns = preview.columns || cols;
+        const rows = preview.rows || [];
+        const actionable = rows.filter((r) => r.status === 'new' || r.status === 'changed');
+        host.innerHTML = `<dialog class="hr-dlg wide" open><h2>匯入本月薪資</h2>
+          <div class="dlg-body">
+            <p class="muted">只帶入員工彙總列的實領薪資，每日打卡明細會略過。對得到的「新增／金額變更」要按確認才會寫入，金額相同或對不到員工的不會改現有資料。</p>
+            <div class="inline-grid">
+              <div class="field"><span>月份</span><select name="month">${months.map((m) => `<option ${m === preview.month ? 'selected' : ''}>${esc(m)}</option>`).join('') || `<option>${esc(preview.month || '')}</option>`}</select></div>
+              <div class="field"><span>月份欄</span><input name="colMonth" value="${esc(columns.month || '')}"></div>
+              <div class="field"><span>員工編號欄</span><input name="colId" value="${esc(columns.employeeId || '')}"></div>
+              <div class="field"><span>姓名欄</span><input name="colName" value="${esc(columns.name || '')}"></div>
+              <div class="field"><span>金額欄</span><input name="colAmount" value="${esc(columns.amount || '')}"></div>
+            </div>
+            <p class="muted">新增 ${counts.new || 0}、金額變更 ${counts.changed || 0}、相同 ${counts.same || 0}、對不到員工 ${counts.unmatched || 0}${preview.skipped ? '、略過 ' + preview.skipped + ' 列' : ''}。</p>
+            <div class="import-table-wrap"><table class="hr-table salary-table"><thead><tr><th>月份</th><th>員工</th><th>金額</th><th>狀態</th></tr></thead>
+            <tbody>${rows.map((r) => `<tr class="st-${esc(r.status)}"><td>${esc(r.month)}</td><td>${esc(r.employeeId)} ${esc(r.name || '')}</td><td class="num">${money(r.netPay)}${r.status === 'changed' && r.existingPay != null ? ' <span class="muted">（現為 ' + money(r.existingPay) + '）</span>' : ''}</td><td><span class="pill ${r.status === 'new' ? 'ok' : r.status === 'changed' ? 'warn' : ''}">${esc(STATUS_LABEL[r.status] || r.status)}</span></td></tr>`).join('') || '<tr><td colspan="4">這個月份沒有可匯入的列。</td></tr>'}</tbody></table></div>
+            <div class="hr-toolbar" style="margin-top:12px">
+              <button class="hr-btn" type="button" data-confirm ${actionable.length ? '' : 'disabled'}>確認寫入 ${actionable.length} 筆</button>
+              <button class="hr-btn ghost" type="button" data-reload>依欄位重新預覽</button>
+              <button class="hr-btn ghost" type="button" data-save-map>儲存欄位對應</button>
+              <button class="hr-btn ghost" type="button" data-cancel>取消</button>
+            </div>
+          </div>
+        </dialog>`;
+        const mapping = () => ({
+          month: host.querySelector('[name=colMonth]').value,
+          employeeId: host.querySelector('[name=colId]').value,
+          name: host.querySelector('[name=colName]').value,
+          amount: host.querySelector('[name=colAmount]').value,
+        });
+        $('[data-cancel]', host).onclick = close;
+        $('[name=month]', host).onchange = async () => {
+          try { data = await write('/api/hr/salaries/import/preview', 'POST', {month: $('[name=month]', host).value, columns: mapping()}); paint(data); }
+          catch (e) { toast(e.message); }
+        };
+        $('[data-reload]', host).onclick = async () => {
+          try { data = await write('/api/hr/salaries/import/preview', 'POST', {month: $('[name=month]', host).value, columns: mapping()}); paint(data); }
+          catch (e) { toast(e.message); }
+        };
+        $('[data-save-map]', host).onclick = async () => {
+          try { const saved = await write('/api/hr/settings/salaryImport', 'PATCH', {columns: mapping()}); state.salaryImport = Object.assign({}, state.salaryImport, saved); toast('已儲存欄位對應'); }
+          catch (e) { toast(e.message); }
+        };
+        $('[data-confirm]', host).onclick = async () => {
+          try {
+            const res = await write('/api/hr/salaries/import/confirm', 'POST', {month: preview.month, rows: actionable});
+            toast('已寫入 ' + res.saved + ' 筆薪資' + (res.skipped ? '，略過 ' + res.skipped : ''));
+            close();
+            await refresh();
+            if (route.page === 'profile' && route.id) paintProfile(root, route.id);
+            else paintStaff(root);
+          } catch (e) { toast(e.message); }
+        };
+      };
+      paint(data);
+    } catch (e) {
+      host.innerHTML = `<dialog class="hr-dlg wide" open><h2>匯入本月薪資</h2><div class="dlg-body"><pre class="setup-help">${esc(e.message || '讀取失敗')}</pre><div class="hr-toolbar" style="margin-top:12px"><button class="hr-btn ghost" type="button" data-cancel>關閉</button></div></div></dialog>`;
+      $('[data-cancel]', host).onclick = close;
+    }
   }
 
   function field(name, label, value, type = 'text') {

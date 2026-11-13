@@ -8,6 +8,7 @@ import {newId, DOC_TYPES} from './hr-store.mjs';
 import {folderConfig, saveUpload, scanFolders, fileId, savedPath, UPLOAD_LIMIT, MIMES} from './hr-docs.mjs';
 import {runAfterUpload, batchScanBank, geminiReady} from './hr-ocr.mjs';
 import {hasPiiKey} from './hr-crypto.mjs';
+import {importStatus, loadSheetValues, parseSheetRows, compareSalaryRows, normalizeColumns, SETUP_INSTRUCTIONS} from './hr-salary-import.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EXCEL_CLI = path.join(HERE, 'hr-excel', 'cli.py');
@@ -93,6 +94,8 @@ export async function handleHr(req, res, {hr, session, method, path: p, config =
   if (method === 'GET' && pathname === '/api/hr/state') {
     const state = await hr.state();
     state.ocr = {geminiConfigured: geminiReady(config), piiKeyConfigured: hasPiiKey()};
+    const sheet = await hr.getSalaryImport();
+    state.salaryImport = {...sheet, ...(await importStatus())};
     send(res, 200, state);
     return true;
   }
@@ -152,6 +155,65 @@ export async function handleHr(req, res, {hr, session, method, path: p, config =
   if (method === 'POST' && pathname === '/api/hr/goals') {
     const body = JSON.parse(await readRaw(req, 200_000));
     send(res, 200, await hr.upsertGoal(body.department, body, actor));
+    return true;
+  }
+
+  if (method === 'GET' && pathname === '/api/hr/salaries/import/status') {
+    const sheet = await hr.getSalaryImport();
+    send(res, 200, {...sheet, ...(await importStatus())});
+    return true;
+  }
+  if (method === 'PATCH' && pathname === '/api/hr/settings/salaryImport') {
+    const body = JSON.parse(await readRaw(req, 50_000) || '{}');
+    send(res, 200, await hr.saveSalaryImport(body, actor));
+    return true;
+  }
+  if (method === 'POST' && pathname === '/api/hr/salaries/import/preview') {
+    const body = JSON.parse(await readRaw(req, 50_000) || '{}');
+    const cfg = await hr.getSalaryImport();
+    const columns = normalizeColumns(body.columns || cfg.columns);
+    const values = await loadSheetValues({spreadsheetId: cfg.spreadsheetId, sheetTab: cfg.sheetTab});
+    const parsed = parseSheetRows(values, columns);
+    const month = body.month || parsed.months.at(-1) || '';
+    const state = await hr.state();
+    const compared = compareSalaryRows(parsed.rows, {employees: state.employees, salaries: state.salaries, month});
+    send(res, 200, {month: compared.month, months: parsed.months, columns: parsed.columns, headers: parsed.headers, rows: compared.rows, counts: compared.counts, skipped: parsed.skipped, configured: true});
+    return true;
+  }
+  if (method === 'POST' && pathname === '/api/hr/salaries/import/confirm') {
+    const body = JSON.parse(await readRaw(req, 50_000) || '{}');
+    const month = String(body.month || '').slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(month)) throw new AppError(400, '請指定要匯入的月份');
+    const incoming = Array.isArray(body.rows) ? body.rows : null;
+    let rows;
+    if (incoming) {
+      rows = incoming.map((r) => ({employeeId: r.employeeId, month: r.month || month, netPay: r.netPay, name: r.name || '', status: r.status}));
+    } else {
+      const cfg = await hr.getSalaryImport();
+      const parsed = parseSheetRows(await loadSheetValues({spreadsheetId: cfg.spreadsheetId, sheetTab: cfg.sheetTab}), body.columns || cfg.columns);
+      const state = await hr.state();
+      rows = compareSalaryRows(parsed.rows, {employees: state.employees, salaries: state.salaries, month}).rows;
+    }
+    const state = await hr.state();
+    const empIds = new Set(state.employees.map((e) => e.id));
+    const existing = state.salaries.filter((s) => s.month === month);
+    let saved = 0, skipped = 0;
+    const written = [];
+    for (const r of rows) {
+      const status = r.status || (empIds.has(r.employeeId) ? (existing.find((s) => s.employeeId === r.employeeId) ? 'changed' : 'new') : 'unmatched');
+      if (status === 'unmatched' || status === 'same') { skipped += 1; continue; }
+      if (!empIds.has(r.employeeId)) { skipped += 1; continue; }
+      const cur = existing.find((s) => s.employeeId === r.employeeId);
+      const notes = cur?.notes || '由薪資計算明細匯入';
+      const remittance = cur?.remittance || '未匯';
+      if (cur) {
+        written.push(await hr.upsertSalary({id: cur.id, employeeId: r.employeeId, month, netPay: r.netPay, notes, remittance}, actor));
+      } else {
+        written.push(await hr.upsertSalary({employeeId: r.employeeId, month, netPay: r.netPay, notes, remittance}, actor));
+      }
+      saved += 1;
+    }
+    send(res, 200, {ok: true, month, saved, skipped, rows: written});
     return true;
   }
 

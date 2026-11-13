@@ -83,3 +83,11 @@
 #hr-root .hr-lightbox-nav.prev{left:-8px;top:50%;transform:translateY(-50%)}
 #hr-root .hr-lightbox-nav.next{right:-8px;top:50%;transform:translateY(-50%)}
 #hr-root .hr-lightbox-nav[hidden]{display:none}
+
+#hr-root dialog.hr-dlg.wide{max-width:min(860px,calc(100% - 32px))}
+#hr-root .setup-help{white-space:pre-wrap;font-family:inherit;font-size:14px;line-height:1.65;background:#f4f7f6;border-radius:8px;padding:12px 14px;margin:0}
+#hr-root .import-table-wrap{max-height:min(360px,50vh);overflow:auto;border:1px solid var(--hr-line);border-radius:8px}
+#hr-root .import-table-wrap table{margin:0}
+#hr-root tr.st-changed td{background:#fff6e8}
+#hr-root tr.st-unmatched td{background:#f6f6f6;color:#64717e}
+#hr-root tr.st-new td{background:#f3faf6}

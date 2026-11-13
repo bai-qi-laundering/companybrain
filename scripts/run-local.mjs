@@ -9,6 +9,9 @@ import {openPglite} from './pglite-pool.mjs';
 import {seedHr, seedOrganizations, prepareDocFolders, LOCAL_ADMIN} from './seed-hr.mjs';
 
 if (!process.env.HR_PII_KEY) process.env.HR_PII_KEY = 'a'.repeat(64);
+if (!process.env.HR_SALARY_SHEET_FIXTURE && !process.env.GOOGLE_SA_JSON) {
+  process.env.HR_SALARY_SHEET_FIXTURE = fileURLToPath(new URL('../tests/fixtures/salary-sheet.csv', import.meta.url));
+}
 const port = Number(process.env.PORT || 8788);
 const origin = process.env.PUBLIC_ORIGIN || `http://127.0.0.1:${port}`;
 const docRoot = process.env.HR_DOC_ROOT || '/tmp/hr-merge-docs';
