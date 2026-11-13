@@ -91,7 +91,7 @@ GOOGLE_SA_JSON=
 
 `HR_PII_KEY` 用來把員工銀行帳號（以及確認後的身分證字號）加密存進資料庫；畫面上帳號只顯示後四碼。沒填的話，上傳與掃描仍可做，但無法保存完整帳號，存摺自動辨識的「確認」會提示先填金鑰。存摺／身分證辨識沿用既有的 `GEMINI_API_KEY`；若未設定 Gemini，上傳仍會存到同一資料夾、同一檔名規則，只是不會出現辨識確認卡，可稍後再補金鑰並用「批次辨識既有存摺」。
 
-不要把 `ADMIN_PASSWORD`、資料庫密碼、LINE／Gemini 金鑰、`HR_PII_KEY` 寫進 Git。本次**不**串接打卡／薪資試算表，因此不必（也不應為了這次上線而新填）`HR_GAS_URL`、`HR_GAS_SECRET`。
+不要把 `ADMIN_PASSWORD`、資料庫密碼、LINE／Gemini 金鑰、`HR_PII_KEY`、`GOOGLE_SA_JSON` 寫進 Git。匯入本月薪資是可選的（設定 `GOOGLE_SA_JSON` 並把試算表分享給服務帳戶檢視者即可）；舊的 `HR_GAS_URL`／`HR_GAS_SECRET` 不必新填。
 
 確認三個證件資料夾存在後重建：
 
