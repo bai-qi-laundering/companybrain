@@ -960,7 +960,7 @@ function mapSalary(r) {
     employeeId: r.employee_id,
     month: r.month,
     netPay: Number.isFinite(net) ? net : 0,
-    notes: String(p.notes || p.source || '').slice(0, 500),
+    notes: String(p.notes || (p.source && !['ledger', 'migrated'].includes(p.source) ? p.source : '') || '').slice(0, 500),
     remittance,
   };
 }
