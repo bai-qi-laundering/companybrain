@@ -6,6 +6,8 @@ import {fileURLToPath} from 'node:url';
 import {AppError} from './domain.mjs';
 import {newId, DOC_TYPES} from './hr-store.mjs';
 import {folderConfig, saveUpload, scanFolders, fileId, savedPath, UPLOAD_LIMIT, MIMES} from './hr-docs.mjs';
+import {runAfterUpload, batchScanBank, geminiReady} from './hr-ocr.mjs';
+import {hasPiiKey} from './hr-crypto.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EXCEL_CLI = path.join(HERE, 'hr-excel', 'cli.py');
@@ -81,7 +83,7 @@ function runExcel(args, raw) {
   });
 }
 
-export async function handleHr(req, res, {hr, session, method, path: p}) {
+export async function handleHr(req, res, {hr, session, method, path: p, config = {}, extract} = {}) {
   if (!hr) return false;
   if (!p.startsWith('/api/hr')) return false;
   const url = parseUrl(req);
@@ -89,7 +91,9 @@ export async function handleHr(req, res, {hr, session, method, path: p}) {
   const actor = actorOf(session);
 
   if (method === 'GET' && pathname === '/api/hr/state') {
-    send(res, 200, await hr.state());
+    const state = await hr.state();
+    state.ocr = {geminiConfigured: geminiReady(config), piiKeyConfigured: hasPiiKey()};
+    send(res, 200, state);
     return true;
   }
   if (method === 'GET' && pathname === '/api/hr/folders') {
@@ -181,7 +185,25 @@ export async function handleHr(req, res, {hr, session, method, path: p}) {
       expiresOn: expiresOn || null,
     };
     await hr.insertDocument(row, actor);
-    send(res, 200, {...row, displayPath: saved.displayPath, path: saved.displayPath});
+    const ocr = await runAfterUpload({hr, row, dest: saved.dest, category, config, extract, actor});
+    send(res, 200, {...row, displayPath: saved.displayPath, path: saved.displayPath, ocr});
+    return true;
+  }
+  if (method === 'POST' && pathname === '/api/hr/ocr/batch-bank') {
+    send(res, 200, await batchScanBank({hr, config, extract, actor}));
+    return true;
+  }
+  if (method === 'GET' && (m = pathname.match(/^\/api\/hr\/ocr-reviews\/([^/]+)$/))) {
+    send(res, 200, await hr.getOcrReview(decodeURIComponent(m[1]), {reveal: true}));
+    return true;
+  }
+  if (method === 'POST' && (m = pathname.match(/^\/api\/hr\/ocr-reviews\/([^/]+)\/confirm$/))) {
+    const body = JSON.parse(await readRaw(req, 50_000) || '{}');
+    send(res, 200, await hr.confirmOcrReview(decodeURIComponent(m[1]), body, actor));
+    return true;
+  }
+  if (method === 'POST' && (m = pathname.match(/^\/api\/hr\/ocr-reviews\/([^/]+)\/dismiss$/))) {
+    send(res, 200, await hr.dismissOcrReview(decodeURIComponent(m[1]), actor));
     return true;
   }
   if (method === 'PATCH' && (m = pathname.match(/^\/api\/hr\/documents\/([^/]+)$/))) {

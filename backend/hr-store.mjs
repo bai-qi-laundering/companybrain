@@ -1,5 +1,7 @@
 import {randomBytes} from 'node:crypto';
 import {AppError} from './domain.mjs';
+import {encryptSecret, decryptSecret, hasPiiKey, last4} from './hr-crypto.mjs';
+import {maskTaiwanId} from './hr-twid.mjs';
 import {yearsForEmployee, decorateYear, defaultSettlement, SETTLEMENTS, DEFAULT_BASIS, endingSoon} from './hr-leave.mjs';
 import {DEFAULT_DEPT_PREFIXES, nextPrefixedId, prefixForDepartment, isUsableEmployeeId, PAY_TYPES, PAYMENT_METHODS} from './hr-ids.mjs';
 
@@ -126,6 +128,34 @@ CREATE TABLE IF NOT EXISTS hr_meta (
   id integer PRIMARY KEY CHECK (id = 1),
   employee_seq integer NOT NULL DEFAULT 1
 );
+
+CREATE TABLE IF NOT EXISTS hr_employee_pii (
+  employee_id text PRIMARY KEY REFERENCES hr_employees(id),
+  bank_code text,
+  bank_branch text,
+  account_name text,
+  account_last4 text,
+  account_enc text,
+  national_id_mask text,
+  national_id_enc text,
+  national_name text,
+  birth_date date,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS hr_ocr_reviews (
+  id text PRIMARY KEY,
+  document_id text REFERENCES hr_documents(id),
+  employee_id text REFERENCES hr_employees(id),
+  category text NOT NULL,
+  status text NOT NULL DEFAULT 'pending',
+  extracted jsonb NOT NULL DEFAULT '{}',
+  skip_reason text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  confirmed_at timestamptz,
+  confirmed_by text
+);
+CREATE INDEX IF NOT EXISTS hr_ocr_reviews_emp ON hr_ocr_reviews(employee_id, status);
 CREATE INDEX IF NOT EXISTS hr_records_emp ON hr_records(employee_id, kind);
 CREATE INDEX IF NOT EXISTS hr_docs_emp ON hr_documents(employee_id);
 CREATE INDEX IF NOT EXISTS hr_events_cand ON hr_recruitment_events(candidate_id);
@@ -164,7 +194,7 @@ export class HrStore {
   }
 
   async state() {
-    const [employees, records, documents, candidates, events, goals, leaveExcel, salaries, attendance, audit, settings, lastImport, leaveYears, leaveEntries] = await Promise.all([
+    const [employees, records, documents, candidates, events, goals, leaveExcel, salaries, attendance, audit, settings, lastImport, leaveYears, leaveEntries, pii, ocrReviews] = await Promise.all([
       this.pool.query('SELECT id, payload, revision FROM hr_employees ORDER BY id'),
       this.pool.query('SELECT id, employee_id, kind, payload, created_at FROM hr_records ORDER BY created_at DESC, id'),
       this.pool.query('SELECT * FROM hr_documents ORDER BY category, filename'),
@@ -179,8 +209,11 @@ export class HrStore {
       this.pool.query("SELECT value FROM hr_settings WHERE key='lastImport'"),
       this.pool.query('SELECT * FROM hr_leave_years ORDER BY starts_on DESC, id'),
       this.pool.query('SELECT * FROM hr_leave_entries ORDER BY taken_on DESC, id'),
+      this.pool.query('SELECT * FROM hr_employee_pii'),
+      this.pool.query('SELECT * FROM hr_ocr_reviews ORDER BY created_at DESC, id'),
     ]);
     const mapEmp = (r) => ({id: r.id, revision: r.revision, ...r.payload});
+    const piiByEmp = Object.fromEntries(pii.rows.map((r) => [r.employee_id, publicPii(r)]));
     const result = {
       employees: employees.rows.map(mapEmp),
       records: records.rows.map((r) => ({id: r.id, employeeId: r.employee_id, kind: r.kind, created: r.created_at, ...r.payload})),
@@ -204,6 +237,9 @@ export class HrStore {
       leaveYears: this.decorateYears(leaveYears.rows, leaveEntries.rows),
       leaveEntries: leaveEntries.rows.map((r) => this.mapEntry(r)),
     };
+    result.employees = result.employees.map((e) => ({...e, pii: piiByEmp[e.id] || null}));
+    result.ocrReviews = ocrReviews.rows.map((r) => mapOcrReview(r, {reveal: r.status === 'pending'}));
+    result.ocr = {geminiConfigured: false, piiKeyConfigured: hasPiiKey()};
     result.leaveExpiryReminders = endingSoon(result.leaveYears, today(), 60).map((y) => {
       const emp = result.employees.find((e) => e.id === y.employeeId);
       return {employeeId: y.employeeId, name: emp?.name || y.employeeId, endsOn: y.endsOn, remaining: y.remaining, summary: y.summary};
@@ -695,6 +731,90 @@ export class HrStore {
     const entries = await this.pool.query('SELECT * FROM hr_leave_entries WHERE leave_year_id=$1', [id]);
     return this.decorateYears(y.rows, entries.rows)[0];
   }
+
+  async insertOcrReview({documentId, employeeId, category, extracted, status = 'pending', skipReason} = {}, actor) {
+    const id = newId('OCR-');
+    const sealed = sealExtracted(category, extracted || {});
+    await this.pool.query(
+      `INSERT INTO hr_ocr_reviews(id, document_id, employee_id, category, status, extracted, skip_reason)
+       VALUES($1,$2,$3,$4,$5,$6::jsonb,$7)`,
+      [id, documentId || null, employeeId || null, category, status, JSON.stringify(sealed), skipReason || null]
+    );
+    if (actor) await this.audit(this.pool, actor, '文件辨識待確認', employeeId || documentId || id, category);
+    return this.getOcrReview(id, {reveal: true});
+  }
+
+  async getOcrReview(id, {reveal = false} = {}) {
+    const r = await this.pool.query('SELECT * FROM hr_ocr_reviews WHERE id=$1', [id]);
+    if (!r.rowCount) throw new AppError(404, '找不到辨識結果');
+    return mapOcrReview(r.rows[0], {reveal});
+  }
+
+  async findReviewForDocument(documentId, statuses = ['pending', 'confirmed']) {
+    const r = await this.pool.query(
+      "SELECT * FROM hr_ocr_reviews WHERE document_id=$1 AND status IN ('pending','confirmed') ORDER BY created_at DESC, id DESC LIMIT 1",
+      [documentId]
+    );
+    return r.rowCount ? mapOcrReview(r.rows[0], {reveal: r.rows[0].status === 'pending'}) : null;
+  }
+
+  async confirmOcrReview(id, fields, actor) {
+    const cur = await this.pool.query('SELECT * FROM hr_ocr_reviews WHERE id=$1', [id]);
+    if (!cur.rowCount) throw new AppError(404, '找不到辨識結果');
+    const row = cur.rows[0];
+    if (row.status !== 'pending') throw new AppError(400, '這筆辨識已處理');
+    const extracted = revealExtracted(row.extracted || {});
+    const merged = {...extracted, ...(fields || {})};
+    const {packConfirmed} = await import('./hr-ocr.mjs');
+    const packed = packConfirmed(row.category, merged);
+    await this.upsertEmployeePii(row.employee_id, packed, row.category);
+    await this.pool.query(
+      "UPDATE hr_ocr_reviews SET status='confirmed', extracted=$2::jsonb, confirmed_at=now(), confirmed_by=$3, updated_at=now() WHERE id=$1",
+      [id, JSON.stringify(sealExtracted(row.category, merged)), actor || '']
+    );
+    await this.audit(this.pool, actor, '確認文件辨識', row.employee_id || id, row.category);
+    const pii = (await this.pool.query('SELECT * FROM hr_employee_pii WHERE employee_id=$1', [row.employee_id])).rows[0];
+    return {review: await this.getOcrReview(id), pii: publicPii(pii)};
+  }
+
+  async dismissOcrReview(id, actor) {
+    const cur = await this.pool.query('SELECT * FROM hr_ocr_reviews WHERE id=$1', [id]);
+    if (!cur.rowCount) throw new AppError(404, '找不到辨識結果');
+    if (cur.rows[0].status !== 'pending') throw new AppError(400, '這筆辨識已處理');
+    await this.pool.query("UPDATE hr_ocr_reviews SET status='dismissed', updated_at=now() WHERE id=$1", [id]);
+    await this.audit(this.pool, actor, '略過文件辨識', cur.rows[0].employee_id || id, cur.rows[0].category);
+    return {ok: true};
+  }
+
+  async upsertEmployeePii(employeeId, packed, category) {
+    if (!employeeId) throw new AppError(400, '沒有對應員工，無法寫入辨識結果');
+    await this.getEmployee(employeeId);
+    const cur = (await this.pool.query('SELECT * FROM hr_employee_pii WHERE employee_id=$1', [employeeId])).rows[0] || {};
+    const next = {
+      bank_code: category === 'bank' ? (packed.bankCode || '') : (cur.bank_code || null),
+      bank_branch: category === 'bank' ? (packed.bankBranch || '') : (cur.bank_branch || null),
+      account_name: category === 'bank' ? (packed.accountName || '') : (cur.account_name || null),
+      account_last4: category === 'bank' ? (packed.accountLast4 || '') : (cur.account_last4 || null),
+      account_enc: category === 'bank' ? (packed.accountEnc || null) : (cur.account_enc || null),
+      national_id_mask: category === 'identity' ? (packed.nationalIdMask || '') : (cur.national_id_mask || null),
+      national_id_enc: category === 'identity' ? (packed.nationalIdEnc || null) : (cur.national_id_enc || null),
+      national_name: category === 'identity' ? (packed.nationalName || '') : (cur.national_name || null),
+      birth_date: category === 'identity' ? (packed.birthDate || null) : (cur.birth_date || null),
+    };
+    await this.pool.query(
+      `INSERT INTO hr_employee_pii(employee_id, bank_code, bank_branch, account_name, account_last4, account_enc, national_id_mask, national_id_enc, national_name, birth_date, updated_at)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())
+       ON CONFLICT(employee_id) DO UPDATE SET
+         bank_code=excluded.bank_code, bank_branch=excluded.bank_branch, account_name=excluded.account_name,
+         account_last4=excluded.account_last4, account_enc=excluded.account_enc,
+         national_id_mask=excluded.national_id_mask, national_id_enc=excluded.national_id_enc,
+         national_name=excluded.national_name, birth_date=excluded.birth_date, updated_at=now()`,
+      [employeeId, next.bank_code, next.bank_branch, next.account_name, next.account_last4, next.account_enc,
+       next.national_id_mask, next.national_id_enc, next.national_name, next.birth_date || null]
+    );
+    return publicPii({employee_id: employeeId, ...next});
+  }
+
   async insertLeaveRecordLegacy(row) {
     await this.pool.query('INSERT INTO hr_records(id, employee_id, kind, payload, created_at) VALUES($1,$2,$3,$4,COALESCE($5::timestamptz, now())) ON CONFLICT(id) DO NOTHING',
       [row.id, row.employeeId, 'leave', row.payload, row.created || null]);
@@ -718,6 +838,77 @@ function addDaysSafe(date, n) {
   return `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`;
 }
 
+
+function sealExtracted(category, extracted = {}) {
+  const out = {...extracted};
+  if (out.account) {
+    out.accountLast4 = last4(out.account);
+    if (hasPiiKey()) out.accountEnc = encryptSecret(out.account);
+    delete out.account;
+  }
+  if (out.nationalId) {
+    out.nationalIdMask = maskTaiwanId(out.nationalId);
+    if (hasPiiKey()) {
+      out.nationalIdEnc = encryptSecret(out.nationalId);
+      delete out.nationalId;
+    }
+  }
+  return out;
+}
+function revealExtracted(extracted = {}) {
+  const out = {...extracted};
+  if (out.accountEnc && hasPiiKey()) {
+    try { out.account = decryptSecret(out.accountEnc); } catch { /* keep last4 */ }
+  }
+  if (out.nationalIdEnc && hasPiiKey()) {
+    try { out.nationalId = decryptSecret(out.nationalIdEnc); } catch { /* keep mask */ }
+  }
+  delete out.accountEnc;
+  delete out.nationalIdEnc;
+  return out;
+}
+function mapOcrReview(row, {reveal = false} = {}) {
+  const extracted = reveal ? revealExtracted(row.extracted || {}) : redactExtracted(row.extracted || {});
+  return {
+    id: row.id,
+    documentId: row.document_id,
+    employeeId: row.employee_id,
+    category: row.category,
+    status: row.status,
+    extracted,
+    skipReason: row.skip_reason || '',
+    created: row.created_at,
+    confirmedAt: row.confirmed_at,
+    confirmedBy: row.confirmed_by || '',
+  };
+}
+function redactExtracted(extracted = {}) {
+  const out = {...extracted};
+  if (out.account || out.accountEnc) {
+    out.accountLast4 = out.accountLast4 || last4(out.account || '');
+    delete out.account;
+    delete out.accountEnc;
+  }
+  if (out.nationalId || out.nationalIdEnc) {
+    out.nationalIdMask = out.nationalIdMask || maskTaiwanId(out.nationalId || '');
+    delete out.nationalId;
+    delete out.nationalIdEnc;
+  }
+  return out;
+}
+function publicPii(row) {
+  if (!row) return null;
+  const birth = row.birth_date ? String(row.birth_date).slice(0, 10) : '';
+  return {
+    bankCode: row.bank_code || '',
+    bankBranch: row.bank_branch || '',
+    accountName: row.account_name || '',
+    accountLast4: row.account_last4 || '',
+    nationalIdMask: row.national_id_mask || '',
+    nationalName: row.national_name || '',
+    birthDate: birth,
+  };
+}
 
 function pickEmp(data, prev = {}) {
   const o = {...prev};

@@ -8,6 +8,7 @@ import {createHandler} from '../backend/app.mjs';
 import {openPglite} from './pglite-pool.mjs';
 import {seedHr, seedOrganizations, prepareDocFolders, LOCAL_ADMIN} from './seed-hr.mjs';
 
+if (!process.env.HR_PII_KEY) process.env.HR_PII_KEY = 'a'.repeat(64);
 const port = Number(process.env.PORT || 8788);
 const origin = process.env.PUBLIC_ORIGIN || `http://127.0.0.1:${port}`;
 const docRoot = process.env.HR_DOC_ROOT || '/tmp/hr-merge-docs';

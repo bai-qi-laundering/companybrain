@@ -22,7 +22,7 @@ export async function seedHr(hr) {
     {id: 'EMP-003', name: '王建宏', department: '廠務', job: '廠務主管', employmentType: '正職', arrivalDate: '2018-07-16', phone: '0912-000-003', emergencyContact: '王太太 0912-111-003', paperLocation: '廠務室'},
     {id: 'EMP-008', name: '林雅婷', department: '客服對帳', job: '客服對帳', employmentType: '正職', arrivalDate: '2024-02-01', phone: '0912-000-008'},
     {id: 'EMP-014', name: '陳志明', department: '物流', job: '物流司機', employmentType: '正職', arrivalDate: '2022-05-20', phone: '0912-000-014', emergencyContact: '陳太太 0912-111-014', paperLocation: '司機室'},
-    {id: 'EMP-015', name: '張偉誠', department: '物流', job: '物流司機', employmentType: '正職', arrivalDate: '2023-09-11', phone: '0912-000-015', emergencyContact: '張先生 0912-111-015', paperLocation: '司機室'},
+    {id: 'EMP-015', name: '張偉誠', department: '物流', job: '物流司機', employmentType: '正職', arrivalDate: '2023-09-11', arrivalDateSource: {type: '加保日', date: '2023-09-11'}, phone: '0912-000-015', emergencyContact: '張先生 0912-111-015', paperLocation: '司機室'},
     {id: 'EMP-020', name: '周麗華', department: '行政', job: '出納', employmentType: '正職', arrivalDate: '2020-12-20', phone: '0912-000-020', emergencyContact: '周先生 0912-111-020', paperLocation: '行政櫃'},
   ];
   for (const e of employees) {
@@ -61,6 +61,15 @@ export async function seedHr(hr) {
   await hr.upsertGoal('物流', {additional: 4, notes: '示意需求（基準為建立時在職人數）'}, 'seed');
   await hr.upsertGoal('廠務', {additional: 2, notes: ''}, 'seed');
   await hr.upsertGoal('行政', {additional: 1, notes: ''}, 'seed');
+  const haveOcr = (await hr.state()).ocrReviews?.some((r) => r.id === 'seed' || r.employeeId === 'EMP-014' && r.status === 'pending');
+  if (!haveOcr) {
+    await hr.insertOcrReview({
+      employeeId: 'EMP-014',
+      category: 'bank',
+      extracted: {bankCode: '004', branch: '台灣銀行南京東路分行', account: '12345678901234', accountName: '陳志明', warnings: []},
+      status: 'pending',
+    }, 'seed');
+  }
 }
 
 export async function prepareDocFolders(root) {

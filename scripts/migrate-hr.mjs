@@ -13,8 +13,10 @@ import {DatabaseSync} from 'node:sqlite';
 import process from 'node:process';
 const leaveMod = await import(process.env.HR_MIGRATE_FROM_APP ? './hr-leave.mjs' : '../backend/hr-leave.mjs');
 const storeMod = await import(process.env.HR_MIGRATE_FROM_APP ? './hr-store.mjs' : '../backend/hr-store.mjs');
+const arrivalMod = await import(process.env.HR_MIGRATE_FROM_APP ? './hr-arrival.mjs' : '../backend/hr-arrival.mjs');
 const {HrStore} = storeMod;
 const {hoursToDays, parsePeriod, DEFAULT_BASIS} = leaveMod;
+const {planArrivalFromInsurance, applyArrivalFill} = arrivalMod;
 
 
 function arg(name, fallback) {
@@ -102,7 +104,11 @@ for (const [k, v] of Object.entries(counts)) console.log('  ' + k + ': ' + v);
 
 // Preview leave ledger mapping even in dry-run
 function plannedLedgers() {
-  const emps = Object.fromEntries(data.employees.map((r) => [r.id, {id: r.id, ...empPayload(r)}]));
+  const filledDates = Object.fromEntries((typeof arrivalPlan !== 'undefined' ? arrivalPlan.filled : []).map((f) => [f.employeeId, f.arrivalDate]));
+  const emps = Object.fromEntries(data.employees.map((r) => {
+    const p = empPayload(r);
+    return [r.id, {id: r.id, ...p, arrivalDate: p.arrivalDate || filledDates[r.id] || ''}];
+  }));
   const leaveRecs = data.records.filter((r) => r.kind === 'leave').map((r) => ({...r, payload: parseJson(r.data, {})}));
   const groups = new Map();
   for (const rec of leaveRecs) {
@@ -120,6 +126,16 @@ function plannedLedgers() {
   }
   return [...groups.values()];
 }
+const insuranceRecs = data.records.filter((r) => r.kind === 'insurance').map((r) => ({...r, payload: parseJson(r.data, {})}));
+const arrivalPlan = planArrivalFromInsurance(
+  data.employees.map((r) => ({id: r.id, ...empPayload(r)})),
+  insuranceRecs
+);
+console.log('  arrivalFilled (空到職日由最早加保日帶入): ' + arrivalPlan.filled.length);
+console.log('  arrivalStillMissing (無到職日也無加保日): ' + arrivalPlan.stillMissing.length);
+for (const item of arrivalPlan.filled) console.log('    - ' + item.employeeId + ' ' + (item.name || '') + ' ← ' + item.arrivalDate);
+for (const item of arrivalPlan.stillMissing) console.log('    - ' + item.employeeId + ' ' + (item.name || '') + '（仍缺）');
+
 const ledgers = plannedLedgers();
 console.log('  leaveLedgers (由特休紀錄對應到職日週年): ' + ledgers.length + '（其中無法對應期間 ' + ledgers.filter((g) => g.unmapped).length + '）');
 
@@ -248,8 +264,16 @@ for (const row of data.settings) {
   }
 }
 
+// Fill empty 到職日 from earliest 加保日 (never overwrites an existing date)
+const fillResult = await applyArrivalFill(pool, {
+  employees: data.employees.map((r) => ({id: r.id, ...empPayload(r)})),
+  records: insuranceRecs,
+});
+result.arrivalFilled = {inserted: fillResult.filled, exists: 0, skipped: fillResult.stillMissing};
+console.log('到職日由加保日帶入：' + fillResult.filled + '；仍缺：' + fillResult.stillMissing);
+
 // Build leave ledgers from records; also ensure statutory years
-const emps = Object.fromEntries(data.employees.map((r) => [r.id, {id: r.id, ...empPayload(r)}]));
+const emps = Object.fromEntries((await pool.query('SELECT id, payload FROM hr_employees')).rows.map((r) => [r.id, {id: r.id, ...r.payload}]));
 for (const emp of Object.values(emps)) {
   if (emp.arrivalDate) await hr.ensureEmployeeYears(emp.id);
 }

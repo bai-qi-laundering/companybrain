@@ -76,11 +76,18 @@ git pull --ff-only origin feat/hr-merge
 NAS_IDENTITY_PATH=/volume1/人事資料/身分證
 NAS_BANK_PATH=/volume1/人事資料/存摺
 NAS_LICENSE_PATH=/volume1/人事資料/駕照
+
+# 銀行帳號靜態加密金鑰（32 位元組十六進位）。只做一次，寫進 settings.env 並另外備份。
+# 遺失這把鑰匙就無法解密已存帳號。產生方式：
+#   openssl rand -hex 32
+HR_PII_KEY=
 ```
 
 這三個資料夾必須已存在。`compose.yaml` 會把它們以**相同路徑**掛進 companybrain 容器，上傳檔名規則不變。
 
-不要把 `ADMIN_PASSWORD`、資料庫密碼、LINE／Gemini 金鑰寫進 Git。本次**不**串接打卡／薪資試算表，因此不必（也不應為了這次上線而新填）`HR_GAS_URL`、`HR_GAS_SECRET`。
+`HR_PII_KEY` 用來把員工銀行帳號（以及確認後的身分證字號）加密存進資料庫；畫面上帳號只顯示後四碼。沒填的話，上傳與掃描仍可做，但無法保存完整帳號，存摺自動辨識的「確認」會提示先填金鑰。存摺／身分證辨識沿用既有的 `GEMINI_API_KEY`；若未設定 Gemini，上傳仍會存到同一資料夾、同一檔名規則，只是不會出現辨識確認卡，可稍後再補金鑰並用「批次辨識既有存摺」。
+
+不要把 `ADMIN_PASSWORD`、資料庫密碼、LINE／Gemini 金鑰、`HR_PII_KEY` 寫進 Git。本次**不**串接打卡／薪資試算表，因此不必（也不應為了這次上線而新填）`HR_GAS_URL`、`HR_GAS_SECRET`。
 
 確認三個證件資料夾存在後重建：
 
@@ -111,7 +118,7 @@ sudo docker compose --project-name companybrain --env-file settings.env run --rm
   app node migrate-hr.mjs --sqlite /old-hr.sqlite3 --dry-run
 ```
 
-核對印出的 `employees`、`candidates`、`leaveRecords`、`leaveLedgers`、`documents` 等筆數，是否與舊系統大致相符。
+核對印出的 `employees`、`candidates`、`leaveRecords`、`leaveLedgers`、`documents` 等筆數，是否與舊系統大致相符。另外會列出 `arrivalFilled`（空到職日由最早勞保／健保「加保」日帶入，來源標記為「加保日」，之後可在員工檔直接改）與 `arrivalStillMissing`（仍無到職日也無加保日）。不會覆蓋已經有到職日的員工。
 
 確認無誤後，正式遷移（同一份唯讀備份）：
 
@@ -133,7 +140,7 @@ sudo docker compose --project-name companybrain --env-file settings.env run --rm
 1. 側欄出現「員工、廠商、客人、徵人」。
 2. 員工名錄人數、姓名、編號與舊系統一致。
 3. 點開一位員工：特休台帳顯示「應有／已用／剩餘／結算狀態」；特休年度為**到職日週年**。未休完結算預設「未休完已折現」（只記狀態、日期、經手人，不記金額）。
-4. 在員工檔案上傳一張測試證件，畫面顯示「已存到 `/volume1/人事資料/…/原規則檔名`」，檔案確實出現在該資料夾；舊檔仍在。
+4. 在員工檔案上傳一張測試證件，畫面顯示「已存到 `/volume1/人事資料/…/原規則檔名`」，檔案確實出現在該資料夾；舊檔仍在。若已設定 Gemini，存摺／身分證上傳後會出現「請核對後確認」卡，按確認才會寫入；銀行帳號確認後只顯示後四碼。員工名錄的「批次辨識既有存摺」可掃描 NAS 存摺資料夾、產生待確認項目。舊員工若原先沒有到職日，檔案上會帶「由最早勞健保加保日帶入，可直接修改」的小註記。
 5. 徵人看板、今日待聯絡／已過期未跟、電話／面試紀錄、「報到並轉為員工」會自動給下一個編號並出現報到清單。不能只把進度改成「已報到」。
 6. 廠商、客人仍是原來的往來對象（飯店＝客人；設備商／工程／其他＝廠商）。既有往來紀錄、待辦、LINE、AI 功能仍可用。
 7. 舊系統裡的薪資與打卡**資料有遷入、此次畫面不操作**；打卡算薪水試算表本次不串接。

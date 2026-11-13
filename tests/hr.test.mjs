@@ -15,7 +15,7 @@ import {prepareDocFolders} from '../scripts/seed-hr.mjs';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const origin = 'http://companybrain.test';
 
-async function start() {
+async function start(opts = {}) {
   const docRoot = await mkdtemp(path.join(os.tmpdir(), 'hr-docs-'));
   await prepareDocFolders(docRoot);
   const {db, pool} = openPglite();
@@ -25,7 +25,8 @@ async function start() {
   await hr.ensure();
   const server = http.createServer(createHandler({
     store, hr,
-    config: {origin, secure: false, key: '', model: 'model'},
+    config: {origin, secure: false, key: opts.geminiKey || '', model: 'model'},
+    extract: opts.extract || null,
     htmlPath: path.join(root, 'index.html'),
     publicDir: path.join(root, 'public'),
   }));
@@ -136,7 +137,106 @@ test('upload uses the original filename rule and binds to the employee', async (
     assert.equal(saved.employeeId, 'EMP-014');
     assert.match(saved.filename, /^EMP-014_陳志明_存摺_\d{8}T\d{6}_[a-f0-9]{12}\.jpg$/);
     assert.match(saved.displayPath, /存摺\/EMP-014_陳志明_存摺_/);
+    assert.equal(saved.ocr.skipped, 'no-gemini');
   } finally {
+    await new Promise((r) => ctx.server.close(r));
+    await ctx.db.close();
+    await rm(ctx.docRoot, {recursive: true, force: true});
+  }
+});
+
+
+function jpegBody(employeeId, category = 'bank') {
+  const jpeg = Buffer.from('/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAGfAD//2Q==', 'base64');
+  const boundary = '----testhrboundary2';
+  const parts = [
+    `--${boundary}\r\nContent-Disposition: form-data; name="employeeId"\r\n\r\n${employeeId}\r\n`,
+    `--${boundary}\r\nContent-Disposition: form-data; name="category"\r\n\r\n${category}\r\n`,
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="doc.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`,
+  ];
+  return {
+    boundary,
+    body: Buffer.concat([Buffer.from(parts[0]), Buffer.from(parts[1]), Buffer.from(parts[2]), jpeg, Buffer.from(`\r\n--${boundary}--\r\n`)]),
+  };
+}
+
+test('bank OCR prefills a confirm card and stores only last4 after confirm', async () => {
+  const prev = process.env.HR_PII_KEY;
+  process.env.HR_PII_KEY = 'ab'.repeat(32);
+  const ctx = await start({
+    geminiKey: 'test-gemini',
+    extract: async ({category}) => category === 'bank'
+      ? {bankCode: '004', branch: '台灣銀行南京東路分行', account: '12345678901234', accountName: '陳志明', warnings: []}
+      : {nationalId: 'A123456789', name: '陳志明', birthDate: '1988-02-03', warnings: []},
+  });
+  try {
+    await ctx.api('/api/hr/employees', 'POST', {id: 'EMP-014', name: '陳志明', department: '物流', job: '司機', arrivalDate: '2022-05-20'});
+    const {boundary, body} = jpegBody('EMP-014', 'bank');
+    const res = await fetch(ctx.url + '/api/hr/documents/upload', {
+      method: 'POST',
+      headers: {Origin: origin, Cookie: ctx.cookie, 'x-csrf-token': ctx.csrf, 'content-type': 'multipart/form-data; boundary=' + boundary},
+      body,
+    });
+    assert.equal(res.status, 200, await res.clone().text());
+    const saved = await res.json();
+    assert.ok(saved.ocr.review);
+    assert.equal(saved.ocr.extracted.account, '12345678901234');
+    const confirmed = await (await ctx.api('/api/hr/ocr-reviews/' + saved.ocr.review.id + '/confirm', 'POST', saved.ocr.extracted)).json();
+    assert.equal(confirmed.pii.accountLast4, '1234');
+    const state = await (await ctx.api('/api/hr/state')).json();
+    const emp = state.employees.find((e) => e.id === 'EMP-014');
+    assert.equal(emp.pii.accountLast4, '1234');
+    assert.equal(emp.pii.accountName, '陳志明');
+    assert.ok(!JSON.stringify(state).includes('12345678901234'));
+    const pending = state.ocrReviews.filter((r) => r.status === 'pending' && r.employeeId === 'EMP-014');
+    assert.equal(pending.length, 0);
+  } finally {
+    if (prev == null) delete process.env.HR_PII_KEY;
+    else process.env.HR_PII_KEY = prev;
+    await new Promise((r) => ctx.server.close(r));
+    await ctx.db.close();
+    await rm(ctx.docRoot, {recursive: true, force: true});
+  }
+});
+
+test('identity confirm rejects a bad checksum and batch-scan creates pending items', async () => {
+  const prev = process.env.HR_PII_KEY;
+  process.env.HR_PII_KEY = 'ab'.repeat(32);
+  const ctx = await start({
+    geminiKey: 'test-gemini',
+    extract: async ({category}) => category === 'identity'
+      ? {nationalId: 'A123456788', name: '陳志明', birthDate: '1988-02-03', warnings: []}
+      : {bankCode: '812', branch: '台新銀行', account: '009988776655', accountName: '陳志明', warnings: []},
+  });
+  try {
+    await ctx.api('/api/hr/employees', 'POST', {id: 'EMP-014', name: '陳志明', department: '物流', job: '司機', arrivalDate: '2022-05-20'});
+    const idPart = jpegBody('EMP-014', 'identity');
+    const idRes = await fetch(ctx.url + '/api/hr/documents/upload', {
+      method: 'POST',
+      headers: {Origin: origin, Cookie: ctx.cookie, 'x-csrf-token': ctx.csrf, 'content-type': 'multipart/form-data; boundary=' + idPart.boundary},
+      body: idPart.body,
+    });
+    const idSaved = await idRes.json();
+    const bad = await ctx.api('/api/hr/ocr-reviews/' + idSaved.ocr.review.id + '/confirm', 'POST', {nationalId: 'A123456788', name: '陳志明'});
+    assert.equal(bad.status, 400);
+    const ok = await ctx.api('/api/hr/ocr-reviews/' + idSaved.ocr.review.id + '/confirm', 'POST', {nationalId: 'A123456789', name: '陳志明', birthDate: '1988-02-03'});
+    assert.equal(ok.status, 200, await ok.clone().text());
+    const pii = (await ok.json()).pii;
+    assert.equal(pii.nationalIdMask, 'A****6789');
+
+    const bankDir = path.join(ctx.docRoot, '存摺');
+    const {writeFile} = await import('node:fs/promises');
+    await writeFile(path.join(bankDir, 'EMP-014_陳志明_存摺_20260101T000000_abcdef123456.jpg'), Buffer.from('x'));
+    const batch = await (await ctx.api('/api/hr/ocr/batch-bank', 'POST', {})).json();
+    assert.equal(batch.ok, true);
+    assert.ok(batch.pending >= 1);
+    const state = await (await ctx.api('/api/hr/state')).json();
+    const pending = state.ocrReviews.find((r) => r.status === 'pending' && r.category === 'bank');
+    assert.ok(pending);
+    assert.equal(pending.extracted.account, '009988776655');
+  } finally {
+    if (prev == null) delete process.env.HR_PII_KEY;
+    else process.env.HR_PII_KEY = prev;
     await new Promise((r) => ctx.server.close(r));
     await ctx.db.close();
     await rm(ctx.docRoot, {recursive: true, force: true});

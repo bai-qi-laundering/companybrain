@@ -17,7 +17,7 @@
   let demo = true;
 
   function emptyState() {
-    return {employees: [], records: [], documents: [], candidates: [], recruitmentEvents: [], recruitmentGoals: [], leaveExcel: [], salaries: [], attendanceCount: 0, audit: [], lastImport: null, leaveYears: [], leaveEntries: [], leaveYearBasis: 'anniversary', leaveSettleDefault: '未休完已折現', leaveExpiryReminders: []};
+    return {employees: [], records: [], documents: [], candidates: [], recruitmentEvents: [], recruitmentGoals: [], leaveExcel: [], salaries: [], attendanceCount: 0, audit: [], lastImport: null, leaveYears: [], leaveEntries: [], leaveYearBasis: 'anniversary', leaveSettleDefault: '未休完已折現', leaveExpiryReminders: [], ocrReviews: [], ocr: {geminiConfigured: false, piiKeyConfigured: false}};
   }
   function today() {
     return new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit'}).format(new Date());
@@ -315,7 +315,34 @@
       }
       refreshLeave(); saveDemo(); return decorateLeave(y, state.leaveEntries);
     }
+    if (path === '/api/hr/ocr/batch-bank' && method === 'POST') {
+      throw new Error('示範模式不連 Gemini，無法批次辨識。');
+    }
+    if ((m = path.match(/^\/api\/hr\/ocr-reviews\/([^/]+)\/confirm$/)) && method === 'POST') {
+      const r = (state.ocrReviews || []).find((x) => x.id === m[1]);
+      if (!r) throw new Error('找不到辨識結果');
+      r.status = 'confirmed';
+      const emp = state.employees.find((e) => e.id === r.employeeId);
+      if (emp && r.category === 'bank') {
+        const acc = String(body.account || '');
+        emp.pii = Object.assign({}, emp.pii || {}, {bankCode: body.bankCode || '', bankBranch: body.branch || '', accountName: body.accountName || '', accountLast4: acc.slice(-4)});
+      }
+      if (emp && r.category === 'identity') {
+        const idn = String(body.nationalId || '').toUpperCase();
+        emp.pii = Object.assign({}, emp.pii || {}, {nationalIdMask: idn ? (idn[0] + '****' + idn.slice(-4)) : '', nationalName: body.name || '', birthDate: body.birthDate || ''});
+      }
+      saveDemo();
+      return {review: r, pii: emp && emp.pii};
+    }
+    if ((m = path.match(/^\/api\/hr\/ocr-reviews\/([^/]+)\/dismiss$/)) && method === 'POST') {
+      const r = (state.ocrReviews || []).find((x) => x.id === m[1]);
+      if (!r) throw new Error('找不到辨識結果');
+      r.status = 'dismissed';
+      saveDemo();
+      return {ok: true};
+    }
     throw new Error('示範模式不支援 ' + method + ' ' + path);
+
 
   }
 
@@ -346,7 +373,6 @@
     state.documents.push(row); saveDemo();
     return row;
   }
-
   function missingPaper(e) {
     const miss = [];
     if (!e.emergencyContact) miss.push('緊急聯絡人');
@@ -415,15 +441,17 @@
       <div class="hr-toolbar">
         <button class="hr-btn" data-act="add-emp">＋ 新增員工</button>
         <button class="hr-btn ghost" data-act="scan">掃描舊文件並配對</button>
+        <button class="hr-btn ghost" data-act="ocr-bank">批次辨識既有存摺</button>
         <button class="hr-btn ghost" data-act="leave-excel">匯入特休 Excel</button>
         <span class="spacer"></span>
         <span class="muted">點列即可開啟單頁檔案；欄位可直接改。</span>
       </div>
       <table class="hr-table"><thead><tr><th>編號</th><th>姓名</th><th>部門</th><th>職稱</th><th>電話</th><th>到職</th><th>狀態</th></tr></thead>
-      <tbody>${list.map((e) => `<tr data-open="${esc(e.id)}"><td>${esc(e.id)}</td><td>${esc(e.name)}</td><td>${esc(e.department)}</td><td>${esc(e.job)}</td><td>${esc(e.phone)}</td><td>${esc(e.arrivalDate)}</td><td>${active(e) ? '<span class="pill ok">在職</span>' : '<span class="pill">離職</span>'}${missingPaper(e).length ? ' <span class="pill warn">未齊</span>' : ''}</td></tr>`).join('') || '<tr><td colspan="7">沒有符合的員工。</td></tr>'}</tbody></table>`;
+      <tbody>${list.map((e) => `<tr data-open="${esc(e.id)}"><td>${esc(e.id)}</td><td>${esc(e.name)}</td><td>${esc(e.department)}</td><td>${esc(e.job)}</td><td>${esc(e.phone)}</td><td>${esc(e.arrivalDate)}</td><td>${active(e) ? '<span class="pill ok">在職</span>' : '<span class="pill">離職</span>'}${missingPaper(e).length ? ' <span class="pill warn">未齊</span>' : ''}${pendingOcr(e.id).length ? ' <span class="pill warn">待確認辨識</span>' : ''}</td></tr>`).join('') || '<tr><td colspan="7">沒有符合的員工。</td></tr>'}</tbody></table>`;
     $$('[data-open]', root).forEach((tr) => tr.onclick = () => { route = {page: 'profile', id: tr.dataset.open}; paintProfile(root, tr.dataset.open); });
     $('[data-act="add-emp"]', root).onclick = () => openEmpForm(root);
     $('[data-act="scan"]', root).onclick = () => doScan(root);
+    $('[data-act="ocr-bank"]', root).onclick = () => doBatchBank(root);
     $('[data-act="leave-excel"]', root).onclick = () => openExcel(root, 'leave');
   }
 
@@ -445,6 +473,7 @@
               ${field('job', '職稱', e.job)}${sel('employmentType', '雇用型態', TYPES, e.employmentType)}
               ${sel('payType', '計薪型態', PAY_TYPES, e.payType || (e.employmentType === '兼職' || e.employmentType === '時薪' ? '兼職' : '正職'))}${sel('paymentMethod', '匯款類型', PAY_METHODS, e.paymentMethod || '匯款')}
               ${field('arrivalDate', '到職日', e.arrivalDate, 'date')}${field('departureDate', '離職日', e.departureDate, 'date')}
+              ${e.arrivalDateSource && e.arrivalDateSource.type === '加保日' ? '<p class="muted arrival-note" style="grid-column:1/-1">到職日由最早勞健保加保日帶入' + (e.arrivalDateSource.date ? '（' + esc(e.arrivalDateSource.date) + '）' : '') + '，可直接修改。</p>' : ''}
               ${field('phone', '電話', e.phone)}${field('emergencyContact', '緊急聯絡人', e.emergencyContact)}
               ${field('paperLocation', '紙本位置', e.paperLocation)}${field('lineId', 'LINE ID', e.lineId)}
               ${field('lineBound', 'LINE 綁定狀態', e.lineBound)}
@@ -468,6 +497,8 @@
           </section>
         </div>
         <div class="profile-side">
+          ${ocrCards(id)}
+          ${piiBlock(e)}
           <section class="hr-card">
             <h2 class="section-title">證件文件</h2>
             <p class="muted">在這上傳就會自動綁到這位員工，檔名規則與舊系統相同。舊檔保留，不會覆蓋。</p>
@@ -499,6 +530,66 @@
     $('[data-act="add-ins"]', root).onclick = () => openRecord(root, id, 'insurance');
     $('[data-act="add-chg"]', root).onclick = () => openRecord(root, id, 'change');
     $$('[data-drop]', root).forEach((box) => bindDrop(box, id, root));
+    bindOcrCards(root, id);
+  }
+
+
+  function pendingOcr(employeeId) {
+    return (state.ocrReviews || []).filter((r) => r.employeeId === employeeId && r.status === 'pending');
+  }
+  function ocrCards(employeeId) {
+    const list = pendingOcr(employeeId);
+    if (!list.length) return '';
+    return list.map((r) => {
+      const x = r.extracted || {};
+      const bank = r.category === 'bank';
+      const fields = bank
+        ? field('bankCode', '銀行代碼', x.bankCode) + field('branch', '分行', x.branch) + field('account', '帳號', x.account) + field('accountName', '戶名', x.accountName)
+        : field('nationalId', '身分證字號', x.nationalId) + field('name', '姓名', x.name) + field('birthDate', '生日', x.birthDate, 'date');
+      const warns = (x.warnings || r.warnings || []).map((w) => esc(w)).join('、');
+      return `<section class="hr-card ocr-confirm" data-ocr="${esc(r.id)}" data-cat="${esc(r.category)}">
+        <h2 class="section-title">${bank ? '存摺辨識結果，請核對後確認' : '身分證辨識結果，請核對後確認'}</h2>
+        <p class="muted">辨識只供預填，按「確認」才會寫入。${bank ? '確認後帳號只顯示後四碼。' : '身分證字號會檢查檢查碼。'}</p>
+        <form class="inline-grid ocr-form">${fields}</form>
+        ${warns ? `<p class="muted">注意：${warns}</p>` : ''}
+        <div class="hr-toolbar" style="margin-top:8px"><button class="hr-btn" type="button" data-ocr-ok>確認</button><button class="hr-btn ghost" type="button" data-ocr-skip>略過</button></div>
+      </section>`;
+    }).join('');
+  }
+  function piiBlock(e) {
+    const pii = e.pii || {};
+    const hasBank = pii.accountLast4 || pii.accountName || pii.bankCode;
+    const hasId = pii.nationalIdMask || pii.nationalName || pii.birthDate;
+    if (!hasBank && !hasId) return '';
+    return `<section class="hr-card">
+      <h2 class="section-title">已確認證件資料</h2>
+      ${hasBank ? `<p>帳戶後四碼 <strong>${esc(pii.accountLast4 || '—')}</strong>　戶名 ${esc(pii.accountName || '—')}　銀行 ${esc(pii.bankCode || '—')} ${esc(pii.bankBranch || '')}</p>` : ''}
+      ${hasId ? `<p>身分證 ${esc(pii.nationalIdMask || '—')}　姓名 ${esc(pii.nationalName || '—')}　生日 ${esc(pii.birthDate || '—')}</p>` : ''}
+    </section>`;
+  }
+  function bindOcrCards(root, employeeId) {
+    $$('.ocr-confirm', root).forEach((card) => {
+      const id = card.dataset.ocr;
+      $('[data-ocr-ok]', card).onclick = async () => {
+        const f = $('.ocr-form', card);
+        const body = Object.fromEntries([...f.querySelectorAll('input')].map((el) => [el.name, el.value]));
+        try { await write('/api/hr/ocr-reviews/' + id + '/confirm', 'POST', body); toast('已確認並寫入'); await refresh(); paintProfile(root, employeeId); }
+        catch (err) { toast(err.message); }
+      };
+      $('[data-ocr-skip]', card).onclick = async () => {
+        try { await write('/api/hr/ocr-reviews/' + id + '/dismiss', 'POST', {}); toast('已略過此次辨識'); await refresh(); paintProfile(root, employeeId); }
+        catch (err) { toast(err.message); }
+      };
+    });
+  }
+  async function doBatchBank(root) {
+    try {
+      const r = await write('/api/hr/ocr/batch-bank', 'POST', {});
+      if (r.skipped === 'no-gemini') toast(r.message || '尚未設定 Gemini，無法批次辨識。');
+      else toast('已掃描 ' + (r.scanned || 0) + ' 張，待確認 ' + (r.pending || 0) + (r.failed ? '，失敗 ' + r.failed : ''));
+      await refresh();
+      paintStaff(root);
+    } catch (e) { toast(e.message); }
   }
 
   function field(name, label, value, type = 'text') {
@@ -521,6 +612,9 @@
     try {
       const saved = await uploadFile(employeeId, cat, file, exp);
       toast('已存到 ' + (saved.displayPath || saved.path || saved.filename));
+      if (saved.ocr && saved.ocr.skipped === 'no-gemini') toast('檔案已存。尚未設定 Gemini，無法自動辨識，請自行核對。');
+      else if (saved.ocr && saved.ocr.skipped === 'ocr-error') toast(saved.ocr.message || '檔案已存，自動辨識暫時無法使用。');
+      else if (saved.ocr && saved.ocr.review) toast('已預填辨識結果，請核對後按確認才會寫入。');
       await refresh();
       paintProfile(root, employeeId);
     } catch (e) { toast(e.message); }

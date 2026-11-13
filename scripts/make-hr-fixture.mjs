@@ -23,10 +23,16 @@ CREATE TABLE leave_import_rows(id TEXT PRIMARY KEY, employee_id TEXT REFERENCES 
 `);
 const emp = JSON.stringify({name:'黃淑芬',department:'行政',job:'人資行政',employmentType:'正職',arrivalDate:'2019-03-01',departureDate:'',phone:'0912-000-001',emergencyContact:'黃先生',paperLocation:'行政櫃',notes:'',lineBound:''});
 db.prepare('INSERT INTO employees(id,data,revision) VALUES(?,?,1)').run('EMP-001', emp);
+const empOld = JSON.stringify({name:'劉金福',department:'摺疊',job:'摺疊',employmentType:'正職',arrivalDate:'',departureDate:'',phone:'0912-000-030',emergencyContact:'',paperLocation:'',notes:'示意：舊員工缺到職日',lineBound:''});
+db.prepare('INSERT INTO employees(id,data,revision) VALUES(?,?,1)').run('EMP-030', empOld);
+const empMiss = JSON.stringify({name:'缺件測試',department:'物流',job:'司機',employmentType:'正職',arrivalDate:'',departureDate:'',phone:'',emergencyContact:'',paperLocation:'',notes:'示意：無到職日也無加保',lineBound:''});
+db.prepare('INSERT INTO employees(id,data,revision) VALUES(?,?,1)').run('EMP-031', empMiss);
 const recs = [
   ['REC-L1','EMP-001','leave', JSON.stringify({id:'REC-L1',employeeId:'EMP-001',date:'2026-03-01',period:'2026週年',action:'核給',hours:120,notes:'年度核給'}), '2026-03-01T00:00:00+08:00'],
   ['REC-L2','EMP-001','leave', JSON.stringify({id:'REC-L2',employeeId:'EMP-001',date:'2026-06-02',period:'2026週年',action:'已休',hours:16,notes:'兩天'}), '2026-06-02T00:00:00+08:00'],
   ['REC-I1','EMP-001','insurance', JSON.stringify({labor:'加保',health:'加保',date:'2019-03-01'}), '2019-03-01T00:00:00+08:00'],
+  ['REC-I2','EMP-030','insurance', JSON.stringify({labor:'加保',health:'加保',date:'2016-05-10'}), '2016-05-10T00:00:00+08:00'],
+  ['REC-I3','EMP-030','insurance', JSON.stringify({labor:'加保',health:'退保',date:'2016-05-12'}), '2016-05-12T00:00:00+08:00'],
 ];
 const ins = db.prepare('INSERT INTO records VALUES(?,?,?,?,?)');
 for (const r of recs) ins.run(...r);

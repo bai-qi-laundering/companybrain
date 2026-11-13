@@ -59,3 +59,7 @@
 @media(max-width:860px){
   #hr-root .profile,#hr-root .inline-grid{grid-template-columns:1fr}
 }
+
+#hr-root .ocr-confirm{border:1px solid #d4a017;background:#fffaf0;box-shadow:0 1px 0 rgba(24,44,57,.06)}
+#hr-root .ocr-confirm .section-title{color:#7a4d00}
+#hr-root .arrival-note{margin:0}
