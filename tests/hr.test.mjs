@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import {mkdtemp, rm} from 'node:fs/promises';
+import {mkdtemp, rm, writeFile, readFile} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -494,6 +494,63 @@ test('recruitment: new statuses, archive, résumé confirm, and convert carries 
   } finally {
     if (prev == null) delete process.env.HR_PII_KEY;
     else process.env.HR_PII_KEY = prev;
+    await new Promise((r) => ctx.server.close(r));
+    await ctx.db.close();
+    await rm(ctx.docRoot, {recursive: true, force: true});
+  }
+});
+
+test('identity and license records resolve from the 離職 sibling folder without scanning it', async () => {
+  const ctx = await start();
+  try {
+    const left = process.env.NAS_IDENTITY_LEFT_PATH;
+    const primary = process.env.NAS_IDENTITY_PATH;
+    await writeFile(path.join(left, '周育民-正.jpg'), Buffer.from('left-only-bytes'));
+    await writeFile(path.join(primary, '在職樣本.jpg'), Buffer.from('primary-bytes'));
+    await ctx.hr.insertDocument({
+      id: 'D-left-id', category: 'identity', relativePath: '周育民-正.jpg', filename: '周育民-正.jpg',
+      size: 15, mtime: Date.now(), available: false,
+    }, null);
+    await ctx.hr.insertDocument({
+      id: 'D-left-lic', category: 'license', relativePath: '周育民-正.jpg', filename: '周育民-正.jpg',
+      size: 15, mtime: Date.now(), available: true,
+    }, null);
+    const rawState = await ctx.hr.state();
+    assert.equal(rawState.documents.find((d) => d.id === 'D-left-id').available, false);
+    assert.equal(rawState.documents.find((d) => d.id === 'D-left-lic').available, true);
+
+    const state = await (await ctx.api('/api/hr/state')).json();
+    const identity = state.documents.find((d) => d.id === 'D-left-id');
+    const license = state.documents.find((d) => d.id === 'D-left-lic');
+    assert.equal(identity.available, true);
+    assert.equal(license.available, true);
+    const missing = state.documents.filter((d) => d.id.startsWith('D-left') && !d.available);
+    assert.equal(missing.length, 0);
+
+    const file = await fetch(ctx.url + '/api/hr/documents/D-left-id/file', {headers: {Cookie: ctx.cookie}});
+    assert.equal(file.status, 200);
+    assert.equal(Buffer.from(await file.arrayBuffer()).toString(), 'left-only-bytes');
+
+    const calls = [];
+    const {batchScanDocuments} = await import('../backend/hr-ocr.mjs');
+    const {resolveDocFile, isPrimaryDocRoot} = await import('../backend/hr-docs.mjs');
+    const located = await resolveDocFile('identity', '周育民-正.jpg');
+    assert.ok(located && located.abs.endsWith('周育民-正.jpg'));
+    assert.equal(isPrimaryDocRoot(located.root, 'identity'), false);
+    const result = await batchScanDocuments({
+      hr: ctx.hr,
+      config: {key: 'test-key', model: 'model'},
+      extract: async (input) => { calls.push(input); return {name: 'should-not-run'}; },
+      actor: 'test',
+      categories: ['identity', 'license'],
+    });
+    assert.equal(calls.filter((c) => String(c.filename || c.absPath || '').includes('周育民')).length, 0);
+    const reviews = (await ctx.hr.state()).ocrReviews || [];
+    assert.equal(reviews.filter((r) => r.documentId === 'D-left-id' || r.documentId === 'D-left-lic').length, 0);
+    // new uploads still land in the 在職 folder
+    const uploaded = await readFile(path.join(primary, '在職樣本.jpg'), 'utf8');
+    assert.equal(uploaded, 'primary-bytes');
+  } finally {
     await new Promise((r) => ctx.server.close(r));
     await ctx.db.close();
     await rm(ctx.docRoot, {recursive: true, force: true});

@@ -72,3 +72,33 @@ test('renewal action saves the date-bound status and a history record together a
  assert.equal(c.read().organizations[1].renewal,undefined);
  assert.match(c.$('#content').innerHTML,/續約報價未送出/);
 });
+
+test('對象名錄 is hidden from the sidebar; 內部 and unknown kinds stay under 廠商 so LINE data has no orphans',async()=>{
+ const html=await readFile(new URL('../index.html',import.meta.url),'utf8');
+ assert(!html.includes('data-view="directory"'));
+ assert(html.includes('data-view="vendors"'));
+ assert(html.includes('data-view="clients"'));
+ const c=sandbox(true);await new Promise(r=>setTimeout(r,0));
+ const run=code=>vm.runInContext(code,c.context);
+ const extra=[{id:'dashin',name:'大信設備',kind:'設備商',contact:'',role:'',manager:'',contract:'',memo:'',aliases:[],prices:[],contractEndDate:''},{id:'unknown-org',name:'未分類廠商',kind:'',contact:'',role:'',manager:'',contract:'',memo:'',aliases:[],prices:[],contractEndDate:''},{id:'intercontinental',name:'高雄洲際飯店',kind:'飯店',contact:'',role:'',manager:'',contract:'',memo:'',aliases:['洲際'],prices:[],contractEndDate:''}];
+ c.context.extraOrgs=extra;
+ run('organizations=organizations.concat(extraOrgs)');
+ assert.deepEqual(run('organizations.filter(o=>!isVendorOrg(o)&&!isClientOrg(o)).map(o=>o.id)'),[]);
+ const vendorIds=run('organizations.filter(isVendorOrg).map(o=>o.id)').sort();
+ const clientIds=run('organizations.filter(isClientOrg).map(o=>o.id)').sort();
+ assert(vendorIds.includes('baiqi'));
+ assert(vendorIds.includes('dashin'));
+ assert(vendorIds.includes('unknown-org'));
+ assert(clientIds.includes('intercontinental'));
+ assert(!vendorIds.includes('intercontinental'));
+ assert.equal(run("navigate('directory'),view"),'vendors');
+ run("handleSourceLink=handleSourceLink;selected=null;view='vendors'");
+ c.context.location.search='?org=intercontinental';
+ run("handledSourceLink=false;handleSourceLink()");
+ assert.equal(run('view'),'clients');
+ assert.equal(run('selected'),'intercontinental');
+ c.context.location.search='?org=dashin';
+ run("handledSourceLink=false;handleSourceLink()");
+ assert.equal(run('view'),'vendors');
+ assert.equal(run('selected'),'dashin');
+});

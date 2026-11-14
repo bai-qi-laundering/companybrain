@@ -31,6 +31,69 @@ export function displayFolder(category) {
   return folders[category] || '';
 }
 
+
+export function leftIdentityPath() {
+  return process.env.NAS_IDENTITY_LEFT_PATH || '';
+}
+
+/** Primary write folder first, then the 離職 identity/license sibling if configured. */
+export function folderRoots(category) {
+  const primary = folderConfig()[category] || '';
+  const roots = [];
+  const add = (root) => {
+    if (!root) return;
+    const key = path.resolve(root);
+    if (!roots.some((r) => path.resolve(r) === key)) roots.push(root);
+  };
+  add(primary);
+  if (category === 'identity' || category === 'license') add(leftIdentityPath());
+  return roots;
+}
+
+function safeJoinRoot(root, relativePath) {
+  const rel = String(relativePath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!rel || rel.split('/').includes('..')) return null;
+  const abs = path.resolve(root, rel);
+  const base = path.resolve(root);
+  if (abs !== base && !abs.startsWith(base + path.sep)) return null;
+  return abs;
+}
+
+export async function resolveDocFile(category, relativePath) {
+  for (const root of folderRoots(category)) {
+    const abs = safeJoinRoot(root, relativePath);
+    if (!abs) continue;
+    try {
+      const st = await stat(abs);
+      if (st.isFile()) {
+        const display = String(root).replace(/\\/g, '/') + '/' + String(relativePath || '').replace(/\\/g, '/');
+        return {abs, root, displayPath: display};
+      }
+    } catch { /* try next root */ }
+  }
+  return null;
+}
+
+export function isPrimaryDocRoot(root, category) {
+  const primary = folderConfig()[category];
+  if (!primary || !root) return false;
+  return path.resolve(root) === path.resolve(primary);
+}
+
+export async function enrichDocuments(docs = []) {
+  const out = [];
+  for (const d of docs) {
+    const ignored = isIgnoredDocFile(d.filename) || isIgnoredDocFile(d.relativePath);
+    if (ignored) {
+      out.push({...d, available: false});
+      continue;
+    }
+    const hit = await resolveDocFile(d.category, d.relativePath || d.filename);
+    out.push({...d, available: Boolean(hit), displayPath: hit?.displayPath || d.displayPath || ''});
+  }
+  return out;
+}
+
 export function isIgnoredDocFile(filename) {
   const base = String(filename || '').split('/').pop();
   if (!base) return true;
@@ -121,13 +184,13 @@ function folderGroups() {
   return groups;
 }
 
-function categoryForScan(categories, filename, relativePath, existing = []) {
-  if (categories.length === 1) return categories[0];
+function categoriesForScan(categories, filename, relativePath, existing = []) {
   const parsed = parseManaged(filename);
-  if (parsed && categories.includes(parsed.category)) return parsed.category;
-  const hit = existing.find((d) => categories.includes(d.category) && d.relativePath === relativePath);
-  if (hit) return hit.category;
-  return null;
+  if (parsed && categories.includes(parsed.category)) return [parsed.category];
+  const hits = existing.filter((d) => categories.includes(d.category) && d.relativePath === relativePath).map((d) => d.category);
+  if (hits.length) return [...new Set(hits)];
+  if (categories.length === 1) return categories;
+  return [];
 }
 
 export async function scanFolders(hr, employees) {
@@ -142,8 +205,8 @@ export async function scanFolders(hr, employees) {
       if (!st.isFile()) continue;
       const filename = path.basename(abs);
       const relativePath = path.relative(root, abs).split(path.sep).join('/');
-      const category = categoryForScan(categories, filename, relativePath, existing);
-      if (!category) continue;
+      const cats = categoriesForScan(categories, filename, relativePath, existing);
+      if (!cats.length) continue;
       const parsed = parseManaged(filename);
       let employeeId = null;
       const suggestions = [];
@@ -152,10 +215,12 @@ export async function scanFolders(hr, employees) {
         const hits = employees.filter((e) => e.name && (e.name === parsed.nameHint || parsed.nameHint.includes(e.name) || e.name.includes(parsed.nameHint)));
         for (const h of hits) suggestions.push({employeeId: h.id, name: h.name});
       }
-      const id = 'D-' + createHash('sha1').update(category + ':' + relativePath).digest('hex').slice(0, 16);
-      const row = {id, category, relativePath, filename, size: st.size, mtime: Math.trunc(st.mtimeMs), available: true, employeeId, suggestions};
-      await hr.insertDocument(row, null);
-      found.push(row);
+      for (const category of cats) {
+        const id = 'D-' + createHash('sha1').update(category + ':' + relativePath).digest('hex').slice(0, 16);
+        const row = {id, category, relativePath, filename, size: st.size, mtime: Math.trunc(st.mtimeMs), available: true, employeeId, suggestions};
+        await hr.insertDocument(row, null);
+        found.push(row);
+      }
     }
   }
   await hr.setSetting('lastScan', {at: new Date().toISOString(), count: found.length});

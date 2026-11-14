@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {resolveOrganization} from '../backend/organizations.mjs';
 import {normalizeDraft,initialState} from '../backend/domain.mjs';
 import {extractDraft} from '../backend/gemini.mjs';
-import {understand,answerQuestion} from '../backend/assistant.mjs';
+import {understand,answerQuestion,retrieve} from '../backend/assistant.mjs';
 const organizations=[...initialState.organizations,{id:'uuid-intercontinental',name:'高雄洲際飯店',kind:'飯店',aliases:['洲際']}];
 const record={kind:'record',orgId:null,date:'2026-10-12',type:'客訴',title:'枕套客訴',note:'同一車',warnings:['洲際不在名錄，請先建檔。']};
 test('directory IDs, normalized names, hotel shorthand and explicit aliases resolve without guessing ambiguous parties',()=>{
@@ -36,4 +36,27 @@ test('month/day defaults to Taipei current year and dated hotel washing tasks ke
  const range=normalizeDraft({...raw,kind:'record'},orgs,'09/20–09/23 鉑麗會議',now);assert.equal(range.date,'2026-09-20');assert.equal(range.endDate,'2026-09-23');
  assert.equal(normalizeDraft(raw,orgs,'1/2 鉑麗待辦',new Date('2026-12-31T16:01:00Z')).date,'2027-01-02');
  assert(normalizeDraft(raw,orgs,'2/30 鉑麗待辦',now).warnings.length);
+});
+
+test('LINE Q&A retrieve finds a hotel and a vendor from the shared organizations table', async () => {
+  const orgs = [
+    {id: 'baiqi', name: '百麒', kind: '內部', aliases: [], prices: []},
+    {id: 'hotel', name: '高雄洲際飯店', kind: '飯店', aliases: ['洲際'], prices: [], memo: '客房布品'},
+    {id: 'vendor', name: '大信設備', kind: '設備商', aliases: ['大信'], prices: [], memo: '洗衣機維修'},
+  ];
+  const records = [
+    {id: 'r-hotel', org: 'hotel', type: '客訴', title: '洲際反映床單', date: '2026-10-01', note: '需更換', sourceText: ''},
+    {id: 'r-vendor', org: 'vendor', type: '一般紀錄', title: '大信保養洗衣機', date: '2026-10-02', note: '已完成', sourceText: ''},
+  ];
+  const state = {organizations: orgs, records, tasks: []};
+  assert.equal(resolveOrganization('洲際', orgs).id, 'hotel');
+  assert.equal(resolveOrganization('大信', orgs).id, 'vendor');
+  const hotel = retrieve(state, {keywords: ['床單'], orgIds: ['hotel']}, '洲際最近有什麼紀錄');
+  assert.ok(hotel.items.some((r) => r.id === 'r-hotel'));
+  const vendor = retrieve(state, {keywords: ['洗衣機'], orgIds: ['vendor']}, '大信洗衣機');
+  assert.ok(vendor.items.some((r) => r.id === 'r-vendor'));
+  const hotelQ = await understand({text: '最近洲際客訴', organizations: orgs, fetchImpl: () => { throw new Error('short lookup should not need AI'); }});
+  assert.ok(hotelQ.orgIds.includes('hotel'));
+  const hotelAnswer = await answerQuestion({text: '最近洲際客訴', state, plan: hotelQ, fetchImpl: () => { throw new Error('should use stored records'); }});
+  assert.ok(hotelAnswer.sources.some((s) => s.id === 'r-hotel') || hotelAnswer.answer.includes('洲際') || hotelAnswer.answer.includes('床單'));
 });

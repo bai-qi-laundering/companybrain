@@ -5,7 +5,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {AppError} from './domain.mjs';
 import {newId, DOC_TYPES} from './hr-store.mjs';
-import {folderConfig, saveUpload, scanFolders, fileId, savedPath, UPLOAD_LIMIT, MIMES} from './hr-docs.mjs';
+import {folderConfig, saveUpload, scanFolders, fileId, savedPath, UPLOAD_LIMIT, MIMES, enrichDocuments, resolveDocFile} from './hr-docs.mjs';
 import {runAfterUpload, batchScanBank, geminiReady} from './hr-ocr.mjs';
 import {hasPiiKey} from './hr-crypto.mjs';
 import {importStatus, loadSheetValues, parseSheetRows, compareSalaryRows, normalizeColumns, SETUP_INSTRUCTIONS} from './hr-salary-import.mjs';
@@ -93,6 +93,7 @@ export async function handleHr(req, res, {hr, session, method, path: p, config =
 
   if (method === 'GET' && pathname === '/api/hr/state') {
     const state = await hr.state();
+    state.documents = await enrichDocuments(state.documents);
     state.ocr = {geminiConfigured: geminiReady(config), piiKeyConfigured: hasPiiKey()};
     const sheet = await hr.getSalaryImport();
     state.salaryImport = {...sheet, ...(await importStatus())};
@@ -312,10 +313,9 @@ export async function handleHr(req, res, {hr, session, method, path: p, config =
   }
   if (method === 'GET' && (m = pathname.match(/^\/api\/hr\/documents\/([^/]+)\/file$/))) {
     const doc = await hr.getDocument(decodeURIComponent(m[1]));
-    const root = folderConfig()[doc.category];
-    if (!root) throw new AppError(404, '資料夾未設定');
-    const abs = path.join(root, doc.relative_path);
-    if (!abs.startsWith(path.resolve(root))) throw new AppError(400, '路徑不正確');
+    const hit = await resolveDocFile(doc.category, doc.relative_path || doc.filename);
+    if (!hit) throw new AppError(404, '檔案不在資料夾裡');
+    const abs = hit.abs;
     try {
       const st = await stat(abs);
       const type = extMime(path.extname(abs));
