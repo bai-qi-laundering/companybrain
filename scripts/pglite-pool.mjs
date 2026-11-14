@@ -5,6 +5,7 @@ const {PGlite} = require('@electric-sql/pglite');
 export function jsonParam(p) {
   if (p == null) return p;
   if (p instanceof Date) return p.toISOString();
+  if (Buffer.isBuffer(p) || p instanceof Uint8Array) return p;
   if (typeof p === 'object') return JSON.stringify(p);
   return p;
 }

@@ -6,11 +6,17 @@ export class AssistantStore {
  async init(){await this.pool.query(`
  CREATE TABLE IF NOT EXISTS cb_line_jobs(id text PRIMARY KEY,event jsonb NOT NULL,status text NOT NULL DEFAULT 'pending',lease_until timestamptz,reply_text text,created_at timestamptz NOT NULL DEFAULT now());
  CREATE TABLE IF NOT EXISTS cb_camera_groups(hotel text PRIMARY KEY,group_id text NOT NULL UNIQUE,updated_at timestamptz NOT NULL DEFAULT now());
- CREATE TABLE IF NOT EXISTS cb_camera_photos(id text PRIMARY KEY,mime text NOT NULL,body bytea NOT NULL,label text NOT NULL DEFAULT '',status text NOT NULL DEFAULT 'pending',lease_until timestamptz,expires_at timestamptz NOT NULL DEFAULT (now()+interval '24 hours'),created_at timestamptz NOT NULL DEFAULT now());
+ CREATE TABLE IF NOT EXISTS cb_camera_photos(id text PRIMARY KEY,mime text NOT NULL,body bytea NOT NULL,label text NOT NULL DEFAULT '',hotel text NOT NULL DEFAULT '',stage text NOT NULL DEFAULT '',kind text NOT NULL DEFAULT '',status text NOT NULL DEFAULT 'pending',lease_until timestamptz,expires_at timestamptz NOT NULL DEFAULT (now()+interval '24 hours'),created_at timestamptz NOT NULL DEFAULT now(),delivered_at timestamptz);
  ALTER TABLE cb_camera_photos ADD COLUMN IF NOT EXISTS label text NOT NULL DEFAULT '';
+ ALTER TABLE cb_camera_photos ADD COLUMN IF NOT EXISTS hotel text NOT NULL DEFAULT '';
+ ALTER TABLE cb_camera_photos ADD COLUMN IF NOT EXISTS stage text NOT NULL DEFAULT '';
+ ALTER TABLE cb_camera_photos ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT '';
  ALTER TABLE cb_camera_photos ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending';
  ALTER TABLE cb_camera_photos ADD COLUMN IF NOT EXISTS lease_until timestamptz;
  ALTER TABLE cb_camera_photos ADD COLUMN IF NOT EXISTS expires_at timestamptz NOT NULL DEFAULT (now()+interval '24 hours');
+ ALTER TABLE cb_camera_photos ADD COLUMN IF NOT EXISTS delivered_at timestamptz;
+ CREATE TABLE IF NOT EXISTS cb_camera_commands(event_id text PRIMARY KEY,result text NOT NULL DEFAULT '',created_at timestamptz NOT NULL DEFAULT now());
+ CREATE INDEX IF NOT EXISTS cb_camera_photos_pending_lookup ON cb_camera_photos(status,hotel,stage,kind,created_at);
  CREATE TABLE IF NOT EXISTS cb_garment_group_binding(kind text PRIMARY KEY,group_id text NOT NULL,updated_by text NOT NULL,updated_at timestamptz NOT NULL DEFAULT now());
  CREATE TABLE IF NOT EXISTS cb_garment_group_commands(event_id text PRIMARY KEY,result text NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
  CREATE TABLE IF NOT EXISTS cb_line_members(user_id text PRIMARY KEY,display_name text NOT NULL DEFAULT '',active boolean NOT NULL DEFAULT true,reminders boolean NOT NULL DEFAULT true,event_ms bigint NOT NULL DEFAULT 0);
@@ -31,22 +37,36 @@ export class AssistantStore {
  async cameraGroup(hotel){return (await this.pool.query('SELECT group_id FROM cb_camera_groups WHERE hotel=$1',[hotel])).rows[0]?.group_id||null;}
  async isGarmentGroup(groupId){return (await this.pool.query("SELECT 1 FROM cb_garment_group_binding WHERE kind='garment' AND group_id=$1",[groupId])).rowCount>0;}
  async cameraPhoto(id){return (await this.pool.query("SELECT mime,body FROM cb_camera_photos WHERE id=$1 AND expires_at>now()",[id])).rows[0]||null;}
- async saveCameraPhoto(id,body,label){
-  await this.pool.query("INSERT INTO cb_camera_photos(id,mime,body,label) VALUES($1,'image/jpeg',$2,$3) ON CONFLICT DO NOTHING",[id,body,label]);
-  const row=(await this.pool.query('SELECT label,body,status,extract(epoch from expires_at)::bigint AS expiry FROM cb_camera_photos WHERE id=$1',[id])).rows[0];
-  if(row.label!==label||!row.body.equals(body))throw new AppError(409,'照片 ID 已被其他內容使用');
+ async saveCameraPhoto(id,body,label,meta={}){
+  const hotel=String(meta.hotel||''),stage=String(meta.stage||''),kind=String(meta.kind||'');
+  await this.pool.query("INSERT INTO cb_camera_photos(id,mime,body,label,hotel,stage,kind) VALUES($1,'image/jpeg',$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING",[id,body,label,hotel,stage,kind]);
+  const row=(await this.pool.query('SELECT label,body,status,hotel,stage,kind,extract(epoch from expires_at)::bigint AS expiry FROM cb_camera_photos WHERE id=$1',[id])).rows[0];
+  const same=row.body.equals?row.body.equals(body):Buffer.from(row.body).equals(Buffer.from(body));
+  if(row.label!==label||!same||row.hotel!==hotel||row.stage!==stage||row.kind!==kind)throw new AppError(409,'照片 ID 已被其他內容使用');
   return row;
  }
  async claimCameraPhoto(id){return (await this.pool.query("UPDATE cb_camera_photos SET status='sending',lease_until=now()+interval '2 minutes' WHERE id=$1 AND (status='pending' OR (status='sending' AND lease_until<now())) RETURNING id",[id])).rowCount>0;}
  async releaseCameraPhoto(id){await this.pool.query("UPDATE cb_camera_photos SET status='pending',lease_until=NULL WHERE id=$1 AND status='sending'",[id]);}
- async completeCameraPhoto(id,hotel,label){
-  const client=await this.pool.connect();try{await client.query('BEGIN');
-   await client.query("UPDATE cb_camera_photos SET status='sent',lease_until=NULL WHERE id=$1",[id]);
-   const group=(await client.query("SELECT group_id FROM cb_garment_group_binding WHERE kind='garment'")).rows[0]?.group_id;
-   if(group)await client.query("INSERT INTO cb_notifications(id,user_id,payload,retry_key) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING",['camera-success:'+id,group,JSON.stringify({messages:[{type:'text',text:'✅ '+label+' 照片已傳送'}]}),id]);
-   await client.query('COMMIT');
-  }catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
+ async releaseCameraPhotos(ids){if(!ids?.length)return;await this.pool.query("UPDATE cb_camera_photos SET status='pending',lease_until=NULL WHERE id=ANY(string_to_array($1,',')) AND status='sending'",[ids.join(',')]);}
+ async claimPendingCameraPhotos(hotels,stage,kind,limit=4){
+  const names=Array.isArray(hotels)?hotels.filter(Boolean):[];
+  if(!names.length||!stage||!kind)return [];
+  const cap=Math.min(Math.max(Number(limit)||0,0),4);
+  if(!cap)return [];
+  return (await this.pool.query(`UPDATE cb_camera_photos SET status='sending',lease_until=now()+interval '2 minutes' WHERE id IN (
+    SELECT id FROM cb_camera_photos WHERE hotel=ANY(string_to_array($1,',')) AND stage=$2 AND kind=$3 AND status='pending' AND expires_at>now() ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT $4
+  ) RETURNING id,hotel,label,stage,kind,extract(epoch from expires_at)::bigint AS expiry`,[names.join(','),stage,kind,cap])).rows;
  }
+ async countPendingCameraPhotos(hotels,stage,kind){
+  const names=Array.isArray(hotels)?hotels.filter(Boolean):[];
+  if(!names.length)return 0;
+  return Number((await this.pool.query("SELECT count(*)::int AS n FROM cb_camera_photos WHERE hotel=ANY(string_to_array($1,',')) AND stage=$2 AND kind=$3 AND status='pending' AND expires_at>now()",[names.join(','),stage,kind])).rows[0]?.n||0);
+ }
+ async completeDeliveredCameraPhotos(ids){if(!ids?.length)return;await this.pool.query("UPDATE cb_camera_photos SET status='delivered',lease_until=NULL,delivered_at=now() WHERE id=ANY(string_to_array($1,','))",[ids.join(',')]);}
+ async completeCameraPhoto(id){await this.pool.query("UPDATE cb_camera_photos SET status='delivered',lease_until=NULL,delivered_at=now() WHERE id=$1",[id]);}
+ async beginCameraCommand(eventId){return (await this.pool.query("INSERT INTO cb_camera_commands(event_id,result) VALUES($1,'processing') ON CONFLICT DO NOTHING RETURNING event_id",[eventId])).rowCount>0;}
+ async finishCameraCommand(eventId,result){await this.pool.query("UPDATE cb_camera_commands SET result=$2 WHERE event_id=$1",[eventId,String(result||'done')]);}
+ async abortCameraCommand(eventId){await this.pool.query("DELETE FROM cb_camera_commands WHERE event_id=$1 AND result='processing'",[eventId]);}
  async purgeCameraPhotos(){await this.pool.query("DELETE FROM cb_camera_photos WHERE expires_at<now()");}
  async garmentGroupCommand(groupId,command,eventId,userId){
    const client=await this.pool.connect();

@@ -3,8 +3,7 @@ import {createHmac,timingSafeEqual,createHash,randomUUID} from 'node:crypto';
 import {AppError,validateState,normalizeDraft,taskHistory} from './domain.mjs';
 import {AssistantStore} from './assistant-store.mjs';
 import {understand,describeMedia,answerQuestion,expirySummary,expiryText,taipeiDay,taipeiHour} from './assistant.mjs';
-function cameraDestination(raw){const value=String(raw||'').normalize('NFKC').trim().replace(/\s+/g,'');if(!value||value.length>80)return null;const hotel=value.replace(/(?:制服|客衣)$/u,'');if(!hotel||hotel.length>40||!(/^[\p{L}\p{N}_-]+$/u.test(hotel)))return null;return {hotel,label:value};}
-function cameraImageMessages(url,label){const parsed=new URL(url);if(parsed.protocol!=='https:')throw new AppError(400,'照片網址必須使用 HTTPS');return [{type:'text',text:'📷 '+label},{type:'image',originalContentUrl:parsed.href,previewImageUrl:parsed.href}];}
+import {cameraPhotoCommand,cameraBindCommand,signedCameraImageUrl,cameraReplyMessages,pendingPhotoHeader} from './camera-routing.mjs';
 const digest=s=>createHash('sha256').update(s).digest('hex');
 export function validSignature(raw,signature,secret){if(!secret||typeof signature!=='string')return false;const a=Buffer.from(createHmac('sha256',secret).update(raw).digest('base64')),b=Buffer.from(signature);return a.length===b.length&&timingSafeEqual(a,b);}
 export function stripTextUrls(text){return String(text||'').replace(/\[([^\]]+)\]\(https?:\/\/[^)]+\)/g,'$1').replace(/https?:\/\/[^\s]+/g,'').replace(/\n{3,}/g,'\n\n').trim()}
@@ -25,40 +24,61 @@ export function createLineService({store,config,ai=understand,mediaAI=describeMe
  // Only explicit group commands are handled here. Ordinary group chat stays out of CompanyBrain.
  if(e.source?.type==='group'){
    const uid=e.source.userId,groupId=e.source.groupId;
-   const command=e.type==='message'&&e.message?.type==='text'?garmentBindingCommand(e.message.text):null;
-   if(command&&typeof uid==='string'&&typeof groupId==='string'&&/^C[0-9a-f]{32}$/i.test(groupId)&&permitted(uid)){
+   const validGroup=typeof groupId==='string'&&/^C[0-9a-f]{32}$/i.test(groupId);
+   const text=e.type==='message'&&e.message?.type==='text'?e.message.text:'';
+   const command=e.type==='message'&&e.message?.type==='text'?garmentBindingCommand(text):null;
+   const photoCommand=cameraPhotoCommand(text);
+   const bindCommand=cameraBindCommand(text);
+   async function replyGroup(messages){
+     if(typeof e.replyToken!=='string'||!e.replyToken){console.error('LINE group command skipped: missing replyToken');return false;}
+     const response=await callLine('reply',{replyToken:e.replyToken,messages},typeof e.webhookEventId==='string'?e.webhookEventId:undefined);
+     return response.ok;
+   }
+   async function once(eventId,work){
+     if(typeof eventId!=='string'||eventId.length>100)return;
+     if(!await db.beginCameraCommand(eventId))return;
+     try{const result=await work();await db.finishCameraCommand(eventId,result||'done');}
+     catch(err){await db.abortCameraCommand(eventId);throw err;}
+   }
+   try{
+   if(command&&typeof uid==='string'&&validGroup&&permitted(uid)){
      const admins=new Set(String(config.garmentAdminUserIds||'').split(',').map(x=>x.trim()).filter(Boolean));
      if(admins.has(uid)&&typeof e.webhookEventId==='string'&&e.webhookEventId.length<=100){
        const result=await db.garmentGroupCommand(groupId,command,e.webhookEventId,uid);
-       if(result?.message){
-         await db.notify('garment-bind:'+e.webhookEventId,groupId,{messages:[{type:'text',text:result.message}]},randomUUID());
-       }
+       if(result?.message)await replyGroup([{type:'text',text:result.message}]);
      }
+   }else if(bindCommand&&typeof uid==='string'&&validGroup&&permitted(uid)){
+     const cameraAdmin=new Set([...(String(config.cameraAdminUserIds||'').split(',')),...(String(config.garmentAdminUserIds||'').split(','))].map(x=>x.trim()).filter(Boolean));
+     if(cameraAdmin.has(uid)){
+       await once(e.webhookEventId,async()=>{
+         let message;
+         if(bindCommand.action==='bind'){const result=await db.bindCameraGroup(bindCommand.hotel,groupId);message=result==='conflict'?'此飯店已綁定其他群組，請先到原群組解除綁定。':result==='group_conflict'?'此群組已綁定其他飯店，請先解除原綁定。':'✅ 已綁定：'+bindCommand.hotel;}
+         else if(bindCommand.action==='unbind'){message=await db.unbindCameraGroup(bindCommand.hotel,groupId)?'✅ 已解除綁定：'+bindCommand.hotel:'此群組沒有該飯店的綁定紀錄。';}
+         else{const names=await db.cameraGroupNames(groupId);message=names.length?'本群組已綁定：'+names.join('、'):'本群組尚未綁定飯店。';}
+         await replyGroup([{type:'text',text:message}]);
+         return message;
+       });
+     }
+   }else if(photoCommand&&validGroup){
+     await once(e.webhookEventId,async()=>{
+       const hotels=await db.cameraGroupNames(groupId);
+       if(!hotels.length){await replyGroup([{type:'text',text:'本群組尚未綁定飯店。'}]);return 'unbound';}
+       const claimed=await db.claimPendingCameraPhotos(hotels,photoCommand.stage,photoCommand.kind,4);
+       const remaining=await db.countPendingCameraPhotos(hotels,photoCommand.stage,photoCommand.kind);
+       const header=pendingPhotoHeader({hotels,stage:photoCommand.stage,kind:photoCommand.kind,sent:claimed.length,remaining});
+       if(!claimed.length){await replyGroup([{type:'text',text:header}]);return header;}
+       const urls=claimed.map(photo=>signedCameraImageUrl(config.origin,photo.id,photo.expiry,config.cameraLinkKey));
+       const ok=await replyGroup(cameraReplyMessages(header,urls));
+       if(ok)await db.completeDeliveredCameraPhotos(claimed.map(photo=>photo.id));
+       else{await db.releaseCameraPhotos(claimed.map(photo=>photo.id));throw new AppError(502,'LINE 照片回覆失敗');}
+       return header;
+     });
    }
-   const text=e.type==='message'&&e.message?.type==='text'?String(e.message.text).normalize('NFKC').replace(/\s+/g,'').trim():'';
-   const cameraCommand=text!=='綁定客衣群組'&&text!=='查詢客衣群組';
-   const bind=cameraCommand?/^綁定([\p{L}\p{N}_-]{1,40})$/u.exec(text):null,unbind=cameraCommand?/^解除綁定([\p{L}\p{N}_-]{1,40})$/u.exec(text):null,lookup=cameraCommand&&(text==='查詢綁定'||text==='綁定查詢');
-   const cameraAdmin=new Set([...(String(config.cameraAdminUserIds||'').split(',')),...(String(config.garmentAdminUserIds||'').split(','))].map(x=>x.trim()).filter(Boolean));
-   if((bind||unbind||lookup)&&typeof uid==='string'&&cameraAdmin.has(uid)&&permitted(uid)&&typeof groupId==='string'&&/^C[0-9a-f]{32}$/i.test(groupId)){
-     let message;
-     if(bind){const result=await db.bindCameraGroup(bind[1],groupId);message=result==='conflict'?'此飯店已綁定其他群組，請先到原群組解除綁定。':result==='group_conflict'?'此群組已綁定其他飯店，請先解除原綁定。':'✅ 已綁定：'+bind[1];}
-     else if(unbind){message=await db.unbindCameraGroup(unbind[1],groupId)?'✅ 已解除綁定：'+unbind[1]:'此群組沒有該飯店的綁定紀錄。';}
-     else{const names=await db.cameraGroupNames(groupId);message=names.length?'本群組已綁定：'+names.join('、'):'本群組尚未綁定飯店。';}
-     if(typeof e.webhookEventId==='string'&&e.webhookEventId.length<=100)await db.notify('camera-bind:'+e.webhookEventId,groupId,{messages:[{type:'text',text:message}]},randomUUID());
-   }
+   }catch(err){console.error('LINE group command failed:',err.status||err.code||err.name);}
    continue;
  }
  const uid=e.source?.userId;if(e.source?.type!=='user'||typeof uid!=='string'||!permitted(uid))continue;if(!['message','follow','unfollow'].includes(e.type))continue;if(e.type==='unfollow'){await db.register(uid,'',false,e.timestamp||now().getTime());continue;}await db.register(uid,'',true,e.timestamp||now().getTime());if(typeof e.webhookEventId!=='string'||e.webhookEventId.length>100||typeof e.replyToken!=='string')continue;events.push(e);}await db.enqueue(events);return {ok:true};}
- async function sendCameraPhoto(label,url,id){
-  const destination=cameraDestination(label);
-  if(!destination)throw new AppError(400,'QR 標籤無效');
-  const groupId=await db.cameraGroup(destination.hotel);
-  if(!groupId)throw new AppError(409,'尚未綁定飯店群組：'+destination.hotel);
-  const response=await callLine('push',{to:groupId,messages:cameraImageMessages(url,destination.label)},id);
-  if(!response.ok&&!(response.status===409&&response.headers.get('x-line-accepted-request-id')))throw new AppError(502,'LINE 照片傳送失敗：HTTP '+response.status);
-  return {ok:true,hotel:destination.hotel,label:destination.label};
- }
- async function callLine(path,data,retryKey){const r=await fetchImpl('https://api.line.me/v2/bot/message/'+path,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+config.lineToken,...(retryKey?{'X-Line-Retry-Key':retryKey}:{})},body:JSON.stringify(data),signal:AbortSignal.timeout(10000)});return r;}
+ async function callLine(path,data,retryKey){const r=await fetchImpl('https://api.line.me/v2/bot/message/'+path,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+config.lineToken,...(retryKey?{'X-Line-Retry-Key':retryKey}:{})},body:JSON.stringify(data),signal:AbortSignal.timeout(10000)});if(!r.ok){let detail='';try{detail=typeof r.clone==='function'?await r.clone().text():'';}catch{}console.error('LINE '+path+' status:',r.status,String(detail).slice(0,500));}return r;}
  async function pushJob(id,uid,text){await db.notify('reply:'+id,uid,{messages:[{type:'text',text:text.slice(0,4900)}]},randomUUID());}
  async function deliver(job,text){text=cleanLineReply(text);let r;try{r=await callLine('reply',{replyToken:job.event.replyToken,messages:[{type:'text',text:text.slice(0,4900)}]});}catch{await db.finish(job.id,'reply_failed');return;}if(r.ok){await db.finish(job.id);return;}if(r.status===400&&config.linePushFallback!==false){await pushJob(job.id,job.event.source.userId,text);await db.finish(job.id,'push_queued');}else{console.error('LINE reply status:',r.status);await db.finish(job.id,'reply_failed');}}
  async function profile(uid){const member=await db.member(uid);if(member?.display_name)return member.display_name;try{const r=await fetchImpl('https://api.line.me/v2/bot/profile/'+encodeURIComponent(uid),{headers:{Authorization:'Bearer '+config.lineToken},signal:AbortSignal.timeout(10000)});if(r.ok){const p=await r.json(),name=typeof p.displayName==='string'?p.displayName.slice(0,100):'';if(name){await db.pool.query('UPDATE cb_line_members SET display_name=$2 WHERE user_id=$1',[uid,name]);return name;}}}catch{}return 'LINE管理者';}
@@ -79,5 +99,5 @@ export function createLineService({store,config,ai=understand,mediaAI=describeMe
  async function tick(){if(working||!enabled())return;working=true;try{const job=await db.claim();if(!job)return;const member=await db.member(job.event.source.userId);if(member&&!member.active){await db.finish(job.id,'blocked');return;}let answer=job.reply_text;if(!answer){try{answer=await handle(job);}catch(err){answer=(err.status?err.message:'處理失敗，請先查看網頁清單後重試。');console.error('LINE processing failed:',err.status||err.code||err.name);}await db.answer(job.id,answer);}await deliver(job,answer);}catch(err){console.error('LINE worker failed:',err.code||err.name);}finally{working=false;}}
  async function reminderTick(){if(notifying||!enabled())return;notifying=true;try{if(config.lineReminders!==false&&taipeiHour(now())>=Number(config.reminderHour??8)){const state=await store.read(),summary=expirySummary(state,taipeiDay(now()));if(summary.tasks.length||summary.contracts.length){const users=(await db.pool.query('SELECT user_id FROM cb_line_members WHERE active=true AND reminders=true')).rows;for(const u of users)if(permitted(u.user_id))await db.notify('daily:'+summary.day+':'+u.user_id,u.user_id,{messages:[{type:'text',text:expiryText(summary)}]},randomUUID());}}
  const notice=await db.claimNotice();if(notice){const groupBindingNotice=(notice.id.startsWith('garment-bind:')||notice.id.startsWith('garment-notify:')||notice.id.startsWith('camera-bind:')||notice.id.startsWith('camera-success:'))&&/^C[0-9a-f]{32}$/.test(notice.user_id);const validCameraNotice=!notice.id.startsWith('camera-success:')||await db.isGarmentGroup(notice.user_id);const member=groupBindingNotice?null:await db.member(notice.user_id);if(!validCameraNotice||!groupBindingNotice&&(!member?.active||!permitted(notice.user_id)||notice.id.startsWith('daily:')&&!member.reminders)){await db.finishNotice(notice.id,'cancelled');return;}let payload=notice.payload;if(notice.id.startsWith('daily:')){const day=taipeiDay(now());const summary=expirySummary(await store.read(),day);if(config.lineReminders===false||!notice.id.startsWith('daily:'+day+':')||!summary.tasks.length&&!summary.contracts.length){await db.finishNotice(notice.id,'cancelled');return;}payload={messages:[{type:'text',text:expiryText(summary)}]};}let response;try{response=await callLine('push',{to:notice.user_id,...payload,messages:payload.messages.map(message=>message.type==='text'?{...message,text:cleanLineReply(message.text)}:message)},notice.retry_key);}catch{await db.finishNotice(notice.id,'pending',true);return;}if(response.ok||response.status===409)await db.finishNotice(notice.id,'sent');else if(response.status===429||response.status>=500)await db.finishNotice(notice.id,'pending',true);else{console.error('LINE push status:',response.status);await db.finishNotice(notice.id,'failed');}}}catch(err){console.error('LINE reminder failed:',err.code||err.name);}finally{notifying=false;}}
- return {init:()=>db.init(),webhook,sendCameraPhoto,tick,reminderTick,db,start(){timer=setInterval(()=>void tick(),500);timer.unref();reminderTimer=setInterval(()=>void reminderTick(),30000);reminderTimer.unref();void tick();void reminderTick();},stop(){clearInterval(timer);clearInterval(reminderTimer);}};
+ return {init:()=>db.init(),webhook,tick,reminderTick,db,start(){timer=setInterval(()=>void tick(),500);timer.unref();reminderTimer=setInterval(()=>void reminderTick(),30000);reminderTimer.unref();void tick();void reminderTick();},stop(){clearInterval(timer);clearInterval(reminderTimer);}};
 }
