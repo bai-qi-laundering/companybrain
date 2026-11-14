@@ -34,8 +34,8 @@ export function createLineService({store,config,ai=understand,mediaAI=describeMe
        }
      }
    }
-   const text=e.type==='message'&&e.message?.type==='text'?String(e.message.text).normalize('NFKC').replace(/\\s+/g,'').trim():'';
-   const bind=/^綁定([\\p{L}\\p{N}_-]{1,40})$/u.exec(text),unbind=/^解除綁定([\\p{L}\\p{N}_-]{1,40})$/u.exec(text),lookup=text==='查詢綁定'||text==='綁定查詢';
+   const text=e.type==='message'&&e.message?.type==='text'?String(e.message.text).normalize('NFKC').replace(/\s+/g,'').trim():'';
+   const bind=/^綁定([\p{L}\p{N}_-]{1,40})$/u.exec(text),unbind=/^解除綁定([\p{L}\p{N}_-]{1,40})$/u.exec(text),lookup=text==='查詢綁定'||text==='綁定查詢';
    const cameraAdmin=new Set([...(String(config.cameraAdminUserIds||'').split(',')),...(String(config.garmentAdminUserIds||'').split(','))].map(x=>x.trim()).filter(Boolean));
    if((bind||unbind||lookup)&&typeof uid==='string'&&cameraAdmin.has(uid)&&permitted(uid)&&typeof groupId==='string'&&/^C[0-9a-f]{32}$/i.test(groupId)){
      let message;
