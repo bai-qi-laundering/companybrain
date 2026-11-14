@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {isValidTaiwanId, maskTaiwanId, normalizeTaiwanId} from '../backend/hr-twid.mjs';
+import {isLeftJobDocPath} from '../backend/hr-ocr.mjs';
 import {encryptSecret, decryptSecret, last4, hasPiiKey} from '../backend/hr-crypto.mjs';
 import {planArrivalFromInsurance, earliestEnrollmentDate} from '../backend/hr-arrival.mjs';
 import {normalizeExtract, packConfirmed, geminiReady} from '../backend/hr-ocr.mjs';
@@ -84,4 +85,11 @@ test('Gemini unconfigured is detected and extract warnings flag a bad ID', () =>
   assert.equal(geminiReady({key: 'real'}), true);
   const extracted = normalizeExtract('identity', {nationalId: 'A123456788', name: '測試', birthDate: '1990-01-02', warnings: []});
   assert.ok(extracted.warnings.some((w) => w.includes('檢查碼')));
+});
+
+test('batch scan skips 離職 folder paths', () => {
+  assert.equal(isLeftJobDocPath('離職/張三.pdf'), true);
+  assert.equal(isLeftJobDocPath('離職'), true);
+  assert.equal(isLeftJobDocPath('張三.pdf'), false);
+  assert.equal(isLeftJobDocPath('外籍居留證/a.jpg'), false);
 });

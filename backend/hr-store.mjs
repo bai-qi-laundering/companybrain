@@ -1,7 +1,7 @@
 import {randomBytes} from 'node:crypto';
 import {AppError} from './domain.mjs';
 import {encryptSecret, decryptSecret, hasPiiKey, last4} from './hr-crypto.mjs';
-import {maskTaiwanId} from './hr-twid.mjs';
+import {maskTaiwanId, isValidTaiwanId, normalizeTaiwanId} from './hr-twid.mjs';
 import {DEFAULT_SALARY_IMPORT} from './hr-salary-import.mjs';
 import {yearsForEmployee, decorateYear, defaultSettlement, SETTLEMENTS, DEFAULT_BASIS, endingSoon} from './hr-leave.mjs';
 import {DEFAULT_DEPT_PREFIXES, nextPrefixedId, prefixForDepartment, isUsableEmployeeId, PAY_TYPES, PAYMENT_METHODS} from './hr-ids.mjs';
@@ -276,6 +276,7 @@ export class HrStore {
   async upsertEmployee(id, data, actor, {create} = {}) {
     if (!isUsableEmployeeId(id)) throw new AppError(400, '員工編號限英數字、底線及短橫線');
     id = String(id).trim().toUpperCase();
+    if (hasProfilePiiFields(data)) validateProfilePii(data);
     const c = await this.pool.connect();
     try {
       await c.query('BEGIN');
@@ -292,11 +293,18 @@ export class HrStore {
       );
       await this.audit(c, actor, create ? '新增員工' : '更新員工', id, payload.name);
       await c.query('COMMIT');
-      return {id, revision, ...payload};
     } catch (e) {
       await c.query('ROLLBACK');
       throw e;
     } finally { c.release(); }
+    const pii = hasProfilePiiFields(data) ? await this.upsertProfilePii(id, data, actor) : (await this.getEmployeePii(id));
+    const emp = await this.getEmployee(id);
+    return {...emp, pii};
+  }
+
+  async getEmployeePii(employeeId) {
+    const r = await this.pool.query('SELECT * FROM hr_employee_pii WHERE employee_id=$1', [employeeId]);
+    return r.rowCount ? publicPii(r.rows[0]) : null;
   }
 
   async getEmployee(id) {
@@ -885,6 +893,26 @@ export class HrStore {
     return publicPii({employee_id: employeeId, ...next});
   }
 
+  async upsertProfilePii(employeeId, fields, actor) {
+    if (!employeeId) throw new AppError(400, '沒有對應員工');
+    await this.getEmployee(employeeId);
+    const packed = packProfilePii(fields, (await this.pool.query('SELECT * FROM hr_employee_pii WHERE employee_id=$1', [employeeId])).rows[0] || {});
+    const saved = await this.pool.query(
+      `INSERT INTO hr_employee_pii(employee_id, bank_code, bank_branch, account_name, account_last4, account_enc, national_id_mask, national_id_enc, national_name, birth_date, updated_at)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())
+       ON CONFLICT(employee_id) DO UPDATE SET
+         bank_code=excluded.bank_code, bank_branch=excluded.bank_branch, account_name=excluded.account_name,
+         account_last4=excluded.account_last4, account_enc=excluded.account_enc,
+         national_id_mask=excluded.national_id_mask, national_id_enc=excluded.national_id_enc,
+         national_name=excluded.national_name, birth_date=excluded.birth_date, updated_at=now()
+       RETURNING *`,
+      [employeeId, packed.bank_code, packed.bank_branch, packed.account_name, packed.account_last4, packed.account_enc,
+       packed.national_id_mask, packed.national_id_enc, packed.national_name, packed.birth_date]
+    );
+    if (actor) await this.audit(this.pool, actor, '更新員工證件資料', employeeId, '');
+    return publicPii(saved.rows[0]);
+  }
+
   async insertLeaveRecordLegacy(row) {
     await this.pool.query('INSERT INTO hr_records(id, employee_id, kind, payload, created_at) VALUES($1,$2,$3,$4,COALESCE($5::timestamptz, now())) ON CONFLICT(id) DO NOTHING',
       [row.id, row.employeeId, 'leave', row.payload, row.created || null]);
@@ -966,18 +994,116 @@ function redactExtracted(extracted = {}) {
   }
   return out;
 }
+function formatDateField(v) {
+  if (!v) return '';
+  if (typeof v === 'string') {
+    const s = v.replace(/\//g, '-').slice(0, 10);
+    return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : '';
+  }
+  if (v instanceof Date && !Number.isNaN(v.getTime())) {
+    const pad = (x) => String(x).padStart(2, '0');
+    return `${v.getFullYear()}-${pad(v.getMonth() + 1)}-${pad(v.getDate())}`;
+  }
+  return '';
+}
 function publicPii(row) {
   if (!row) return null;
-  const birth = row.birth_date ? String(row.birth_date).slice(0, 10) : '';
+  const birth = formatDateField(row.birth_date);
+  let account = '';
+  let nationalId = '';
+  if (hasPiiKey()) {
+    if (row.account_enc) {
+      try { account = decryptSecret(row.account_enc); } catch { /* keep last4 */ }
+    }
+    if (row.national_id_enc) {
+      try { nationalId = decryptSecret(row.national_id_enc); } catch { /* keep mask */ }
+    }
+  }
   return {
     bankCode: row.bank_code || '',
     bankBranch: row.bank_branch || '',
     accountName: row.account_name || '',
-    accountLast4: row.account_last4 || '',
-    nationalIdMask: row.national_id_mask || '',
+    accountLast4: row.account_last4 || last4(account),
+    account,
+    nationalIdMask: row.national_id_mask || (nationalId ? maskTaiwanId(nationalId) : ''),
+    nationalId,
     nationalName: row.national_name || '',
     birthDate: birth,
   };
+}
+
+const PROFILE_PII_KEYS = ['nationalId', 'birthDate', 'nationalName', 'bankCode', 'bankBranch', 'account', 'accountName'];
+function hasProfilePiiFields(data = {}) {
+  return PROFILE_PII_KEYS.some((k) => data[k] !== undefined);
+}
+function validBirth(value) {
+  const s = String(value || '').trim().replace(/\//g, '-').slice(0, 10);
+  if (!s) return '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) throw new AppError(400, '出生年月日格式請用 YYYY-MM-DD');
+  return s;
+}
+function looksLikeMaskedAccount(value, last4digits) {
+  const s = String(value || '').replace(/\s/g, '');
+  if (!s) return true;
+  const digits = s.replace(/\D/g, '');
+  if (last4digits && digits === String(last4digits) && s.length <= 6) return true;
+  if (/^[•*xX]+\d{2,4}$/.test(s)) return true;
+  return false;
+}
+function validateProfilePii(fields = {}) {
+  if (fields.nationalId !== undefined && String(fields.nationalId || '').trim()) {
+    const id = normalizeTaiwanId(fields.nationalId);
+    if (!isValidTaiwanId(id)) throw new AppError(400, '身分證字號檢查碼不正確');
+  }
+  if (fields.birthDate !== undefined && String(fields.birthDate || '').trim()) validBirth(fields.birthDate);
+  if (fields.account !== undefined && String(fields.account || '').trim() && !looksLikeMaskedAccount(fields.account, fields.accountLast4)) {
+    if (!hasPiiKey()) throw new AppError(400, '尚未設定 HR_PII_KEY，無法保存完整銀行帳號。');
+  }
+  if (fields.nationalId !== undefined && String(fields.nationalId || '').trim() && !hasPiiKey()) {
+    throw new AppError(400, '尚未設定 HR_PII_KEY，無法保存身分證字號。');
+  }
+}
+function packProfilePii(fields, cur = {}) {
+  validateProfilePii(fields);
+  const next = {
+    bank_code: cur.bank_code || null,
+    bank_branch: cur.bank_branch || null,
+    account_name: cur.account_name || null,
+    account_last4: cur.account_last4 || null,
+    account_enc: cur.account_enc || null,
+    national_id_mask: cur.national_id_mask || null,
+    national_id_enc: cur.national_id_enc || null,
+    national_name: cur.national_name || null,
+    birth_date: formatDateField(cur.birth_date) || null,
+  };
+  if (fields.bankCode !== undefined) next.bank_code = String(fields.bankCode || '').replace(/\D/g, '').slice(0, 3);
+  if (fields.bankBranch !== undefined) next.bank_branch = String(fields.bankBranch || fields.branch || '').slice(0, 80);
+  if (fields.accountName !== undefined) next.account_name = String(fields.accountName || '').slice(0, 80);
+  if (fields.account !== undefined && !looksLikeMaskedAccount(fields.account, cur.account_last4)) {
+    const account = String(fields.account || '').replace(/[^\d-]/g, '');
+    if (account) {
+      if (!hasPiiKey()) throw new AppError(400, '尚未設定 HR_PII_KEY，無法保存完整銀行帳號。');
+      next.account_enc = encryptSecret(account);
+      next.account_last4 = last4(account);
+    } else {
+      next.account_enc = null;
+      next.account_last4 = '';
+    }
+  }
+  if (fields.nationalId !== undefined) {
+    const id = normalizeTaiwanId(fields.nationalId);
+    if (id) {
+      if (!hasPiiKey()) throw new AppError(400, '尚未設定 HR_PII_KEY，無法保存身分證字號。');
+      next.national_id_enc = encryptSecret(id);
+      next.national_id_mask = maskTaiwanId(id);
+    } else {
+      next.national_id_enc = null;
+      next.national_id_mask = '';
+    }
+  }
+  if (fields.nationalName !== undefined) next.national_name = String(fields.nationalName || '').slice(0, 80);
+  if (fields.birthDate !== undefined) next.birth_date = validBirth(fields.birthDate) || null;
+  return next;
 }
 
 function mapSalary(r) {

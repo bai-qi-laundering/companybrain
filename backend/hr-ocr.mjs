@@ -91,7 +91,9 @@ export function confirmedPublic(pii) {
     bankBranch: pii.bank_branch || pii.bankBranch || '',
     accountName: pii.account_name || pii.accountName || '',
     accountLast4: pii.account_last4 || pii.accountLast4 || '',
+    account: pii.account || '',
     nationalIdMask: pii.national_id_mask || pii.nationalIdMask || '',
+    nationalId: pii.nationalId || '',
     nationalName: pii.national_name || pii.nationalName || '',
     birthDate: pii.birth_date || pii.birthDate || '',
   };
@@ -140,40 +142,54 @@ export async function runAfterUpload({hr, row, dest, category, config, extract, 
   }
 }
 
-export async function batchScanBank({hr, config, extract, actor}) {
+export function isLeftJobDocPath(rel) {
+  const s = String(rel || '').replaceAll('\\', '/');
+  return s === '離職' || s.startsWith('離職/') || s.includes('/離職/');
+}
+
+export async function batchScanBank(opts) {
+  return batchScanDocuments({...opts, categories: opts?.categories || ['bank', 'identity']});
+}
+
+export async function batchScanDocuments({hr, config, extract, actor, categories = ['bank', 'identity']} = {}) {
   if (!geminiReady(config) && !extract) {
-    return {ok: false, skipped: 'no-gemini', message: '尚未設定 Gemini，無法批次辨識。上傳與資料夾掃描仍可使用。', scanned: 0, pending: 0, failed: 0, skippedFiles: 0};
+    return {ok: false, skipped: 'no-gemini', message: '尚未設定 Gemini，無法批次辨識。上傳與資料夾掃描仍可使用。', scanned: 0, pending: 0, failed: 0, skippedFiles: 0, skippedLeft: 0};
   }
+  const wanted = new Set(categories);
   const state = await hr.state();
   await scanFolders(hr, state.employees);
   const after = await hr.state();
-  const docs = after.documents.filter((d) => d.category === 'bank' && d.available !== false);
+  const docs = after.documents.filter((d) => wanted.has(d.category) && d.available !== false);
   const already = new Set((after.ocrReviews || []).filter((r) => r.status === 'pending' || r.status === 'confirmed').map((r) => r.documentId));
-  let scanned = 0, pending = 0, failed = 0, skippedFiles = 0;
+  let scanned = 0, pending = 0, failed = 0, skippedFiles = 0, skippedLeft = 0;
   const reviews = [];
   const errors = [];
-  const root = folderConfig().bank;
+  const folders = folderConfig();
   for (const doc of docs) {
+    const rel = doc.relativePath || doc.filename || '';
+    if (isLeftJobDocPath(rel)) { skippedLeft += 1; continue; }
     if (already.has(doc.id)) { skippedFiles += 1; continue; }
-    const abs = path.join(root, doc.relativePath || doc.filename);
+    const root = folders[doc.category];
+    if (!root) { skippedFiles += 1; continue; }
+    const abs = path.join(root, rel);
     try {
       await access(abs);
-      const extracted = await extractFromFile({absPath: abs, category: 'bank', filename: doc.filename, config, extract});
+      const extracted = await extractFromFile({absPath: abs, category: doc.category, filename: doc.filename, config, extract});
       scanned += 1;
       if (extracted?.skipped) {
         skippedFiles += 1;
-        errors.push({file: doc.filename, reason: extracted.skipped});
+        errors.push({file: doc.filename, category: doc.category, reason: extracted.skipped});
         continue;
       }
       const review = await hr.insertOcrReview({
-        documentId: doc.id, employeeId: doc.employeeId, category: 'bank', extracted, status: 'pending',
+        documentId: doc.id, employeeId: doc.employeeId, category: doc.category, extracted, status: 'pending',
       }, actor);
       pending += 1;
-      reviews.push({id: review.id, employeeId: review.employeeId, documentId: doc.id, filename: doc.filename});
+      reviews.push({id: review.id, employeeId: review.employeeId, documentId: doc.id, filename: doc.filename, category: doc.category});
     } catch (e) {
       failed += 1;
-      errors.push({file: doc.filename, reason: e.message || 'ocr-error'});
+      errors.push({file: doc.filename, category: doc.category, reason: e.code === 'ENOENT' ? 'missing-file' : (e.message || 'ocr-error')});
     }
   }
-  return {ok: true, scanned, pending, failed, skippedFiles, reviews, errors};
+  return {ok: true, scanned, pending, failed, skippedFiles, skippedLeft, reviews, errors};
 }

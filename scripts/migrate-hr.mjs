@@ -57,7 +57,9 @@ function collect(db) {
   const out = {
     employees: have.has('employees') ? rows(db, 'SELECT * FROM employees') : [],
     records: have.has('records') ? rows(db, 'SELECT * FROM records') : [],
-    documents: have.has('documents') ? rows(db, 'SELECT * FROM documents') : [],
+    documents: have.has('documents') ? rows(db, `SELECT id, category, relative_path, filename, size,
+      CAST(CASE WHEN mtime > 100000000000000 THEN mtime / 1000000 ELSE mtime END AS INTEGER) AS mtime,
+      available, employee_id, suggestions FROM documents`) : [],
     candidates: have.has('candidates') ? rows(db, 'SELECT * FROM candidates') : [],
     recruitmentEvents: have.has('recruitment_events') ? rows(db, 'SELECT * FROM recruitment_events') : [],
     recruitmentImportRows: have.has('recruitment_import_rows') ? rows(db, 'SELECT * FROM recruitment_import_rows') : [],
@@ -87,6 +89,28 @@ function countsOf(data) {
     audit: data.audit.length,
     settings: data.settings.length,
   };
+}
+
+
+function extractLegacyPii(payload = {}) {
+  const pick = (...keys) => {
+    for (const k of keys) {
+      if (payload[k] != null && String(payload[k]).trim()) return payload[k];
+    }
+    return '';
+  };
+  return {
+    nationalId: pick('nationalId', 'idNumber', '身分證字號', '身分證號', 'twid'),
+    birthDate: pick('birthDate', 'birthday', '出生年月日', '出生日期'),
+    nationalName: pick('nationalName', 'idName'),
+    bankCode: pick('bankCode', '銀行代碼', '銀行代號'),
+    bankBranch: pick('bankBranch', '分行', '銀行分行'),
+    account: pick('account', 'bankAccount', '帳號', '銀行帳號'),
+    accountName: pick('accountName', '戶名'),
+  };
+}
+function hasLegacyPii(p) {
+  return Boolean(p.nationalId || p.birthDate || p.account || p.bankCode || p.accountName || p.bankBranch);
 }
 
 function empPayload(row) {
@@ -139,6 +163,9 @@ for (const item of arrivalPlan.stillMissing) console.log('    - ' + item.employe
 const ledgers = plannedLedgers();
 console.log('  leaveLedgers (由特休紀錄對應到職日週年): ' + ledgers.length + '（其中無法對應期間 ' + ledgers.filter((g) => g.unmapped).length + '）');
 
+const piiPlan = data.employees.map((row) => ({id: row.id, name: empPayload(row).name || '', pii: extractLegacyPii(empPayload(row))})).filter((r) => hasLegacyPii(r.pii));
+console.log('  employeePii (舊資料中的身分證／生日／銀行帳戶): ' + piiPlan.length);
+
 if (dryRun) {
   sqlite.close();
   process.exit(0);
@@ -168,6 +195,21 @@ for (const row of data.employees) {
   else {
     await pool.query('INSERT INTO hr_employees(id, payload, revision, updated_at) VALUES($1,$2,$3,now())', [row.id, payload, row.revision || 1]);
     result.employees.inserted += 1;
+  }
+}
+
+result.employeePii = {inserted: 0, exists: 0, skipped: 0};
+for (const row of data.employees) {
+  const pii = extractLegacyPii(empPayload(row));
+  if (!hasLegacyPii(pii)) { result.employeePii.skipped += 1; continue; }
+  const have = await pool.query('SELECT employee_id FROM hr_employee_pii WHERE employee_id=$1', [row.id]);
+  if (have.rowCount) { result.employeePii.exists += 1; continue; }
+  try {
+    await hr.upsertProfilePii(row.id, pii, 'migrate');
+    result.employeePii.inserted += 1;
+  } catch (e) {
+    result.employeePii.skipped += 1;
+    console.log('    略過 ' + row.id + ' 證件資料：' + (e.message || e));
   }
 }
 

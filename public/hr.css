@@ -94,3 +94,7 @@
 
 #hr-root .import-warning{background:#fff4e5;border:1px solid #f0c56c;color:#6a4a08;border-radius:8px;padding:10px 12px;margin:8px 0 0;line-height:1.55}
 #hr-root tr.st-ambiguous td{background:#fff1f1;color:#7a2a2a}
+
+#hr-root .bank-block .secret-row{display:flex;gap:8px;align-items:center}
+#hr-root .bank-block .secret-row input{flex:1;min-width:0}
+#hr-root .bank-block .secret-row .hr-btn{white-space:nowrap}

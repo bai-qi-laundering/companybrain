@@ -189,11 +189,14 @@ test('bank OCR prefills a confirm card and stores only last4 after confirm', asy
     assert.equal(saved.ocr.extracted.account, '12345678901234');
     const confirmed = await (await ctx.api('/api/hr/ocr-reviews/' + saved.ocr.review.id + '/confirm', 'POST', saved.ocr.extracted)).json();
     assert.equal(confirmed.pii.accountLast4, '1234');
+    assert.equal(confirmed.pii.account, '12345678901234');
     const state = await (await ctx.api('/api/hr/state')).json();
     const emp = state.employees.find((e) => e.id === 'EMP-014');
     assert.equal(emp.pii.accountLast4, '1234');
+    assert.equal(emp.pii.account, '12345678901234');
     assert.equal(emp.pii.accountName, '陳志明');
-    assert.ok(!JSON.stringify(state).includes('12345678901234'));
+    const blob = JSON.stringify(state);
+    assert.equal(blob.includes('accountEnc') || blob.includes('account_enc'), false);
     const pending = state.ocrReviews.filter((r) => r.status === 'pending' && r.employeeId === 'EMP-014');
     assert.equal(pending.length, 0);
   } finally {
@@ -229,6 +232,8 @@ test('identity confirm rejects a bad checksum and batch-scan creates pending ite
     assert.equal(ok.status, 200, await ok.clone().text());
     const pii = (await ok.json()).pii;
     assert.equal(pii.nationalIdMask, 'A****6789');
+    assert.equal(pii.nationalId, 'A123456789');
+    assert.equal(pii.birthDate, '1988-02-03');
 
     const bankDir = path.join(ctx.docRoot, '存摺');
     const {writeFile} = await import('node:fs/promises');
@@ -281,6 +286,36 @@ test('monthly salary ledger stores net pay and remittance, with no attendance in
   }
 });
 
+
+
+test('profile saves birth date and national ID, and keeps encrypted account when last4 is resubmitted', async () => {
+  const prev = process.env.HR_PII_KEY;
+  process.env.HR_PII_KEY = 'ab'.repeat(32);
+  const ctx = await start({geminiKey: 'test-key'});
+  try {
+    await ctx.api('/api/hr/employees', 'POST', {id: 'EMP-014', name: '陳志明', department: '物流', arrivalDate: '2022-05-20'});
+    const bad = await ctx.api('/api/hr/employees/EMP-014', 'PATCH', {nationalId: 'A123456788', birthDate: '1988-02-03'});
+    assert.equal(bad.status, 400);
+    const saved = await (await ctx.api('/api/hr/employees/EMP-014', 'PATCH', {nationalId: 'A123456789', birthDate: '1988-02-03', bankCode: '004', bankBranch: '城中', account: '12345678901234', accountName: '陳志明'})).json();
+    assert.equal(saved.pii.nationalId, 'A123456789');
+    assert.equal(saved.pii.birthDate, '1988-02-03');
+    assert.equal(saved.pii.account, '12345678901234');
+    const kept = await (await ctx.api('/api/hr/employees/EMP-014', 'PATCH', {bankCode: '004', bankBranch: '城中分行', account: '••••1234', accountName: '陳志明'})).json();
+    assert.equal(kept.pii.account, '12345678901234');
+    assert.equal(kept.pii.bankBranch, '城中分行');
+    const state = await (await ctx.api('/api/hr/state')).json();
+    const emp = state.employees.find((e) => e.id === 'EMP-014');
+    assert.equal(emp.pii.nationalId, 'A123456789');
+    assert.equal(emp.pii.account, '12345678901234');
+    assert.ok(!JSON.stringify(state).includes('account_enc'));
+  } finally {
+    if (prev == null) delete process.env.HR_PII_KEY;
+    else process.env.HR_PII_KEY = prev;
+    await new Promise((r) => ctx.server.close(r));
+    await ctx.db.close();
+    await rm(ctx.docRoot, {recursive: true, force: true});
+  }
+});
 
 test('salary import preview compares fixture rows and confirm writes only new and changed', async () => {
   const prev = process.env.HR_SALARY_SHEET_FIXTURE;

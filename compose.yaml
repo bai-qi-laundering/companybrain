@@ -17,6 +17,8 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    # Same UID/GID as the old HR app so Synology ACL on the shared document folders is readable.
+    user: "${HR_UID:-1026}:${HR_GID:-100}"
     restart: unless-stopped
     depends_on:
       db:
@@ -41,17 +43,20 @@ services:
       GARMENT_NOTIFY_TOKEN: ${GARMENT_NOTIFY_TOKEN:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.1-flash-lite}
+      CAMERA_API_KEY: ${CAMERA_API_KEY:-}
+      CAMERA_LINK_KEY: ${CAMERA_LINK_KEY:-}
       HR_PII_KEY: ${HR_PII_KEY:-}
       GOOGLE_SA_JSON: ${GOOGLE_SA_JSON:-}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?請先填寫 PUBLIC_ORIGIN}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
-      NAS_IDENTITY_PATH: ${NAS_IDENTITY_PATH:-/volume1/人事資料/身分證}
-      NAS_BANK_PATH: ${NAS_BANK_PATH:-/volume1/人事資料/存摺}
-      NAS_LICENSE_PATH: ${NAS_LICENSE_PATH:-/volume1/人事資料/駕照}
+      NAS_IDENTITY_PATH: ${NAS_IDENTITY_PATH}
+      NAS_BANK_PATH: ${NAS_BANK_PATH}
+      NAS_LICENSE_PATH: ${NAS_LICENSE_PATH:-${NAS_IDENTITY_PATH}}
+    # Bind each unique host path once (身分證 and 駕照 may share one folder).
+    # If 駕照 is a separate folder, add a third bind for NAS_LICENSE_PATH in a compose override.
     volumes:
-      - ${NAS_IDENTITY_PATH:-/volume1/人事資料/身分證}:${NAS_IDENTITY_PATH:-/volume1/人事資料/身分證}
-      - ${NAS_BANK_PATH:-/volume1/人事資料/存摺}:${NAS_BANK_PATH:-/volume1/人事資料/存摺}
-      - ${NAS_LICENSE_PATH:-/volume1/人事資料/駕照}:${NAS_LICENSE_PATH:-/volume1/人事資料/駕照}
+      - ${NAS_IDENTITY_PATH}:${NAS_IDENTITY_PATH}
+      - ${NAS_BANK_PATH}:${NAS_BANK_PATH}
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8788}:8788"
     healthcheck:

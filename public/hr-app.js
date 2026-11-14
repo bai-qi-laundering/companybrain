@@ -100,7 +100,7 @@
       {id: 'EMP-001', name: '黃淑芬', department: '行政', job: '人資行政', employmentType: '正職', arrivalDate: '2019-03-01', departureDate: '', phone: '0912-000-001', emergencyContact: '黃先生 0912-111-001', paperLocation: '行政櫃 3 層', notes: '', lineBound: ''},
       {id: 'EMP-003', name: '王建宏', department: '廠務', job: '廠務主管', employmentType: '正職', arrivalDate: '2018-07-16', departureDate: '', phone: '0912-000-003', emergencyContact: '王太太 0912-111-003', paperLocation: '廠務室', notes: '', lineBound: ''},
       {id: 'EMP-008', name: '林雅婷', department: '客服對帳', job: '客服對帳', employmentType: '正職', arrivalDate: '2024-02-01', departureDate: '', phone: '0912-000-008', emergencyContact: '', paperLocation: '', notes: '示意：缺緊急聯絡人與紙本位置', lineBound: ''},
-      {id: 'EMP-014', name: '陳志明', department: '物流', job: '物流司機', employmentType: '正職', arrivalDate: '2022-05-20', departureDate: '', phone: '0912-000-014', emergencyContact: '陳太太 0912-111-014', paperLocation: '司機室', notes: '', lineBound: ''},
+      {id: 'EMP-014', name: '陳志明', department: '物流', job: '物流司機', employmentType: '正職', arrivalDate: '2022-05-20', departureDate: '', phone: '0912-000-014', emergencyContact: '陳太太 0912-111-014', paperLocation: '司機室', notes: '', lineBound: '', pii: {bankCode: '004', bankBranch: '城中分行', accountName: '陳志明', account: '12345678901234', accountLast4: '1234', nationalId: 'A123456789', nationalIdMask: 'A****6789', nationalName: '陳志明', birthDate: '1988-02-03'}},
       {id: 'EMP-015', name: '張偉誠', department: '物流', job: '物流司機', employmentType: '正職', arrivalDate: '2023-09-11', departureDate: '', phone: '0912-000-015', emergencyContact: '張先生 0912-111-015', paperLocation: '司機室', notes: '', lineBound: ''},
     ];
     const documents = [
@@ -220,7 +220,22 @@
     if ((m = path.match(/^\/api\/hr\/employees\/([^/]+)$/)) && method === 'PATCH') {
       const e = state.employees.find((x) => x.id === m[1]);
       if (!e) throw new Error('找不到員工');
-      Object.assign(e, body); saveDemo(); return e;
+      const piiKeys = ['nationalId', 'birthDate', 'nationalName', 'bankCode', 'bankBranch', 'account', 'accountName'];
+      const piiPatch = {};
+      for (const k of piiKeys) {
+        if (body[k] !== undefined) { piiPatch[k] = body[k]; delete body[k]; }
+      }
+      Object.assign(e, body);
+      if (Object.keys(piiPatch).length) {
+        e.pii = Object.assign({}, e.pii || {}, piiPatch);
+        if (piiPatch.account) e.pii.accountLast4 = String(piiPatch.account).replace(/\D/g, '').slice(-4);
+        if (piiPatch.nationalId) {
+          const idn = String(piiPatch.nationalId).toUpperCase();
+          e.pii.nationalId = idn;
+          e.pii.nationalIdMask = idn ? (idn[0] + '****' + idn.slice(-4)) : '';
+        }
+      }
+      saveDemo(); return e;
     }
     if (path === '/api/hr/records' && method === 'POST') {
       const row = {id: 'REC-' + Date.now(), ...body};
@@ -331,11 +346,11 @@
       const emp = state.employees.find((e) => e.id === r.employeeId);
       if (emp && r.category === 'bank') {
         const acc = String(body.account || '');
-        emp.pii = Object.assign({}, emp.pii || {}, {bankCode: body.bankCode || '', bankBranch: body.branch || '', accountName: body.accountName || '', accountLast4: acc.slice(-4)});
+        emp.pii = Object.assign({}, emp.pii || {}, {bankCode: body.bankCode || '', bankBranch: body.branch || body.bankBranch || '', accountName: body.accountName || '', account: acc, accountLast4: acc.slice(-4)});
       }
       if (emp && r.category === 'identity') {
         const idn = String(body.nationalId || '').toUpperCase();
-        emp.pii = Object.assign({}, emp.pii || {}, {nationalIdMask: idn ? (idn[0] + '****' + idn.slice(-4)) : '', nationalName: body.name || '', birthDate: body.birthDate || ''});
+        emp.pii = Object.assign({}, emp.pii || {}, {nationalId: idn, nationalIdMask: idn ? (idn[0] + '****' + idn.slice(-4)) : '', nationalName: body.name || '', birthDate: body.birthDate || ''});
       }
       saveDemo();
       return {review: r, pii: emp && emp.pii};
@@ -492,7 +507,7 @@
       <div class="hr-toolbar">
         <button class="hr-btn" data-act="add-emp">＋ 新增員工</button>
         <button class="hr-btn ghost" data-act="scan">掃描舊文件並配對</button>
-        <button class="hr-btn ghost" data-act="ocr-bank">批次辨識既有存摺</button>
+        <button class="hr-btn ghost" data-act="ocr-bank">批次辨識既有存摺與身分證</button>
         <button class="hr-btn ghost" data-act="leave-excel">匯入特休 Excel</button>
         <button class="hr-btn ghost" data-act="salary-import">匯入本月薪資</button>
         <span class="spacer"></span>
@@ -529,6 +544,7 @@
               ${field('phone', '電話', e.phone)}${field('emergencyContact', '緊急聯絡人', e.emergencyContact)}
               ${field('paperLocation', '紙本位置', e.paperLocation)}${field('lineId', 'LINE ID', e.lineId)}
               ${field('lineBound', 'LINE 綁定狀態', e.lineBound)}
+              ${field('birthDate', '出生年月日', (e.pii && e.pii.birthDate) || '', 'date')}${field('nationalId', '身分證字號', (e.pii && e.pii.nationalId) || '')}
               <div class="field" style="grid-column:1/-1"><span>備註</span><textarea name="notes">${esc(e.notes)}</textarea></div>
               <div style="grid-column:1/-1"><button class="hr-btn" type="submit">儲存基本資料</button></div>
             </form>
@@ -583,7 +599,7 @@
     $('#emp-inline', root).onsubmit = async (ev) => {
       ev.preventDefault();
       const f = ev.target;
-      const body = Object.fromEntries(['name', 'department', 'job', 'employmentType', 'payType', 'paymentMethod', 'arrivalDate', 'departureDate', 'phone', 'emergencyContact', 'paperLocation', 'lineId', 'lineBound', 'notes'].map((k) => [k, f.elements[k].value]));
+      const body = Object.fromEntries(['name', 'department', 'job', 'employmentType', 'payType', 'paymentMethod', 'arrivalDate', 'departureDate', 'phone', 'emergencyContact', 'paperLocation', 'lineId', 'lineBound', 'notes', 'birthDate', 'nationalId'].map((k) => [k, f.elements[k].value]));
       try { await write('/api/hr/employees/' + id, 'PATCH', body); toast('已儲存 ' + body.name); await refresh(); paintProfile(root, id); }
       catch (err) { toast(err.message); }
     };
@@ -592,6 +608,7 @@
     $('[data-act="add-chg"]', root).onclick = () => openRecord(root, id, 'change');
     $$('[data-drop]', root).forEach((box) => bindDrop(box, id, root));
     bindOcrCards(root, id);
+    bindBankBlock(root, id);
     bindLightbox(root, id);
     bindSalary(root, id);
   }
@@ -612,7 +629,7 @@
       const warns = (x.warnings || r.warnings || []).map((w) => esc(w)).join('、');
       return `<section class="hr-card ocr-confirm" data-ocr="${esc(r.id)}" data-cat="${esc(r.category)}">
         <h2 class="section-title">${bank ? '存摺辨識結果，請核對後確認' : '身分證辨識結果，請核對後確認'}</h2>
-        <p class="muted">辨識只供預填，按「確認」才會寫入。${bank ? '確認後帳號只顯示後四碼。' : '身分證字號會檢查檢查碼。'}</p>
+        <p class="muted">辨識只供預填，按「確認」才會寫入。${bank ? '確認後銀行帳戶會顯示在員工檔，完整帳號僅登入的管理員可看（可顯示／隱藏），資料庫仍加密。' : '身分證字號會檢查檢查碼，確認後會寫入基本資料的出生年月日與身分證字號。'}</p>
         <form class="inline-grid ocr-form">${fields}</form>
         ${warns ? `<p class="muted">注意：${warns}</p>` : ''}
         <div class="hr-toolbar" style="margin-top:8px"><button class="hr-btn" type="button" data-ocr-ok>確認</button><button class="hr-btn ghost" type="button" data-ocr-skip>略過</button></div>
@@ -621,13 +638,24 @@
   }
   function piiBlock(e) {
     const pii = e.pii || {};
-    const hasBank = pii.accountLast4 || pii.accountName || pii.bankCode;
-    const hasId = pii.nationalIdMask || pii.nationalName || pii.birthDate;
-    if (!hasBank && !hasId) return '';
-    return `<section class="hr-card">
-      <h2 class="section-title">已確認證件資料</h2>
-      ${hasBank ? `<p>帳戶後四碼 <strong>${esc(pii.accountLast4 || '—')}</strong>　戶名 ${esc(pii.accountName || '—')}　銀行 ${esc(pii.bankCode || '—')} ${esc(pii.bankBranch || '')}</p>` : ''}
-      ${hasId ? `<p>身分證 ${esc(pii.nationalIdMask || '—')}　姓名 ${esc(pii.nationalName || '—')}　生日 ${esc(pii.birthDate || '—')}</p>` : ''}
+    const full = pii.account || '';
+    const last4 = pii.accountLast4 || (full ? full.slice(-4) : '');
+    const masked = last4 ? ('••••' + last4) : '';
+    return `<section class="hr-card bank-block" data-bank="${esc(e.id)}">
+      <h2 class="section-title">銀行帳戶</h2>
+      <p class="muted">完整帳號僅登入的管理員可見，預設先隱藏後四碼以外的數字。資料庫仍加密保存。沒有辨識結果也可以在這裡手動填寫後儲存。</p>
+      <form class="inline-grid bank-form">
+        ${field('bankCode', '銀行代碼', pii.bankCode || '')}
+        ${field('bankBranch', '分行', pii.bankBranch || '')}
+        <div class="field account-field"><span>帳號</span>
+          <div class="secret-row">
+            <input name="account" type="text" autocomplete="off" data-full="${esc(full)}" data-masked="${esc(masked)}" value="${esc(masked)}" ${full ? 'readonly' : ''}>
+            <button type="button" class="hr-btn ghost" data-act="toggle-account" ${full ? '' : 'hidden'}>顯示</button>
+          </div>
+        </div>
+        ${field('accountName', '戶名', pii.accountName || '')}
+        <div style="grid-column:1/-1"><button class="hr-btn" type="submit">儲存銀行帳戶</button></div>
+      </form>
     </section>`;
   }
   function bindOcrCards(root, employeeId) {
@@ -644,6 +672,37 @@
         catch (err) { toast(err.message); }
       };
     });
+  }
+  function bindBankBlock(root, employeeId) {
+    const box = $('[data-bank]', root);
+    if (!box) return;
+    const input = box.querySelector('input[name=account]');
+    const btn = $('[data-act="toggle-account"]', box);
+    let shown = false;
+    if (btn) btn.onclick = () => {
+      shown = !shown;
+      const full = input.dataset.full || '';
+      const masked = input.dataset.masked || '';
+      input.value = shown ? full : masked;
+      input.readOnly = !shown && Boolean(full);
+      btn.textContent = shown ? '隱藏' : '顯示';
+    };
+    const form = $('.bank-form', box);
+    if (!form) return;
+    form.onsubmit = async (ev) => {
+      ev.preventDefault();
+      const body = {
+        bankCode: form.elements.bankCode.value,
+        bankBranch: form.elements.bankBranch.value,
+        accountName: form.elements.accountName.value,
+      };
+      // If the field is still the masked last-4 display, omit account so we do not overwrite the encrypted number.
+      const typed = form.elements.account.value.trim();
+      const masked = (input.dataset.masked || '').trim();
+      if (typed && typed !== masked) body.account = typed;
+      try { await write('/api/hr/employees/' + employeeId, 'PATCH', body); toast('已儲存銀行帳戶'); await refresh(); paintProfile(root, employeeId); }
+      catch (err) { toast(err.message); }
+    };
   }
   async function doBatchBank(root) {
     try {

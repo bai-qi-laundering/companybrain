@@ -93,19 +93,46 @@ function parseManaged(filename) {
   return {employeeId: m[1], nameHint: m[2].replaceAll('_', ' '), category: LABEL_TO_CAT[m[3]]};
 }
 
-export async function scanFolders(hr, employees) {
+function folderGroups() {
   const folders = folderConfig();
-  const found = [];
+  const groups = [];
+  const index = new Map();
   for (const [category, root] of Object.entries(folders)) {
     if (!root) continue;
+    const key = path.resolve(root);
+    if (!index.has(key)) {
+      index.set(key, {root, categories: []});
+      groups.push(index.get(key));
+    }
+    const g = index.get(key);
+    if (!g.categories.includes(category)) g.categories.push(category);
+  }
+  return groups;
+}
+
+function categoryForScan(categories, filename, relativePath, existing = []) {
+  if (categories.length === 1) return categories[0];
+  const parsed = parseManaged(filename);
+  if (parsed && categories.includes(parsed.category)) return parsed.category;
+  const hit = existing.find((d) => categories.includes(d.category) && d.relativePath === relativePath);
+  if (hit) return hit.category;
+  return null;
+}
+
+export async function scanFolders(hr, employees) {
+  const found = [];
+  const existing = (await hr.state()).documents || [];
+  for (const {root, categories} of folderGroups()) {
     try { await access(root); } catch { continue; }
-    await hr.markDocumentsUnavailable(category);
+    for (const category of categories) await hr.markDocumentsUnavailable(category);
     const files = await walk(root);
     for (const abs of files) {
       const st = await stat(abs);
       if (!st.isFile()) continue;
       const filename = path.basename(abs);
       const relativePath = path.relative(root, abs).split(path.sep).join('/');
+      const category = categoryForScan(categories, filename, relativePath, existing);
+      if (!category) continue;
       const parsed = parseManaged(filename);
       let employeeId = null;
       const suggestions = [];
