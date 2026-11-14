@@ -31,6 +31,15 @@ export function displayFolder(category) {
   return folders[category] || '';
 }
 
+export function isIgnoredDocFile(filename) {
+  const base = String(filename || '').split('/').pop();
+  if (!base) return true;
+  const lower = base.toLowerCase();
+  if (lower === 'thumbs.db' || lower === '.ds_store' || lower === 'desktop.ini') return true;
+  if (base.includes('@SynoEAStream') || base.includes('@SynoResource')) return true;
+  if (base.startsWith('._')) return true;
+  return false;
+}
 export function safeName(name) {
   return String(name || '').replace(/[^\w\u3400-\u9fff-]/g, '_').slice(0, 60) || '未命名';
 }
@@ -80,16 +89,17 @@ async function walk(dir) {
   try { entries = await readdir(dir, {withFileTypes: true}); }
   catch (e) { return out; }
   for (const ent of entries) {
+    if (ent.name === '@eaDir' || ent.name === '@SynoResource' || ent.name === '@SynoEAStream') continue;
     const p = path.join(dir, ent.name);
     if (ent.isDirectory()) out.push(...await walk(p));
-    else if (ent.isFile()) out.push(p);
+    else if (ent.isFile() && !isIgnoredDocFile(ent.name)) out.push(p);
   }
   return out;
 }
 
 function parseManaged(filename) {
   if (!SCAN_NAME.test(filename)) return null;
-  const m = filename.match(/^([A-Z0-9_-]+)_(.+)_(身分證|存摺|駕照)_\d{8}T\d{6}_[a-f0-9]{12}\.[a-zA-Z]+$/);
+  const m = filename.match(/^([A-Z0-9_-]+)_(.+)_(身分證|存摺|駕照|履歷表)_\d{8}T\d{6}_[a-f0-9]{12}\.[a-zA-Z]+$/);
   if (!m) return null;
   return {employeeId: m[1], nameHint: m[2].replaceAll('_', ' '), category: LABEL_TO_CAT[m[3]]};
 }

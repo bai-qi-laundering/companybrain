@@ -5,7 +5,7 @@ import {isValidTaiwanId, maskTaiwanId, normalizeTaiwanId} from './hr-twid.mjs';
 import {encryptSecret, last4, hasPiiKey, decryptSecret} from './hr-crypto.mjs';
 import {AppError} from './domain.mjs';
 import {access} from 'node:fs/promises';
-import {folderConfig, scanFolders} from './hr-docs.mjs';
+import {folderConfig, scanFolders, isIgnoredDocFile} from './hr-docs.mjs';
 
 const BANK_SCHEMA = {
   type: 'object',
@@ -218,6 +218,7 @@ export async function batchScanDocuments({hr, config, extract, actor, categories
   for (const doc of docs) {
     const rel = doc.relativePath || doc.filename || '';
     if (isLeftJobDocPath(rel)) { skippedLeft += 1; continue; }
+    if (isIgnoredDocFile(rel) || isIgnoredDocFile(doc.filename)) { skippedFiles += 1; continue; }
     if (already.has(doc.id)) { skippedFiles += 1; continue; }
     const root = folders[doc.category];
     if (!root) { skippedFiles += 1; continue; }
