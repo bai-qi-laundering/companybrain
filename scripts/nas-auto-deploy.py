@@ -18,7 +18,7 @@ WORKFLOW = "companybrain-ci.yml"
 ROOT = Path(__file__).resolve().parent.parent
 STATE = ROOT / ".companybrain-deployed-sha"
 FILES = ("backend/garment-notify.mjs", "backend/app.mjs", "backend/assistant.mjs", "backend/assistant-store.mjs",
-         "backend/domain.mjs", "backend/gemini.mjs", "backend/line.mjs",
+         "backend/domain.mjs", "backend/gemini.mjs", "backend/line.mjs", "backend/camera-routing.mjs",
          "backend/organizations.mjs", "backend/security.mjs",
          "backend/server.mjs", "backend/store.mjs", "backend/tasks.mjs",
          "backend/package.json", "backend/package-lock.json",
@@ -29,6 +29,9 @@ OVERRIDE_TEXT = """services:
     environment:
       GARMENT_ADMIN_LINE_USER_IDS: ${GARMENT_ADMIN_LINE_USER_IDS:-}
       GARMENT_NOTIFY_TOKEN: ${GARMENT_NOTIFY_TOKEN:-}
+      CAMERA_API_KEY: ${CAMERA_API_KEY:-}
+      CAMERA_LINK_KEY: ${CAMERA_LINK_KEY:-}
+      CAMERA_ADMIN_LINE_USER_IDS: ${CAMERA_ADMIN_LINE_USER_IDS:-}
 """
 
 def api(url):
