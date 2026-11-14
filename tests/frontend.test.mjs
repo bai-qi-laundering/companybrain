@@ -102,3 +102,15 @@ test('對象名錄 is hidden from the sidebar; 內部 and unknown kinds stay und
  assert.equal(run('view'),'vendors');
  assert.equal(run('selected'),'dashin');
 });
+
+test('header search for 天車 shows 永隆五金 with a highlighted record snippet',async()=>{
+ const c=sandbox(false);
+ const run=code=>vm.runInContext(code,c.context);
+ run('organizations=organizations.concat([{id:"yonglong",name:"永隆五金",kind:"設備商",mark:"永",en:"",contact:"王先生",role:"窗口",manager:"",contract:"",memo:"",aliases:[],keywords:[],prices:[],contractEndDate:""}])');
+ run('records=records.concat([{id:"r-crane",org:"yonglong",relatedOrg:null,date:"2026-03-12",type:"一般紀錄",title:"天車維修",note:"廠內天車保養完成",amount:null,attachments:[]}])');
+ run("view='vendors';filter='全部';$('#search').value='天車';render()");
+ const html=c.$('#content').innerHTML;
+ assert(html.includes('永隆五金'));
+ assert(html.includes('<mark>')||html.includes('天車維修'));
+ assert(!html.includes('沒有符合的對象'));
+});
