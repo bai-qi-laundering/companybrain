@@ -1,6 +1,6 @@
 import {garmentNotify} from './garment-notify.mjs';
 import {readFile} from 'node:fs/promises';
-import {createHash} from 'node:crypto';
+import {createHash,createHmac,timingSafeEqual} from 'node:crypto';
 import {sendJson} from './http-send.mjs';
 import nodePath from 'node:path';
 import {handleHr} from './hr-routes.mjs';
@@ -12,10 +12,44 @@ import {understand,answerQuestion} from './assistant.mjs';
 export function createHandler({store,config,htmlPath,line,ai=extractDraft,queryAI=understand,answerAI=answerQuestion,hr=null,publicDir=null,extract=null}){
  const limits=new Map(),dummyHash=hashPassword(token());
  function limit(key,max){const now=Date.now();if(limits.size>10000)for(const [k,v] of limits)if(now-v.since>60000)limits.delete(k);let v=limits.get(key);if(!v||now-v.since>60000){v={since:now,n:0};limits.set(key,v)}if(++v.n>max)throw new AppError(429,'操作太頻繁，請一分鐘後重試');}
- async function body(req){let size=0,parts=[];for await(const p of req){size+=p.length;if(size>3*1024*1024)throw new AppError(413,'資料太大，請分批處理');parts.push(p)}try{return JSON.parse(Buffer.concat(parts).toString('utf8'))}catch{throw new AppError(400,'請提供有效的 JSON')}}
+ async function body(req,maxBytes=3*1024*1024){let size=0,parts=[];for await(const p of req){size+=p.length;if(size>maxBytes)throw new AppError(413,'資料太大，請分批處理');parts.push(p)}try{return JSON.parse(Buffer.concat(parts).toString('utf8'))}catch{throw new AppError(400,'請提供有效的 JSON')}}
  return async(req,res)=>{res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','same-origin');res.setHeader('X-Frame-Options','DENY');res.setHeader('Cache-Control','no-store');res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");const send=(status,data)=>sendJson(res,status,data,req);
  try{const path=new URL(req.url,'http://localhost').pathname;
  if(req.method==='POST'&&path==='/api/line/webhook'){if(!line)throw new AppError(503,'LINE 尚未設定');return send(200,await line.webhook(req));}
+ if(req.method==='POST'&&path==='/api/camera/photo'){
+  if(!line||!config.cameraApiKey||!config.cameraLinkKey)throw new AppError(503,'相機金鑰尚未設定');
+  const provided=String(req.headers.authorization||'').replace(/^Bearer /i,'');
+  const x=Buffer.from(provided),y=Buffer.from(config.cameraApiKey);
+  if(x.length!==y.length||!timingSafeEqual(x,y))throw new AppError(401,'相機驗證失敗');
+  const data=await body(req,4*1024*1024),label=requireText(data.label,'QR 標籤',80),base64=String(data.imageBase64||'');
+  if(!/^[A-Za-z0-9+/]+={0,2}$/.test(base64)||base64.length>3500000)throw new AppError(400,'照片格式不正確');
+  const photo=Buffer.from(base64,'base64');
+  if(photo.length<100||photo.length>2500000||photo[0]!==255||photo[1]!==216||photo.at(-2)!==255||photo.at(-1)!==217)throw new AppError(400,'僅支援 2.5MB 以下 JPEG');
+  const id=String(data.photoId||'');
+  if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id))throw new AppError(400,'缺少有效照片 ID');
+  const saved=await line.db.saveCameraPhoto(id,photo,label);
+  if(saved.status==='sent')return send(200,{ok:true,duplicate:true,photoId:id});
+  if(!await line.db.claimCameraPhoto(id))throw new AppError(503,'照片正在傳送，請稍後重試');
+  const expiry=Number(saved.expiry),sig=createHmac('sha256',config.cameraLinkKey).update(id+':'+expiry).digest('hex');
+  const url=config.origin+'/api/camera/image/'+id+'?expires='+expiry+'&sig='+sig;
+  try{
+   const result=await line.sendCameraPhoto(label,url,id);
+   await line.db.completeCameraPhoto(id,result.hotel,result.label);
+   return send(200,{...result,photoId:id});
+  }catch(error){await line.db.releaseCameraPhoto(id);throw error;}
+ }
+ if(req.method==='GET'&&path.startsWith('/api/camera/image/')){
+  if(!config.cameraLinkKey)throw new AppError(503,'相機金鑰尚未設定');
+  const id=path.slice('/api/camera/image/'.length),params=new URL(req.url,'http://localhost').searchParams;
+  const expiry=Number(params.get('expires')),sig=String(params.get('sig')||'');
+  if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)||!Number.isSafeInteger(expiry)||expiry<Math.floor(Date.now()/1000)||expiry>Math.floor(Date.now()/1000)+86400||!/^[0-9a-f]{64}$/.test(sig))throw new AppError(403,'照片連結無效');
+  const expected=createHmac('sha256',config.cameraLinkKey).update(id+':'+expiry).digest('hex');
+  if(!timingSafeEqual(Buffer.from(sig),Buffer.from(expected)))throw new AppError(403,'照片連結驗證失敗');
+  const photo=await line.db.cameraPhoto(id);
+  if(!photo)throw new AppError(404,'照片已過期');
+  res.writeHead(200,{'Content-Type':'image/jpeg','Content-Length':photo.body.length,'Cache-Control':'private, max-age=60'});
+  res.end(photo.body);return;
+ }
  if(req.method==='POST'&&path==='/api/garment/notify'){if(!line)throw new AppError(503,'LINE 尚未設定');return send(202,await garmentNotify(req,{line,config}));}
  if(req.method==='GET'&&path==='/api/health'){await store.health();return send(200,{ok:true,service:'companybrain-api'})}
  if(req.method==='GET'&&['/','/index.html'].includes(path)){

@@ -5,6 +5,12 @@ export class AssistantStore {
  constructor(store){this.store=store;this.pool=store.pool;}
  async init(){await this.pool.query(`
  CREATE TABLE IF NOT EXISTS cb_line_jobs(id text PRIMARY KEY,event jsonb NOT NULL,status text NOT NULL DEFAULT 'pending',lease_until timestamptz,reply_text text,created_at timestamptz NOT NULL DEFAULT now());
+ CREATE TABLE IF NOT EXISTS cb_camera_groups(hotel text PRIMARY KEY,group_id text NOT NULL UNIQUE,updated_at timestamptz NOT NULL DEFAULT now());
+ CREATE TABLE IF NOT EXISTS cb_camera_photos(id text PRIMARY KEY,mime text NOT NULL,body bytea NOT NULL,label text NOT NULL DEFAULT '',status text NOT NULL DEFAULT 'pending',lease_until timestamptz,expires_at timestamptz NOT NULL DEFAULT (now()+interval '24 hours'),created_at timestamptz NOT NULL DEFAULT now());
+ ALTER TABLE cb_camera_photos ADD COLUMN IF NOT EXISTS label text NOT NULL DEFAULT '';
+ ALTER TABLE cb_camera_photos ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending';
+ ALTER TABLE cb_camera_photos ADD COLUMN IF NOT EXISTS lease_until timestamptz;
+ ALTER TABLE cb_camera_photos ADD COLUMN IF NOT EXISTS expires_at timestamptz NOT NULL DEFAULT (now()+interval '24 hours');
  CREATE TABLE IF NOT EXISTS cb_garment_group_binding(kind text PRIMARY KEY,group_id text NOT NULL,updated_by text NOT NULL,updated_at timestamptz NOT NULL DEFAULT now());
  CREATE TABLE IF NOT EXISTS cb_garment_group_commands(event_id text PRIMARY KEY,result text NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
  CREATE TABLE IF NOT EXISTS cb_line_members(user_id text PRIMARY KEY,display_name text NOT NULL DEFAULT '',active boolean NOT NULL DEFAULT true,reminders boolean NOT NULL DEFAULT true,event_ms bigint NOT NULL DEFAULT 0);
@@ -12,6 +18,36 @@ export class AssistantStore {
  CREATE TABLE IF NOT EXISTS cb_notifications(id text PRIMARY KEY,user_id text NOT NULL,retry_key text NOT NULL,payload jsonb NOT NULL,status text NOT NULL DEFAULT 'pending',attempts integer NOT NULL DEFAULT 0,lease_until timestamptz,next_attempt timestamptz NOT NULL DEFAULT now(),created_at timestamptz NOT NULL DEFAULT now());
  CREATE INDEX IF NOT EXISTS cb_line_jobs_conversation ON cb_line_jobs ((event->'source'->>'userId'),created_at);
  CREATE INDEX IF NOT EXISTS cb_notifications_pending ON cb_notifications(status,next_attempt);`);}
+ async bindCameraGroup(hotel,groupId){
+  const client=await this.pool.connect();try{await client.query('BEGIN');await client.query('SELECT pg_advisory_xact_lock(730021)');
+   const r=await client.query('SELECT hotel,group_id FROM cb_camera_groups WHERE hotel=$1 OR group_id=$2',[hotel,groupId]);
+   let result='ok';if(r.rows.some(x=>x.hotel===hotel&&x.group_id!==groupId))result='conflict';else if(r.rows.some(x=>x.group_id===groupId&&x.hotel!==hotel))result='group_conflict';
+   else await client.query('INSERT INTO cb_camera_groups(hotel,group_id) VALUES($1,$2) ON CONFLICT(hotel) DO UPDATE SET updated_at=now()',[hotel,groupId]);
+   await client.query('COMMIT');return result;
+  }catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
+ }
+ async unbindCameraGroup(hotel,groupId){return (await this.pool.query('DELETE FROM cb_camera_groups WHERE hotel=$1 AND group_id=$2 RETURNING hotel',[hotel,groupId])).rowCount>0;}
+ async cameraGroupNames(groupId){return (await this.pool.query('SELECT hotel FROM cb_camera_groups WHERE group_id=$1 ORDER BY hotel',[groupId])).rows.map(x=>x.hotel);}
+ async cameraGroup(hotel){return (await this.pool.query('SELECT group_id FROM cb_camera_groups WHERE hotel=$1',[hotel])).rows[0]?.group_id||null;}
+ async isGarmentGroup(groupId){return (await this.pool.query("SELECT 1 FROM cb_garment_group_binding WHERE kind='garment' AND group_id=$1",[groupId])).rowCount>0;}
+ async cameraPhoto(id){return (await this.pool.query("SELECT mime,body FROM cb_camera_photos WHERE id=$1 AND expires_at>now()",[id])).rows[0]||null;}
+ async saveCameraPhoto(id,body,label){
+  await this.pool.query("INSERT INTO cb_camera_photos(id,mime,body,label) VALUES($1,'image/jpeg',$2,$3) ON CONFLICT DO NOTHING",[id,body,label]);
+  const row=(await this.pool.query('SELECT label,body,status,extract(epoch from expires_at)::bigint AS expiry FROM cb_camera_photos WHERE id=$1',[id])).rows[0];
+  if(row.label!==label||!row.body.equals(body))throw new AppError(409,'照片 ID 已被其他內容使用');
+  return row;
+ }
+ async claimCameraPhoto(id){return (await this.pool.query("UPDATE cb_camera_photos SET status='sending',lease_until=now()+interval '2 minutes' WHERE id=$1 AND (status='pending' OR (status='sending' AND lease_until<now())) RETURNING id",[id])).rowCount>0;}
+ async releaseCameraPhoto(id){await this.pool.query("UPDATE cb_camera_photos SET status='pending',lease_until=NULL WHERE id=$1 AND status='sending'",[id]);}
+ async completeCameraPhoto(id,hotel,label){
+  const client=await this.pool.connect();try{await client.query('BEGIN');
+   await client.query("UPDATE cb_camera_photos SET status='sent',lease_until=NULL WHERE id=$1",[id]);
+   const group=(await client.query("SELECT group_id FROM cb_garment_group_binding WHERE kind='garment'")).rows[0]?.group_id;
+   if(group)await client.query("INSERT INTO cb_notifications(id,user_id,payload,retry_key) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING",['camera-success:'+id,group,JSON.stringify({messages:[{type:'text',text:'✅ '+label+' 照片已傳送'}]}),id]);
+   await client.query('COMMIT');
+  }catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
+ }
+ async purgeCameraPhotos(){await this.pool.query("DELETE FROM cb_camera_photos WHERE expires_at<now()");}
  async garmentGroupCommand(groupId,command,eventId,userId){
    const client=await this.pool.connect();
    try{

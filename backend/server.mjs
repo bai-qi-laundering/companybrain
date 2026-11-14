@@ -11,9 +11,9 @@ const origin=new URL(env.PUBLIC_ORIGIN).origin,secure=env.COOKIE_SECURE!=='false
 if(secure&&!origin.startsWith('https://'))throw new Error('Secure mode requires an HTTPS PUBLIC_ORIGIN');
 const store=new Store();await store.init(env.ADMIN_USER||'admin1',env.ADMIN_PASSWORD);
 const hr=new HrStore(store.pool);await hr.ensure();
-const config={origin,secure,key:env.GEMINI_API_KEY||'',model:env.GEMINI_MODEL||'gemini-3.1-flash-lite',lineSecret:env.LINE_CHANNEL_SECRET||'',lineToken:env.LINE_CHANNEL_ACCESS_TOKEN||'',lineAllowedUsers:env.LINE_ALLOWED_USER_IDS||'',garmentAdminUserIds:env.GARMENT_ADMIN_LINE_USER_IDS||'',garmentNotifyToken:env.GARMENT_NOTIFY_TOKEN||'',lineAccess:env.LINE_ACCESS_MODE||'friends',lineReminders:env.LINE_REMINDERS_ENABLED!=='false',linePushFallback:env.LINE_PUSH_FALLBACK!=='false',reminderHour:Number(env.LINE_REMINDER_HOUR||8)};
+const config={origin,secure,key:env.GEMINI_API_KEY||'',model:env.GEMINI_MODEL||'gemini-3.1-flash-lite',lineSecret:env.LINE_CHANNEL_SECRET||'',lineToken:env.LINE_CHANNEL_ACCESS_TOKEN||'',lineAllowedUsers:env.LINE_ALLOWED_USER_IDS||'',garmentAdminUserIds:env.GARMENT_ADMIN_LINE_USER_IDS||'',garmentNotifyToken:env.GARMENT_NOTIFY_TOKEN||'',cameraApiKey:env.CAMERA_API_KEY||'',cameraLinkKey:env.CAMERA_LINK_KEY||'',cameraAdminUserIds:env.CAMERA_ADMIN_LINE_USER_IDS||'',lineAccess:env.LINE_ACCESS_MODE||'friends',lineReminders:env.LINE_REMINDERS_ENABLED!=='false',linePushFallback:env.LINE_PUSH_FALLBACK!=='false',reminderHour:Number(env.LINE_REMINDER_HOUR||8)};
 if(!Number.isInteger(config.reminderHour)||config.reminderHour<0||config.reminderHour>23)throw new Error('LINE_REMINDER_HOUR must be 0..23');
-const line=createLineService({store,config});await line.init();line.start();
+const line=createLineService({store,config});await line.init();line.start();setInterval(()=>void line.db.purgeCameraPhotos().catch(err=>console.error('Camera photo cleanup failed:',err.name)),3600000).unref();
 const htmlPath=fileURLToPath(new URL('./public/index.html',import.meta.url));
 const publicDir=fileURLToPath(new URL('./public',import.meta.url));
 const server=http.createServer(createHandler({store,config,line,hr,htmlPath,publicDir}));
