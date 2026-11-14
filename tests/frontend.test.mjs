@@ -72,3 +72,60 @@ test('renewal action saves the date-bound status and a history record together a
  assert.equal(c.read().organizations[1].renewal,undefined);
  assert.match(c.$('#content').innerHTML,/續約報價未送出/);
 });
+
+test('對象名錄 is hidden from the sidebar; 內部 and unknown kinds stay under 廠商 so LINE data has no orphans',async()=>{
+ const html=await readFile(new URL('../index.html',import.meta.url),'utf8');
+ assert(!html.includes('data-view="directory"'));
+ assert(html.includes('data-view="vendors"'));
+ assert(html.includes('data-view="clients"'));
+ const c=sandbox(true);await new Promise(r=>setTimeout(r,0));
+ const run=code=>vm.runInContext(code,c.context);
+ const extra=[{id:'dashin',name:'大信設備',kind:'設備商',contact:'',role:'',manager:'',contract:'',memo:'',aliases:[],prices:[],contractEndDate:''},{id:'unknown-org',name:'未分類廠商',kind:'',contact:'',role:'',manager:'',contract:'',memo:'',aliases:[],prices:[],contractEndDate:''},{id:'intercontinental',name:'高雄洲際飯店',kind:'飯店',contact:'',role:'',manager:'',contract:'',memo:'',aliases:['洲際'],prices:[],contractEndDate:''}];
+ c.context.extraOrgs=extra;
+ run('organizations=organizations.concat(extraOrgs)');
+ assert.deepEqual(run('organizations.filter(o=>!isVendorOrg(o)&&!isClientOrg(o)).map(o=>o.id)'),[]);
+ const vendorIds=run('organizations.filter(isVendorOrg).map(o=>o.id)').sort();
+ const clientIds=run('organizations.filter(isClientOrg).map(o=>o.id)').sort();
+ assert(vendorIds.includes('baiqi'));
+ assert(vendorIds.includes('dashin'));
+ assert(vendorIds.includes('unknown-org'));
+ assert(clientIds.includes('intercontinental'));
+ assert(!vendorIds.includes('intercontinental'));
+ assert.equal(run("navigate('directory'),view"),'vendors');
+ run("handleSourceLink=handleSourceLink;selected=null;view='vendors'");
+ c.context.location.search='?org=intercontinental';
+ run("handledSourceLink=false;handleSourceLink()");
+ assert.equal(run('view'),'clients');
+ assert.equal(run('selected'),'intercontinental');
+ c.context.location.search='?org=dashin';
+ run("handledSourceLink=false;handleSourceLink()");
+ assert.equal(run('view'),'vendors');
+ assert.equal(run('selected'),'dashin');
+});
+
+test('header search for 天車 shows 永隆五金 with a highlighted record snippet',async()=>{
+ const c=sandbox(false);
+ const run=code=>vm.runInContext(code,c.context);
+ run('organizations=organizations.concat([{id:"yonglong",name:"永隆五金",kind:"設備商",mark:"永",en:"",contact:"王先生",role:"窗口",manager:"",contract:"",memo:"",aliases:[],keywords:[],prices:[],contractEndDate:""}])');
+ run('records=records.concat([{id:"r-crane",org:"yonglong",relatedOrg:null,date:"2026-03-12",type:"一般紀錄",title:"天車維修",note:"廠內天車保養完成",amount:null,attachments:[]}])');
+ run("view='vendors';filter='全部';$('#search').value='天車';render()");
+ const html=c.$('#content').innerHTML;
+ assert(html.includes('永隆五金'));
+ assert(html.includes('<mark>')||html.includes('天車維修'));
+ assert(!html.includes('沒有符合的對象'));
+});
+
+test('background NAS refresh leaves an open HR form alone', async () => {
+  const html = await readFile(new URL('../index.html', import.meta.url), 'utf8');
+  assert(html.includes('function syncBlocked'));
+  assert(html.includes('正在載入人事資料'));
+  assert(html.includes('if(hrOpen&&!(opts&&opts.manual))'));
+  const c = sandbox(true);
+  await new Promise((r) => setTimeout(r, 0));
+  vm.runInContext("view='staff';", c.context);
+  c.$('#content').innerHTML = '<div id="hr-root"><p id="keep">編輯中</p></div>';
+  const before = c.$('#content').innerHTML;
+  await vm.runInContext('refreshNas()', c.context);
+  assert.equal(c.$('#content').innerHTML, before);
+  assert.ok(before.includes('編輯中'));
+});

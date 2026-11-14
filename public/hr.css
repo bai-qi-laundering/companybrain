@@ -1,0 +1,121 @@
+/* companybrain HR module — style-4 (sidebar already from host app) */
+#hr-root,#hr-home{--hr-blue:#1d5f9e;--hr-amber:#9b6a20;--hr-green:#1f7a58;--hr-navy:#182c39;--hr-card:#fff;--hr-soft:#eef3f0;--hr-line:#d5ddd8;--hr-warn:#9d4930;--hr-ok:#2c7a55}
+#hr-root .hr-grid,#hr-home .hr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin:8px 0 22px}
+#hr-root .hr-card,#hr-home .hr-card{background:var(--hr-card);border:1px solid var(--hr-line);border-radius:10px;padding:18px 18px 16px;box-shadow:0 1px 0 rgba(24,44,57,.04)}
+#hr-root .hr-card .k,#hr-home .hr-card .k{font-size:12px;letter-spacing:.08em;color:#64717e;margin-bottom:6px}
+#hr-root .hr-card .n,#hr-home .hr-card .n{font-size:28px;font-weight:700;line-height:1;color:var(--hr-navy)}
+#hr-root .hr-card.overdue{border-color:#e4c4b8;background:#fff6f2}
+#hr-root .hr-card.today{border-color:#c9d9c8;background:#f4faf5}
+#hr-root .hr-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 16px}
+#hr-root .hr-toolbar .spacer{flex:1}
+#hr-root table.hr-table{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(--hr-line);border-radius:10px;overflow:hidden}
+#hr-root table.hr-table th,#hr-root table.hr-table td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--hr-line);font-size:14px;vertical-align:middle}
+#hr-root table.hr-table th{background:#f3f6f5;color:#4a5a63;font-weight:650;font-size:12px}
+#hr-root table.hr-table tr:last-child td{border-bottom:0}
+#hr-root table.hr-table tr[data-open]{cursor:pointer}
+#hr-root table.hr-table tr[data-open]:hover{background:#f4f8f6}
+#hr-root .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;background:#e8eef1;color:#28404c}
+#hr-root .pill.st-待聯絡{background:#e8eef5}
+#hr-root .pill.st-待面試{background:#e7f0e8;color:#1f7a58}
+#hr-root .pill.st-待回覆{background:#f7efd8;color:#7a5a12}
+#hr-root .pill.st-錄取{background:#dceee4;color:#1f7a58}
+#hr-root .pill.st-待報到{background:#d9e7f4;color:#1d5f9e}
+#hr-root .pill.st-已報到{background:#e8e8e8;color:#555}
+#hr-root .pill.st-未錄取,.pill.st-放棄{background:#f3e3dd;color:#9d4930}
+#hr-root .pill.warn{background:#f3e3dd;color:#9d4930}
+#hr-root .pill.ok{background:#dceee4;color:#1f7a58}
+#hr-root .kanban{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;align-items:start}
+#hr-root .kanban-col{background:#f6f8f7;border:1px solid var(--hr-line);border-radius:10px;padding:10px;min-height:120px}
+#hr-root .kanban-col h3{font-size:13px;margin:0 0 10px;display:flex;justify-content:space-between}
+#hr-root .kanban-item{background:#fff;border:1px solid var(--hr-line);border-radius:8px;padding:10px;margin-bottom:8px;cursor:grab}
+#hr-root .kanban-item:active{cursor:grabbing}
+#hr-root .kanban-item .name{font-weight:650}
+#hr-root .kanban-item .meta{font-size:12px;color:#64717e;margin-top:4px}
+#hr-root .kanban-item.overdue{border-color:#e4c4b8}
+#hr-root .profile{display:grid;grid-template-columns:1.2fr .8fr;gap:16px}
+#hr-root .profile-main,#hr-root .profile-side{display:grid;gap:14px;align-content:start}
+#hr-root .field{display:grid;gap:4px;margin:0 0 10px}
+#hr-root .field span{font-size:12px;color:#64717e}
+#hr-root .field input,#hr-root .field select,#hr-root .field textarea{border:1px solid #cfd7d3;border-radius:6px;padding:7px 9px;background:#fff;width:100%}
+#hr-root .field textarea{min-height:70px}
+#hr-root .inline-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+#hr-root .drop{border:2px dashed #b7c4be;border-radius:10px;padding:18px;text-align:center;background:#f8fbf9;color:#4a5a63}
+#hr-root .drop.over{background:#e7f3ec;border-color:#2c7a55}
+#hr-root .path{font-family:ui-monospace,Menlo,monospace;font-size:12px;background:#eef3f0;padding:8px 10px;border-radius:6px;word-break:break-all}
+#hr-root .checklist{list-style:none;padding:0;margin:0;display:grid;gap:8px}
+#hr-root .checklist li{display:flex;gap:8px;align-items:flex-start}
+#hr-root .doc-list{display:grid;gap:8px}
+#hr-root .doc{display:flex;justify-content:space-between;gap:10px;align-items:center;border:1px solid var(--hr-line);border-radius:8px;padding:10px;background:#fff}
+#hr-root .muted{color:#64717e;font-size:13px}
+#hr-root .hr-btn{background:#23485f;color:#fff;border-radius:6px;padding:7px 12px;font-size:14px}
+#hr-root .hr-btn.ghost{background:#fff;color:#23485f;border:1px solid #c5d0d4}
+#hr-root .hr-btn.danger{background:#9d4930}
+#hr-root dialog.hr-dlg{border:0;border-radius:12px;padding:0;max-width:460px;width:calc(100% - 32px)}
+#hr-root dialog.hr-dlg form,#hr-root .dlg-body{padding:18px 20px 20px}
+#hr-root dialog.hr-dlg h2{font-size:18px;padding:16px 20px 0}
+#hr-root .progress{height:8px;background:#e4ebe7;border-radius:99px;overflow:hidden}
+#hr-root .progress>i{display:block;height:100%;background:#1f7a58}
+#hr-root .section-title{font-size:16px;margin:4px 0 10px}
+@media(max-width:860px){
+  #hr-root .profile,#hr-root .inline-grid{grid-template-columns:1fr}
+}
+
+#hr-root .ocr-confirm{border:1px solid #d4a017;background:#fffaf0;box-shadow:0 1px 0 rgba(24,44,57,.06)}
+#hr-root .ocr-confirm .section-title{color:#7a4d00}
+#hr-root .arrival-note{margin:0}
+
+#hr-root .doc-main{display:flex;gap:10px;align-items:center;min-width:0;flex:1}
+#hr-root .doc-meta{min-width:0}
+#hr-root .doc-thumb{flex:0 0 88px;width:88px;height:66px;padding:0;border:1px solid var(--hr-line);border-radius:6px;overflow:hidden;background:#e8eef2;display:block;cursor:zoom-in}
+#hr-root a.doc-thumb{cursor:pointer}
+#hr-root .doc-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+#hr-root .doc-thumb.doc-pdf{display:flex;align-items:center;justify-content:center;background:#182c39;color:#fff;text-decoration:none;cursor:pointer}
+#hr-root .doc-thumb.doc-pdf span{font-size:13px;font-weight:700;letter-spacing:.04em}
+#hr-root .salary-table .num{text-align:right;font-variant-numeric:tabular-nums}
+#hr-root .hr-lightbox{position:fixed;inset:0;z-index:80;display:flex;align-items:center;justify-content:center}
+#hr-root .hr-lightbox[hidden]{display:none !important}
+#hr-root .hr-lightbox-backdrop{position:absolute;inset:0;background:rgba(16,24,32,.72)}
+#hr-root .hr-lightbox-box{position:relative;z-index:1;max-width:min(960px,92vw);max-height:92vh;display:flex;flex-direction:column;align-items:center;gap:10px}
+#hr-root .hr-lightbox-box img{max-width:92vw;max-height:80vh;border-radius:8px;background:#111;box-shadow:0 8px 32px rgba(0,0,0,.35)}
+#hr-root .hr-lightbox-cap{color:#fff;margin:0;text-align:center;font-size:13px}
+#hr-root .hr-lightbox-close,#hr-root .hr-lightbox-nav{position:absolute;background:rgba(255,255,255,.92);color:#182c39;border:0;border-radius:99px;width:40px;height:40px;font-size:24px;line-height:40px;padding:0;cursor:pointer}
+#hr-root .hr-lightbox-close{top:-8px;right:-8px}
+#hr-root .hr-lightbox-nav.prev{left:-8px;top:50%;transform:translateY(-50%)}
+#hr-root .hr-lightbox-nav.next{right:-8px;top:50%;transform:translateY(-50%)}
+#hr-root .hr-lightbox-nav[hidden]{display:none}
+
+#hr-root dialog.hr-dlg.wide{max-width:min(860px,calc(100% - 32px))}
+#hr-root .setup-help{white-space:pre-wrap;font-family:inherit;font-size:14px;line-height:1.65;background:#f4f7f6;border-radius:8px;padding:12px 14px;margin:0}
+#hr-root .import-table-wrap{max-height:min(360px,50vh);overflow:auto;border:1px solid var(--hr-line);border-radius:8px}
+#hr-root .import-table-wrap table{margin:0}
+#hr-root tr.st-changed td{background:#fff6e8}
+#hr-root tr.st-unmatched td{background:#f6f6f6;color:#64717e}
+#hr-root tr.st-new td{background:#f3faf6}
+
+#hr-root .import-warning{background:#fff4e5;border:1px solid #f0c56c;color:#6a4a08;border-radius:8px;padding:10px 12px;margin:8px 0 0;line-height:1.55}
+#hr-root tr.st-ambiguous td{background:#fff1f1;color:#7a2a2a}
+
+#hr-root .bank-block .secret-row{display:flex;gap:8px;align-items:center}
+#hr-root .bank-block .secret-row input{flex:1;min-width:0}
+#hr-root .bank-block .secret-row .hr-btn{white-space:nowrap}
+
+#hr-root dialog.hr-dlg{position:fixed;z-index:80}
+#hr-root dialog.hr-dlg::backdrop{background:#12253299}
+#hr-root .cand-list{display:flex;flex-direction:column}
+#hr-root .cand-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--hr-line);cursor:pointer}
+#hr-root .kanban-item .kanban-del{margin-top:6px}
+
+#hr-root .hr-skeleton{padding:8px 0 24px}
+#hr-root .hr-skel-card,#hr-root .hr-skel-row{background:linear-gradient(90deg,#eef2f4 25%,#f7f9fa 50%,#eef2f4 75%);background-size:200% 100%;animation:hr-skel 1.2s ease-in-out infinite;border-radius:10px;margin:10px 0}
+#hr-root .hr-skel-card{height:72px}
+#hr-root .hr-skel-row{height:44px}
+@keyframes hr-skel{0%{background-position:200% 0}100%{background-position:-200% 0}}
+#hr-root .hr-form-error{color:#9d4930;font-size:14px;margin:8px 0 0;min-height:1.2em}
+#hr-root dialog.hr-dlg{display:flex;flex-direction:column;max-height:min(90vh,calc(100dvh - 24px));overflow:hidden}
+#hr-root dialog.hr-dlg form.dlg-body{display:flex;flex-direction:column;min-height:0;flex:1;padding:12px 20px 0;overflow:hidden}
+#hr-root dialog.hr-dlg .dlg-fields{overflow:auto;-webkit-overflow-scrolling:touch;flex:1;padding-bottom:8px}
+#hr-root dialog.hr-dlg .dlg-actions{position:sticky;bottom:0;flex-shrink:0;display:flex;gap:8px;background:#fff;padding:12px 0 16px;border-top:1px solid var(--hr-line);margin:0 -20px;padding-left:20px;padding-right:20px;padding-bottom:calc(16px + env(safe-area-inset-bottom,0px))}
+#hr-root dialog.hr-dlg .dlg-actions .hr-btn{min-height:44px;padding:10px 16px}
+@media(max-width:760px){
+  #hr-root dialog.hr-dlg{width:calc(100% - 16px);max-width:none;max-height:calc(100dvh - 100px);margin-bottom:76px}
+}
