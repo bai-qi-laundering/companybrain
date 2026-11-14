@@ -556,3 +556,24 @@ test('identity and license records resolve from the 離職 sibling folder withou
     await rm(ctx.docRoot, {recursive: true, force: true});
   }
 });
+
+test('HR state jobTitles always include 司機 and merge stored titles', async () => {
+  const ctx = await start();
+  try {
+    const before = await (await ctx.api('/api/hr/state')).json();
+    assert.ok(before.jobTitles.includes('司機'));
+    assert.ok(before.jobTitles.includes('客服對帳'));
+    await ctx.api('/api/hr/employees', 'POST', {
+      id: 'EMP-JOB', name: '職稱測試', department: '洗滌', job: '現場作業員', employmentType: '正職', arrivalDate: '2026-01-01',
+    });
+    const after = await (await ctx.api('/api/hr/state')).json();
+    assert.ok(after.jobTitles.includes('現場作業員'));
+    assert.ok(after.jobTitles.includes('司機'));
+    assert.equal(after.deptPrefixes['洗滌'], 'W');
+    assert.equal(after.deptPrefixes['洗滓'], 'W');
+  } finally {
+    await new Promise((r) => ctx.server.close(r));
+    await ctx.db.close();
+    await rm(ctx.docRoot, {recursive: true, force: true});
+  }
+});

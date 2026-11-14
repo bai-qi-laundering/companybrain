@@ -9,14 +9,16 @@
   const TYPES = ['正職', '時薪', '兼職'];
   const PAY_TYPES = ['正職', '兼職'];
   const PAY_METHODS = ['匯款', '現金'];
-  const DEFAULT_PREFIXES = {物流:'D',摺疊:'F',撐開:'H',洗滓:'W',辦公室:'O',行政:'O'};
-  const PREFIX_CHOICES = {洗滓:['W','E']};
+  const DEFAULT_PREFIXES = {物流:'D',摺疊:'F',撐開:'H',洗滌:'W',洗滓:'W',辦公室:'O',行政:'O'};
+  const PREFIX_CHOICES = {洗滌:['W','E'],洗滓:['W','E']};
+  const STANDARD_JOBS = ['司機','物流助理','洗滌','摺疊','撐開','行政','會計','廠務','客服對帳'];
   const KEY = 'companybrain-hr-demo-v1';
 
   let ctx = {};
   let state = emptyState();
   let route = {page: 'list', id: null};
   let demo = true;
+  let jobFilter = {staff: '', recruitment: ''};
 
   function emptyState() {
     return {employees: [], records: [], documents: [], candidates: [], recruitmentEvents: [], recruitmentGoals: [], leaveExcel: [], salaries: [], audit: [], lastImport: null, leaveYears: [], leaveEntries: [], leaveYearBasis: 'anniversary', leaveSettleDefault: '未休完已折現', leaveExpiryReminders: [], ocrReviews: [], ocr: {geminiConfigured: false, piiKeyConfigured: false}, salaryImport: {configured: false}};
@@ -193,10 +195,52 @@
     return demoWrite(path, method, body);
   }
 
-  function deptPrefixes() { return {...DEFAULT_PREFIXES, ...(state.deptPrefixes || {})}; }
+  function deptPrefixes() {
+    const map = {...DEFAULT_PREFIXES, ...(state.deptPrefixes || {})};
+    const w = map['洗滌'] || map['洗滓'] || 'W';
+    map['洗滌'] = w;
+    map['洗滓'] = w;
+    return map;
+  }
   function prefixFor(department, prefix) {
     if (prefix) return String(prefix).toUpperCase();
-    return deptPrefixes()[department] || '';
+    const map = deptPrefixes();
+    const d = String(department || '').trim();
+    if (map[d]) return map[d];
+    if (d === '洗滓' || d === '洗滌') return map['洗滌'] || map['洗滓'] || 'W';
+    return '';
+  }
+  function prefixChoicesFor(department) {
+    const d = String(department || '').trim();
+    return PREFIX_CHOICES[d] || PREFIX_CHOICES[d === '洗滓' ? '洗滌' : d] || (prefixFor(d) ? [prefixFor(d)] : ['D','F','H','W','E','O']);
+  }
+  function jobTitleOptions() {
+    const seen = new Set();
+    const out = [];
+    const add = (raw) => {
+      const v = String(raw || '').trim();
+      if (!v || seen.has(v)) return;
+      seen.add(v);
+      out.push(v);
+    };
+    for (const v of STANDARD_JOBS) add(v);
+    for (const v of state.jobTitles || []) add(v);
+    for (const row of [...(state.employees || []), ...(state.candidates || [])]) {
+      add(row.job);
+      add(row.desiredPosition);
+    }
+    return out;
+  }
+  function jobCombo(name, label, value) {
+    const v = value || '';
+    const opts = jobTitleOptions();
+    const list = (v.trim() && !opts.includes(v.trim())) ? [v.trim(), ...opts] : opts;
+    const id = 'hr-jobs-' + name;
+    return `<div class="field"><span>${esc(label)}</span><input name="${name}" value="${esc(v)}" list="${id}" autocomplete="off" placeholder="選擇或自行輸入"><datalist id="${id}">${list.map((o) => `<option value="${esc(o)}"></option>`).join('')}</datalist></div>`;
+  }
+  function jobFilterSelect(current, name) {
+    const opts = jobTitleOptions();
+    return `<label class="muted" style="display:flex;align-items:center;gap:8px">職稱 <select name="${name}" data-job-filter><option value="">全部</option>${opts.map((o) => `<option ${o === current ? 'selected' : ''} value="${esc(o)}">${esc(o)}</option>`).join('')}</select></label>`;
   }
   function nextEmpId(department, prefix) {
     const p = prefixFor(department, prefix);
@@ -530,7 +574,7 @@
 
   function paintStaff(root) {
     if (route.page === 'profile' && route.id) return paintProfile(root, route.id);
-    const list = state.employees.filter((e) => match(e, ['id', 'name', 'department', 'job', 'phone'])).sort((a, b) => a.id.localeCompare(b.id));
+    const list = state.employees.filter((e) => match(e, ['id', 'name', 'department', 'job', 'phone']) && (!jobFilter.staff || String(e.job || '').trim() === jobFilter.staff)).sort((a, b) => a.id.localeCompare(b.id));
     const exp = expirySoon();
     root.innerHTML = `
       <div class="hr-grid">
@@ -546,6 +590,7 @@
         <button class="hr-btn ghost" data-act="leave-excel">匯入特休 Excel</button>
         <button class="hr-btn ghost" data-act="salary-import">匯入本月薪資</button>
         <span class="spacer"></span>
+        ${jobFilterSelect(jobFilter.staff, 'staff-job')}
         <span class="muted">點列即可開啟單頁檔案；欄位可直接改。</span>
       </div>
       <table class="hr-table"><thead><tr><th>編號</th><th>姓名</th><th>部門</th><th>職稱</th><th>電話</th><th>到職</th><th>狀態</th></tr></thead>
@@ -556,6 +601,8 @@
     $('[data-act="ocr-bank"]', root).onclick = () => doBatchBank(root);
     $('[data-act="leave-excel"]', root).onclick = () => openExcel(root, 'leave');
     $('[data-act="salary-import"]', root).onclick = () => openSalaryImport(root);
+    const jobSel = $('[data-job-filter]', root);
+    if (jobSel) jobSel.onchange = () => { jobFilter.staff = jobSel.value; paintStaff(root); };
   }
 
   function paintProfile(root, id) {
@@ -572,7 +619,7 @@
             <h2 class="section-title">基本資料（可直接改）</h2>
             <form id="emp-inline" class="inline-grid">
               ${field('name', '姓名', e.name)}${field('department', '部門', e.department)}
-              ${field('job', '職稱', e.job)}${sel('employmentType', '雇用型態', TYPES, e.employmentType)}
+              ${jobCombo('job', '職稱', e.job)}${sel('employmentType', '雇用型態', TYPES, e.employmentType)}
               ${sel('payType', '計薪型態', PAY_TYPES, e.payType || (e.employmentType === '兼職' || e.employmentType === '時薪' ? '兼職' : '正職'))}${sel('paymentMethod', '匯款類型', PAY_METHODS, e.paymentMethod || '匯款')}
               ${field('arrivalDate', '到職日', e.arrivalDate, 'date')}${field('departureDate', '離職日', e.departureDate, 'date')}
               ${e.arrivalDateSource && e.arrivalDateSource.type === '加保日' ? '<p class="muted arrival-note" style="grid-column:1/-1">到職日由最早勞健保加保日帶入' + (e.arrivalDateSource.date ? '（' + esc(e.arrivalDateSource.date) + '）' : '') + '，可直接修改。</p>' : ''}
@@ -659,7 +706,7 @@
     const x = r.extracted || {};
     if (r.category === 'bank') return field('bankCode', '銀行代碼', x.bankCode) + field('branch', '分行', x.branch) + field('account', '帳號', x.account) + field('accountName', '戶名', x.accountName);
     if (r.category === 'resume') {
-      return field('name', '姓名', x.name) + field('phone', '電話', x.phone) + field('birthDate', '出生年月日', x.birthDate, 'date') + field('nationalId', '身分證字號', x.nationalId) + field('address', '住址', x.address) + field('desiredPosition', '希望職缺', x.desiredPosition || x.job || '') + `<div class="field" style="grid-column:1/-1"><span>學歷</span><textarea name="education">${esc(x.education || '')}</textarea></div>` + `<div class="field" style="grid-column:1/-1"><span>經歷</span><textarea name="experience">${esc(x.experience || '')}</textarea></div>`;
+      return field('name', '姓名', x.name) + field('phone', '電話', x.phone) + field('birthDate', '出生年月日', x.birthDate, 'date') + field('nationalId', '身分證字號', x.nationalId) + field('address', '住址', x.address) + jobCombo('desiredPosition', '希望職缺', x.desiredPosition || x.job || '') + `<div class="field" style="grid-column:1/-1"><span>學歷</span><textarea name="education">${esc(x.education || '')}</textarea></div>` + `<div class="field" style="grid-column:1/-1"><span>經歷</span><textarea name="experience">${esc(x.experience || '')}</textarea></div>`;
     }
     return field('nationalId', '身分證字號', x.nationalId) + field('name', '姓名', x.name) + field('birthDate', '生日', x.birthDate, 'date');
   }
@@ -1066,7 +1113,7 @@
   function paintRecruitment(root) {
     if (route.page === 'candidate' && route.id) return paintCandidate(root, route.id);
     const tday = today();
-    const live = visibleCands().filter((c) => match(c, ['name', 'phone', 'department', 'job']));
+    const live = visibleCands().filter((c) => match(c, ['name', 'phone', 'department', 'job']) && (!jobFilter.recruitment || String(c.job || '').trim() === jobFilter.recruitment));
     const open = live.filter((c) => OPEN.includes(c.status));
     const todayList = open.filter((c) => c.followupDate === tday);
     const overdue = open.filter((c) => c.followupDate && c.followupDate < tday);
@@ -1094,6 +1141,8 @@
           <button class="hr-btn ghost" data-act="goal">＋ 增加需求人數</button>
           <button class="hr-btn" data-act="add-cand">＋ 新增應徵者</button>
           <button class="hr-btn ghost" data-act="excel">匯入徵人 Excel</button>
+          <span class="spacer"></span>
+          ${jobFilterSelect(jobFilter.recruitment, 'recruit-job')}
         </div>
       </section>
       <div class="kanban">
@@ -1130,6 +1179,8 @@
     $('[data-act="add-cand"]', root).onclick = () => openCandForm(root);
     $('[data-act="goal"]', root).onclick = () => openGoal(root);
     $('[data-act="excel"]', root).onclick = () => openExcel(root, 'recruitment');
+    const jobSel = $('[data-job-filter]', root);
+    if (jobSel) jobSel.onchange = () => { jobFilter.recruitment = jobSel.value; paintRecruitment(root); };
   }
 
   function paintCandidate(root, id) {
@@ -1145,7 +1196,7 @@
           <h2 class="section-title">${esc(c.name)} <span class="pill st-${esc(c.status)}">${esc(c.status)}</span>${c.archived ? ' <span class="pill">已封存</span>' : ''}</h2>
           <form id="cand-inline" class="inline-grid">
             ${field('name', '姓名', c.name)}${field('phone', '電話', c.phone)}
-            ${field('department', '部門', c.department)}${field('job', '職缺', c.job)}
+            ${field('department', '部門', c.department)}${jobCombo('job', '職缺', c.job)}
             ${field('source', '來源', c.source)}${field('contactPerson', '窗口', c.contactPerson)}
             ${field('availableDate', '可到職', c.availableDate, 'date')}${field('followupDate', '下次跟進', c.followupDate, 'date')}
             ${field('interviewAt', '面試時間', c.interviewAt)}
@@ -1250,7 +1301,7 @@
   }
   function openEmpForm(root) {
     if (!$('#hr-dialogs', root)) root.insertAdjacentHTML('beforeend', '<div id="hr-dialogs"></div>');
-    dlg(root, '新增員工', field('name', '姓名', '') + field('department', '部門', '') + field('job', '職稱', '') + sel('employmentType', '雇用型態', TYPES, '正職') + sel('payType', '計薪型態', PAY_TYPES, '正職') + sel('paymentMethod', '匯款類型', PAY_METHODS, '匯款') + field('phone', '電話', '') + field('lineId', 'LINE ID', '') + field('arrivalDate', '到職日', today(), 'date'), async (f) => {
+    dlg(root, '新增員工', field('name', '姓名', '') + field('department', '部門', '') + jobCombo('job', '職稱', '') + sel('employmentType', '雇用型態', TYPES, '正職') + sel('payType', '計薪型態', PAY_TYPES, '正職') + sel('paymentMethod', '匯款類型', PAY_METHODS, '匯款') + field('phone', '電話', '') + field('lineId', 'LINE ID', '') + field('arrivalDate', '到職日', today(), 'date'), async (f) => {
       const body = Object.fromEntries(['name', 'department', 'job', 'employmentType', 'payType', 'paymentMethod', 'phone', 'lineId', 'arrivalDate'].map((k) => [k, f.elements[k].value]));
       const row = await write('/api/hr/employees', 'POST', body);
       toast('已新增 ' + row.id); await refresh(); route = {page: 'profile', id: row.id}; paintProfile(root, row.id);
@@ -1258,7 +1309,7 @@
   }
   function openCandForm(root) {
     if (!$('#hr-dialogs', root)) root.insertAdjacentHTML('beforeend', '<div id="hr-dialogs"></div>');
-    dlg(root, '新增應徵者', field('name', '姓名', '') + field('phone', '電話', '') + field('department', '部門', '') + field('job', '職缺', '') + field('source', '來源', '') + field('followupDate', '下次跟進', today(), 'date'), async (f) => {
+    dlg(root, '新增應徵者', field('name', '姓名', '') + field('phone', '電話', '') + field('department', '部門', '') + jobCombo('job', '職缺', '') + field('source', '來源', '') + field('followupDate', '下次跟進', today(), 'date'), async (f) => {
       const body = Object.fromEntries(['name', 'phone', 'department', 'job', 'source', 'followupDate'].map((k) => [k, f.elements[k].value]));
       body.status = '待聯絡';
       const row = await write('/api/hr/candidates', 'POST', body);
@@ -1276,10 +1327,10 @@
   }
   function openConvert(root, id) {
     const c = state.candidates.find((x) => x.id === id);
-    const choices = PREFIX_CHOICES[c.department] || (prefixFor(c.department) ? [prefixFor(c.department)] : ['D','F','H','W','E','O']);
+    const choices = prefixChoicesFor(c.department);
     const preview = nextEmpId(c.department, choices[0]);
     dlg(root, '報到並轉為員工',
-      `<p class="muted">員工編號依打卡計薪規則自動給「部門字首＋流水號」（物流 D、摺疊 F、撐開 H、洗滓 W／E、辦公室／行政 O）。既有編號原樣保留。預覽：<strong>${esc(preview || '請選擇字首')}</strong>。並帶入報到清單。</p>` + field('department', '部門', c.department) + `<div class="field"><span>編號字首</span><select name="prefix">${choices.map((p) => `<option>${p}</option>`).join('')}</select></div>` + field('job', '職稱', c.job) + sel('employmentType', '雇用型態', TYPES, '正職') + sel('payType', '計薪型態', PAY_TYPES, '正職') + sel('paymentMethod', '匯款類型', PAY_METHODS, '匯款') + field('lineId', 'LINE ID', '') + field('arrivalDate', '到職日', c.availableDate || today(), 'date') + field('phone', '電話', c.phone),
+      `<p class="muted">員工編號依打卡計薪規則自動給「部門字首＋流水號」（物流 D、摺疊 F、撐開 H、洗滌 W／E、辦公室／行政 O）。既有編號原樣保留。預覽：<strong>${esc(preview || '請選擇字首')}</strong>。並帶入報到清單。</p>` + field('department', '部門', c.department) + `<div class="field"><span>編號字首</span><select name="prefix">${choices.map((p) => `<option>${p}</option>`).join('')}</select></div>` + jobCombo('job', '職稱', c.job) + sel('employmentType', '雇用型態', TYPES, '正職') + sel('payType', '計薪型態', PAY_TYPES, '正職') + sel('paymentMethod', '匯款類型', PAY_METHODS, '匯款') + field('lineId', 'LINE ID', '') + field('arrivalDate', '到職日', c.availableDate || today(), 'date') + field('phone', '電話', c.phone),
       async (f) => {
         const body = Object.fromEntries(['department', 'job', 'employmentType', 'payType', 'paymentMethod', 'lineId', 'arrivalDate', 'phone', 'prefix'].map((k) => [k, f.elements[k].value]));
         const r = await write('/api/hr/candidates/' + id + '/convert', 'POST', body);

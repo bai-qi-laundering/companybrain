@@ -4,7 +4,7 @@ import {encryptSecret, decryptSecret, hasPiiKey, last4} from './hr-crypto.mjs';
 import {maskTaiwanId, isValidTaiwanId, normalizeTaiwanId} from './hr-twid.mjs';
 import {DEFAULT_SALARY_IMPORT} from './hr-salary-import.mjs';
 import {yearsForEmployee, decorateYear, defaultSettlement, SETTLEMENTS, DEFAULT_BASIS, endingSoon} from './hr-leave.mjs';
-import {DEFAULT_DEPT_PREFIXES, nextPrefixedId, prefixForDepartment, isUsableEmployeeId, PAY_TYPES, PAYMENT_METHODS} from './hr-ids.mjs';
+import {DEFAULT_DEPT_PREFIXES, nextPrefixedId, prefixForDepartment, isUsableEmployeeId, PAY_TYPES, PAYMENT_METHODS, jobTitleOptions} from './hr-ids.mjs';
 
 export const DOC_TYPES = {identity: '身分證', bank: '存摺', license: '駕照', resume: '履歷表'};
 export const STATUSES = ['待聯絡', '待面試', '待回覆', '錄取', '待報到', '已報到', '未錄取', '放棄', '未回覆', '未到面試', '未報到'];
@@ -245,6 +245,7 @@ export class HrStore {
     result.employees = result.employees.map((e) => ({...e, pii: piiByEmp[e.id] || null}));
     result.ocrReviews = ocrReviews.rows.map((r) => mapOcrReview(r, {reveal: r.status === 'pending'}));
     result.ocr = {geminiConfigured: false, piiKeyConfigured: hasPiiKey()};
+    result.jobTitles = jobTitleOptions(result.employees, result.candidates);
     result.leaveExpiryReminders = endingSoon(result.leaveYears, today(), 60).map((y) => {
       const emp = result.employees.find((e) => e.id === y.employeeId);
       return {employeeId: y.employeeId, name: emp?.name || y.employeeId, endsOn: y.endsOn, remaining: y.remaining, summary: y.summary};
@@ -273,7 +274,7 @@ export class HrStore {
   async nextEmployeeId(department, prefix) {
     const map = await this.deptPrefixes();
     const p = String(prefix || prefixForDepartment(department, map) || '').trim().toUpperCase();
-    if (!/^[A-Z]{1,3}$/.test(p)) throw new AppError(400, '請選擇部門字首。打卡計薪編號為「部門字母＋流水號」（如物流 D001、摺疊 F113）；洗滓可選 W 或 E。');
+    if (!/^[A-Z]{1,3}$/.test(p)) throw new AppError(400, '請選擇部門字首。打卡計薪編號為「部門字母＋流水號」（如物流 D001、摺疊 F113）；洗滌可選 W 或 E。');
     const ids = (await this.pool.query('SELECT id FROM hr_employees')).rows.map((r) => r.id);
     return nextPrefixedId(p, ids);
   }
