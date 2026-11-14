@@ -267,6 +267,8 @@ export async function handleHr(req, res, {hr, session, method, path: p, config =
     return true;
   }
   if (method === 'POST' && pathname === '/api/hr/ocr/batch-bank') {
+    req.setTimeout(0);
+    res.setTimeout(0);
     send(res, 200, await batchScanBank({hr, config, extract, actor}));
     return true;
   }

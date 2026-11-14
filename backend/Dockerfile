@@ -7,6 +7,7 @@ RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY backend/*.mjs ./
 COPY backend/hr-excel ./hr-excel
 COPY scripts/migrate-hr.mjs ./migrate-hr.mjs
+COPY scripts/hr-batch-ocr.mjs ./hr-batch-ocr.mjs
 COPY index.html ./public/index.html
 COPY public/hr-app.js public/hr.css ./public/
 USER node
