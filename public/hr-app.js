@@ -11,7 +11,15 @@
   const PAY_METHODS = ['匯款', '現金'];
   const DEFAULT_PREFIXES = {物流:'D',摺疊:'F',撐開:'H',洗滌:'W',洗滓:'W',辦公室:'O',行政:'O'};
   const PREFIX_CHOICES = {洗滌:['W','E'],洗滓:['W','E']};
-  const STANDARD_JOBS = ['司機','物流助理','洗滌','摺疊','撐開','行政','會計','廠務','客服對帳'];
+  const STANDARD_DEPARTMENT_JOBS = [['辦公室','行政'],['洗滌','洗滌人員'],['摺疊','現場作業員'],['撐開','現場作業員'],['物流','新進司機'],['物流','司機'],['摺疊','作業員'],['撐開','作業員'],['洗滌','早班作業員']];
+  const STANDARD_DEPARTMENTS = [...new Set(STANDARD_DEPARTMENT_JOBS.map((row) => row[0]))];
+  const STANDARD_JOBS = [...new Set(STANDARD_DEPARTMENT_JOBS.map((row) => row[1]))];
+  const DEPARTMENT_JOBS = STANDARD_DEPARTMENT_JOBS.reduce((map, [dept, job]) => {
+    if (!map[dept]) map[dept] = [];
+    if (!map[dept].includes(job)) map[dept].push(job);
+    return map;
+  }, {});
+
   const KEY = 'companybrain-hr-demo-v1';
 
   let ctx = {};
@@ -182,9 +190,18 @@
     try { localStorage.setItem(KEY, JSON.stringify(state)); } catch {}
   }
 
-  async function refresh() {
+  function stateView() {
+    if (route.page === 'profile' && route.id) return {view: 'profile', id: route.id};
+    if (route.page === 'candidate' && route.id) return {view: 'candidate', id: route.id};
+    if (ctx.view === 'recruitment') return {view: 'recruitment', id: ''};
+    return {view: 'staff', id: ''};
+  }
+  async function refresh(opts = {}) {
     if (!demo && ctx.api) {
-      state = await ctx.api('/api/hr/state');
+      const {view, id} = opts.view ? opts : stateView();
+      const q = '/api/hr/state?view=' + encodeURIComponent(view) + (id ? '&id=' + encodeURIComponent(id) : '');
+      const next = await ctx.api(q);
+      state = {...state, ...next};
     } else {
       loadDemo();
     }
@@ -214,6 +231,19 @@
     const d = String(department || '').trim();
     return PREFIX_CHOICES[d] || PREFIX_CHOICES[d === '洗滓' ? '洗滌' : d] || (prefixFor(d) ? [prefixFor(d)] : ['D','F','H','W','E','O']);
   }
+  function officialJobs() {
+    return state.jobTitlesOfficial || STANDARD_JOBS;
+  }
+  function officialDepartments() {
+    return state.departmentsOfficial || STANDARD_DEPARTMENTS;
+  }
+  function jobsForDept(department, current) {
+    const d = String(department || '').trim() === '洗滓' ? '洗滌' : String(department || '').trim();
+    const map = state.departmentJobs || DEPARTMENT_JOBS;
+    const official = (d && map[d] && map[d].length) ? map[d] : officialJobs();
+    const extra = current && !official.includes(current) ? [current] : [];
+    return [...extra, ...official];
+  }
   function jobTitleOptions() {
     const seen = new Set();
     const out = [];
@@ -223,7 +253,7 @@
       seen.add(v);
       out.push(v);
     };
-    for (const v of STANDARD_JOBS) add(v);
+    for (const v of officialJobs()) add(v);
     for (const v of state.jobTitles || []) add(v);
     for (const row of [...(state.employees || []), ...(state.candidates || [])]) {
       add(row.job);
@@ -231,12 +261,30 @@
     }
     return out;
   }
-  function jobCombo(name, label, value) {
+  function jobCombo(name, label, value, department) {
     const v = value || '';
-    const opts = jobTitleOptions();
-    const list = (v.trim() && !opts.includes(v.trim())) ? [v.trim(), ...opts] : opts;
+    const opts = jobsForDept(department, v.trim());
     const id = 'hr-jobs-' + name;
+    return `<div class="field"><span>${esc(label)}</span><input name="${name}" value="${esc(v)}" list="${id}" autocomplete="off" placeholder="選擇或自行輸入"><datalist id="${id}">${opts.map((o) => `<option value="${esc(o)}"></option>`).join('')}</datalist></div>`;
+  }
+  function deptCombo(name, label, value) {
+    const v = value || '';
+    const opts = officialDepartments();
+    const list = (v.trim() && !opts.includes(v.trim())) ? [v.trim(), ...opts] : opts;
+    const id = 'hr-depts-' + name;
     return `<div class="field"><span>${esc(label)}</span><input name="${name}" value="${esc(v)}" list="${id}" autocomplete="off" placeholder="選擇或自行輸入"><datalist id="${id}">${list.map((o) => `<option value="${esc(o)}"></option>`).join('')}</datalist></div>`;
+  }
+  function bindDeptJob(form) {
+    const dept = form?.elements?.department;
+    const job = form?.elements?.job;
+    if (!dept || !job) return;
+    const sync = () => {
+      const list = document.getElementById(job.getAttribute('list'));
+      if (!list) return;
+      list.innerHTML = jobsForDept(dept.value, job.value.trim()).map((o) => `<option value="${esc(o)}"></option>`).join('');
+    };
+    dept.addEventListener('change', sync);
+    dept.addEventListener('input', sync);
   }
   function jobFilterSelect(current, name) {
     const opts = jobTitleOptions();
@@ -536,35 +584,71 @@
     ctx.view = view;
     if (!(opts && opts.keepRoute)) route = {page: 'list', id: null};
   }
+  function uiBusy(root) {
+    if (document.querySelector('dialog[open]')) return true;
+    const ae = document.activeElement;
+    if (ae && root && root.contains(ae) && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName || '')) return true;
+    if (root && root.querySelector('dialog[open], form.inline-grid, form.dlg-body')) {
+      if (ae && root.contains(ae) && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName || '')) return true;
+    }
+    return false;
+  }
+  function snapshotUi(root) {
+    return {
+      scroll: window.scrollY,
+      jobFilter: {...jobFilter},
+      route: {...route},
+      search: (ctx.query || ''),
+    };
+  }
+  function restoreUi(snap) {
+    if (!snap) return;
+    jobFilter = snap.jobFilter || jobFilter;
+    route = snap.route || route;
+    requestAnimationFrame(() => window.scrollTo(0, snap.scroll || 0));
+  }
+  function skeletonHtml() {
+    return `<div class="hr-skeleton" aria-busy="true"><div class="hr-skel-card"></div><div class="hr-skel-card"></div><div class="hr-skel-row"></div><div class="hr-skel-row"></div><p class="muted">正在載入人事資料…</p></div>`;
+  }
   function render(root, next) {
     ctx = Object.assign({}, ctx, next || {});
     demo = !ctx.nasMode;
     const view = ctx.view || 'staff';
+    if (next && next.preserve && uiBusy(root)) return;
+    const snap = snapshotUi(root);
+    const hasContent = root && (root.querySelector('.hr-table, .kanban, .profile, .hr-toolbar'));
+    if (root && !hasContent) root.innerHTML = skeletonHtml();
     refresh().then(() => {
-      if (route.page === 'profile' && route.id) return paintProfile(root, route.id);
-      if (route.page === 'candidate' && route.id && view === 'recruitment') return paintCandidate(root, route.id);
-      if (view === 'recruitment') paintRecruitment(root);
+      if (next && next.preserve && uiBusy(root)) return;
+      if (route.page === 'profile' && route.id) paintProfile(root, route.id);
+      else if (route.page === 'candidate' && route.id && view === 'recruitment') paintCandidate(root, route.id);
+      else if (view === 'recruitment') paintRecruitment(root);
       else paintStaff(root);
-    }).catch((e) => { root.innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
+      if (next && next.preserve) restoreUi(snap);
+    }).catch((e) => { if (root) root.innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
   }
 
   function renderHome(root, next) {
     ctx = Object.assign({}, ctx, next || {});
     demo = !ctx.nasMode;
-    refresh().then(() => {
+    if (root && !root.innerHTML) root.innerHTML = skeletonHtml();
+    refresh({view: 'home'}).then(() => {
       const t = today();
-      const follow = visibleCands().filter((c) => OPEN.includes(c.status) && c.followupDate === t);
-      const overdue = visibleCands().filter((c) => OPEN.includes(c.status) && c.followupDate && c.followupDate < t);
-      const exp = expirySoon();
-      const onboard = state.employees.filter((e) => e.arrivalDate && e.arrivalDate >= t && missingPaper(e).length);
-      const leaveSoon = state.leaveExpiryReminders || leaveReminders();
+      const home = state.home || {};
+      const follow = home.followupToday != null ? [{n: home.followupToday}] : visibleCands().filter((c) => OPEN.includes(c.status) && c.followupDate === t);
+      const overdue = home.overdue != null ? [{n: home.overdue}] : visibleCands().filter((c) => OPEN.includes(c.status) && c.followupDate && c.followupDate < t);
+      const followN = home.followupToday != null ? home.followupToday : follow.length;
+      const overdueN = home.overdue != null ? home.overdue : overdue.length;
+      const exp = home.expiry != null ? home.expiry : expirySoon().length;
+      const onboard = home.onboard != null ? home.onboard : state.employees.filter((e) => e.arrivalDate && e.arrivalDate >= t && missingPaper(e).length).length;
+      const leaveSoon = home.leaveSoon || state.leaveExpiryReminders || leaveReminders();
       root.innerHTML = `<section class="hr-home"><h2 class="section-title" style="margin:18px 0 8px">人事與徵人待辦</h2>
         <div class="hr-grid">
-          <button class="hr-card today" type="button" data-go="recruitment"><div class="k">今日待聯絡</div><div class="n">${follow.length}</div></button>
-          <button class="hr-card overdue" type="button" data-go="recruitment"><div class="k">已過期未跟</div><div class="n">${overdue.length}</div></button>
-          <button class="hr-card" type="button" data-go="staff"><div class="k">證件即將到期</div><div class="n">${exp.length}</div></button>
+          <button class="hr-card today" type="button" data-go="recruitment"><div class="k">今日待聯絡</div><div class="n">${followN}</div></button>
+          <button class="hr-card overdue" type="button" data-go="recruitment"><div class="k">已過期未跟</div><div class="n">${overdueN}</div></button>
+          <button class="hr-card" type="button" data-go="staff"><div class="k">證件即將到期</div><div class="n">${exp}</div></button>
           <button class="hr-card ${leaveSoon.length ? 'overdue' : ''}" type="button" data-go="staff"><div class="k">特休將到期未休</div><div class="n">${leaveSoon.length}</div></button>
-          <button class="hr-card" type="button" data-go="staff"><div class="k">報到資料未齊</div><div class="n">${onboard.length}</div></button>
+          <button class="hr-card" type="button" data-go="staff"><div class="k">報到資料未齊</div><div class="n">${onboard}</div></button>
         </div>
         ${leaveSoon.length ? `<p class="muted">特休年度將在 60 天內結束且尚有剩餘：${leaveSoon.map((x) => esc(x.name) + ' 剩 ' + x.remaining + ' 天（'+esc(x.endsOn)+' 止）').join('、')}。年底未休完預設結算為「未休完已折現」（只記狀態，不記金額）。</p>` : ''}
         </section>`;
@@ -595,7 +679,7 @@
       </div>
       <table class="hr-table"><thead><tr><th>編號</th><th>姓名</th><th>部門</th><th>職稱</th><th>電話</th><th>到職</th><th>狀態</th></tr></thead>
       <tbody>${list.map((e) => `<tr data-open="${esc(e.id)}"><td>${esc(e.id)}</td><td>${esc(e.name)}</td><td>${esc(e.department)}</td><td>${esc(e.job)}</td><td>${esc(e.phone)}</td><td>${esc(e.arrivalDate)}</td><td>${active(e) ? '<span class="pill ok">在職</span>' : '<span class="pill">離職</span>'}${missingPaper(e).length ? ' <span class="pill warn">未齊</span>' : ''}${pendingOcr(e.id).length ? ' <span class="pill warn">待確認辨識</span>' : ''}</td></tr>`).join('') || '<tr><td colspan="7">沒有符合的員工。</td></tr>'}</tbody></table>`;
-    $$('[data-open]', root).forEach((tr) => tr.onclick = () => { route = {page: 'profile', id: tr.dataset.open}; paintProfile(root, tr.dataset.open); });
+    $$('[data-open]', root).forEach((tr) => tr.onclick = () => { const id = tr.dataset.open; route = {page: 'profile', id}; refresh({view: 'profile', id}).then(() => paintProfile(root, id)); });
     $('[data-act="add-emp"]', root).onclick = () => openEmpForm(root);
     $('[data-act="scan"]', root).onclick = () => doScan(root);
     $('[data-act="ocr-bank"]', root).onclick = () => doBatchBank(root);
@@ -618,8 +702,8 @@
           <section class="hr-card">
             <h2 class="section-title">基本資料（可直接改）</h2>
             <form id="emp-inline" class="inline-grid">
-              ${field('name', '姓名', e.name)}${field('department', '部門', e.department)}
-              ${jobCombo('job', '職稱', e.job)}${sel('employmentType', '雇用型態', TYPES, e.employmentType)}
+              ${field('name', '姓名', e.name)}${deptCombo('department', '部門', e.department)}
+              ${jobCombo('job', '職稱', e.job, e.department)}${sel('employmentType', '雇用型態', TYPES, e.employmentType)}
               ${sel('payType', '計薪型態', PAY_TYPES, e.payType || (e.employmentType === '兼職' || e.employmentType === '時薪' ? '兼職' : '正職'))}${sel('paymentMethod', '匯款類型', PAY_METHODS, e.paymentMethod || '匯款')}
               ${field('arrivalDate', '到職日', e.arrivalDate, 'date')}${field('departureDate', '離職日', e.departureDate, 'date')}
               ${e.arrivalDateSource && e.arrivalDateSource.type === '加保日' ? '<p class="muted arrival-note" style="grid-column:1/-1">到職日由最早勞健保加保日帶入' + (e.arrivalDateSource.date ? '（' + esc(e.arrivalDateSource.date) + '）' : '') + '，可直接修改。</p>' : ''}
@@ -681,6 +765,7 @@
         </div>
       </div>`;
     $('[data-act="back"]', root).onclick = () => { route = {page: 'list'}; paintStaff(root); };
+        bindDeptJob($('#emp-inline', root));
     $('#emp-inline', root).onsubmit = async (ev) => {
       ev.preventDefault();
       const f = ev.target;
@@ -1157,7 +1242,7 @@
       <div id="hr-dialogs"></div>`;
     $$('[data-open]', root).forEach((el) => el.onclick = (ev) => {
       if (ev.target.closest('[data-del]')) return;
-      route = {page: 'candidate', id: el.dataset.open}; paintCandidate(root, el.dataset.open);
+      const id = el.dataset.open; route = {page: 'candidate', id}; refresh({view: 'candidate', id}).then(() => paintCandidate(root, id));
     });
     $$('[data-del]', root).forEach((el) => el.onclick = (ev) => {
       ev.preventDefault(); ev.stopPropagation();
@@ -1276,9 +1361,25 @@
     if (!$('#hr-dialogs', root)) root.insertAdjacentHTML('beforeend', '<div id="hr-dialogs"></div>');
     return $('#hr-dialogs', root);
   }
+  function showFormError(form, msg, fieldName) {
+    let el = form.querySelector('.hr-form-error');
+    if (!el) {
+      el = document.createElement('p');
+      el.className = 'hr-form-error';
+      el.setAttribute('role', 'alert');
+      const actions = form.querySelector('.dlg-actions');
+      if (actions) actions.before(el);
+      else form.appendChild(el);
+    }
+    el.textContent = msg;
+    if (fieldName && form.elements[fieldName]) {
+      form.elements[fieldName].setAttribute('aria-invalid', 'true');
+      form.elements[fieldName].focus();
+    }
+  }
   function dlg(root, title, inner, onsubmit) {
     const host = ensureDialogs(root);
-    host.innerHTML = `<dialog class="hr-dlg"><h2>${esc(title)}</h2><form class="dlg-body">${inner}<div class="hr-toolbar" style="margin-top:12px"><button class="hr-btn" type="submit">確定</button><button class="hr-btn ghost" type="button" data-cancel>取消</button></div></form></dialog>`;
+    host.innerHTML = `<dialog class="hr-dlg"><h2>${esc(title)}</h2><form class="dlg-body"><div class="dlg-fields">${inner}</div><p class="hr-form-error" role="alert" hidden></p><div class="dlg-actions hr-toolbar"><button class="hr-btn" type="submit">確定</button><button class="hr-btn ghost" type="button" data-cancel>取消</button></div></form></dialog>`;
     const box = $('dialog', host);
     const form = $('form', host);
     const close = () => { try { box.close(); } catch {} host.innerHTML = ''; };
@@ -1286,22 +1387,27 @@
     box.addEventListener('cancel', (e) => { e.preventDefault(); close(); });
     form.onsubmit = async (e) => {
       e.preventDefault();
+      const err = form.querySelector('.hr-form-error');
+      if (err) { err.hidden = true; err.textContent = ''; }
       const btn = form.querySelector('[type="submit"]');
       if (btn) btn.disabled = true;
       try {
         await onsubmit(form);
         close();
-      } catch (err) {
-        toast(err.message || '操作失敗');
+      } catch (ex) {
+        const msg = ex.message || '操作失敗';
+        if (err) { err.hidden = false; err.textContent = msg; }
+        toast(msg);
         if (btn) btn.disabled = false;
       }
     };
+    bindDeptJob(form);
     if (typeof box.showModal === 'function') box.showModal();
     else box.setAttribute('open', '');
   }
   function openEmpForm(root) {
     if (!$('#hr-dialogs', root)) root.insertAdjacentHTML('beforeend', '<div id="hr-dialogs"></div>');
-    dlg(root, '新增員工', field('name', '姓名', '') + field('department', '部門', '') + jobCombo('job', '職稱', '') + sel('employmentType', '雇用型態', TYPES, '正職') + sel('payType', '計薪型態', PAY_TYPES, '正職') + sel('paymentMethod', '匯款類型', PAY_METHODS, '匯款') + field('phone', '電話', '') + field('lineId', 'LINE ID', '') + field('arrivalDate', '到職日', today(), 'date'), async (f) => {
+    dlg(root, '新增員工', field('name', '姓名', '') + deptCombo('department', '部門', '') + jobCombo('job', '職稱', '') + sel('employmentType', '雇用型態', TYPES, '正職') + sel('payType', '計薪型態', PAY_TYPES, '正職') + sel('paymentMethod', '匯款類型', PAY_METHODS, '匯款') + field('phone', '電話', '') + field('lineId', 'LINE ID', '') + field('arrivalDate', '到職日', today(), 'date'), async (f) => {
       const body = Object.fromEntries(['name', 'department', 'job', 'employmentType', 'payType', 'paymentMethod', 'phone', 'lineId', 'arrivalDate'].map((k) => [k, f.elements[k].value]));
       const row = await write('/api/hr/employees', 'POST', body);
       toast('已新增 ' + row.id); await refresh(); route = {page: 'profile', id: row.id}; paintProfile(root, row.id);
@@ -1309,11 +1415,15 @@
   }
   function openCandForm(root) {
     if (!$('#hr-dialogs', root)) root.insertAdjacentHTML('beforeend', '<div id="hr-dialogs"></div>');
-    dlg(root, '新增應徵者', field('name', '姓名', '') + field('phone', '電話', '') + field('department', '部門', '') + jobCombo('job', '職缺', '') + field('source', '來源', '') + field('followupDate', '下次跟進', today(), 'date'), async (f) => {
+    dlg(root, '新增應徵者', field('name', '姓名', '') + field('phone', '電話', '') + deptCombo('department', '部門', '') + jobCombo('job', '職缺', '') + field('source', '來源', '') + field('followupDate', '下次跟進', today(), 'date'), async (f) => {
       const body = Object.fromEntries(['name', 'phone', 'department', 'job', 'source', 'followupDate'].map((k) => [k, f.elements[k].value]));
+      if (!String(body.name || '').trim()) {
+        showFormError(f, '請填寫應徵者姓名', 'name');
+        throw new Error('請填寫應徵者姓名');
+      }
       body.status = '待聯絡';
       const row = await write('/api/hr/candidates', 'POST', body);
-      toast('已新增應徵者'); await refresh(); route = {page: 'candidate', id: row.id}; paintCandidate(root, row.id);
+      toast('已新增應徵者'); await refresh({view: 'candidate', id: row.id}); route = {page: 'candidate', id: row.id}; paintCandidate(root, row.id);
     });
   }
   function openLog(root, id, kind) {
@@ -1330,7 +1440,7 @@
     const choices = prefixChoicesFor(c.department);
     const preview = nextEmpId(c.department, choices[0]);
     dlg(root, '報到並轉為員工',
-      `<p class="muted">員工編號依打卡計薪規則自動給「部門字首＋流水號」（物流 D、摺疊 F、撐開 H、洗滌 W／E、辦公室／行政 O）。既有編號原樣保留。預覽：<strong>${esc(preview || '請選擇字首')}</strong>。並帶入報到清單。</p>` + field('department', '部門', c.department) + `<div class="field"><span>編號字首</span><select name="prefix">${choices.map((p) => `<option>${p}</option>`).join('')}</select></div>` + jobCombo('job', '職稱', c.job) + sel('employmentType', '雇用型態', TYPES, '正職') + sel('payType', '計薪型態', PAY_TYPES, '正職') + sel('paymentMethod', '匯款類型', PAY_METHODS, '匯款') + field('lineId', 'LINE ID', '') + field('arrivalDate', '到職日', c.availableDate || today(), 'date') + field('phone', '電話', c.phone),
+      `<p class="muted">員工編號依打卡計薪規則自動給「部門字首＋流水號」（物流 D、摺疊 F、撐開 H、洗滌 W／E、辦公室／行政 O）。既有編號原樣保留。預覽：<strong>${esc(preview || '請選擇字首')}</strong>。並帶入報到清單。</p>` + deptCombo('department', '部門', c.department) + `<div class="field"><span>編號字首</span><select name="prefix">${choices.map((p) => `<option>${p}</option>`).join('')}</select></div>` + jobCombo('job', '職稱', c.job, c.department) + sel('employmentType', '雇用型態', TYPES, '正職') + sel('payType', '計薪型態', PAY_TYPES, '正職') + sel('paymentMethod', '匯款類型', PAY_METHODS, '匯款') + field('lineId', 'LINE ID', '') + field('arrivalDate', '到職日', c.availableDate || today(), 'date') + field('phone', '電話', c.phone),
       async (f) => {
         const body = Object.fromEntries(['department', 'job', 'employmentType', 'payType', 'paymentMethod', 'lineId', 'arrivalDate', 'phone', 'prefix'].map((k) => [k, f.elements[k].value]));
         const r = await write('/api/hr/candidates/' + id + '/convert', 'POST', body);
@@ -1344,7 +1454,7 @@
   }
   function openGoal(root) {
     if (!$('#hr-dialogs', root)) root.insertAdjacentHTML('beforeend', '<div id="hr-dialogs"></div>');
-    dlg(root, '增加徵人需求', field('department', '部門', '') + field('additional', '要再補幾人', '1', 'number') + field('notes', '備註', ''), async (f) => {
+    dlg(root, '增加徵人需求', deptCombo('department', '部門', '') + field('additional', '要再補幾人', '1', 'number') + field('notes', '備註', ''), async (f) => {
       await write('/api/hr/goals', 'POST', {department: f.elements.department.value, additional: Number(f.elements.additional.value), notes: f.elements.notes.value});
       toast('已更新需求'); await refresh(); paintRecruitment(root);
     });

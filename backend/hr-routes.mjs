@@ -4,6 +4,7 @@ import {stat} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {AppError} from './domain.mjs';
+import {sendJson} from './http-send.mjs';
 import {newId, DOC_TYPES} from './hr-store.mjs';
 import {folderConfig, saveUpload, scanFolders, fileId, savedPath, UPLOAD_LIMIT, MIMES, enrichDocuments, resolveDocFile} from './hr-docs.mjs';
 import {runAfterUpload, batchScanBank, geminiReady} from './hr-ocr.mjs';
@@ -13,11 +14,10 @@ import {importStatus, loadSheetValues, parseSheetRows, compareSalaryRows, normal
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EXCEL_CLI = path.join(HERE, 'hr-excel', 'cli.py');
 
-function send(res, status, body) {
-  const data = Buffer.from(JSON.stringify(body));
-  res.writeHead(status, {'content-type': 'application/json; charset=utf-8', 'content-length': data.length});
-  res.end(data);
+function makeSend(req) {
+  return (res, status, body) => sendJson(res, status, body, req);
 }
+
 
 function parseUrl(req) {
   return new URL(req.url, 'http://localhost');
@@ -90,13 +90,18 @@ export async function handleHr(req, res, {hr, session, method, path: p, config =
   const url = parseUrl(req);
   const pathname = url.pathname;
   const actor = actorOf(session);
+  const send = makeSend(req);
 
   if (method === 'GET' && pathname === '/api/hr/state') {
-    const state = await hr.state();
-    state.documents = await enrichDocuments(state.documents);
-    state.ocr = {geminiConfigured: geminiReady(config), piiKeyConfigured: hasPiiKey()};
+    const view = url.searchParams.get('view') || 'full';
+    const id = url.searchParams.get('id') || '';
+    const state = await hr.state({view, id});
+    if (view === 'full' || view === 'profile' || view === 'candidate') {
+      state.documents = await enrichDocuments(state.documents || []);
+    }
+    state.ocr = {geminiConfigured: geminiReady(config), piiKeyConfigured: hasPiiKey(), ...(state.ocr || {})};
     const sheet = await hr.getSalaryImport();
-    state.salaryImport = {...sheet, ...(await importStatus())};
+    state.salaryImport = {...sheet, ...(await importStatus()), ...(state.salaryImport || {})};
     send(res, 200, state);
     return true;
   }

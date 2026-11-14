@@ -4,7 +4,8 @@ import {encryptSecret, decryptSecret, hasPiiKey, last4} from './hr-crypto.mjs';
 import {maskTaiwanId, isValidTaiwanId, normalizeTaiwanId} from './hr-twid.mjs';
 import {DEFAULT_SALARY_IMPORT} from './hr-salary-import.mjs';
 import {yearsForEmployee, decorateYear, defaultSettlement, SETTLEMENTS, DEFAULT_BASIS, endingSoon} from './hr-leave.mjs';
-import {DEFAULT_DEPT_PREFIXES, nextPrefixedId, prefixForDepartment, isUsableEmployeeId, PAY_TYPES, PAYMENT_METHODS, jobTitleOptions} from './hr-ids.mjs';
+import {DEFAULT_DEPT_PREFIXES, nextPrefixedId, prefixForDepartment, isUsableEmployeeId, PAY_TYPES, PAYMENT_METHODS, jobTitleOptions, STANDARD_JOBS, STANDARD_DEPARTMENTS, DEPARTMENT_JOBS} from './hr-ids.mjs';
+import {KEEP_RECRUITMENT_STATUS, isKeptRecruitmentStatus} from './hr-purge.mjs';
 
 export const DOC_TYPES = {identity: '身分證', bank: '存摺', license: '駕照', resume: '履歷表'};
 export const STATUSES = ['待聯絡', '待面試', '待回覆', '錄取', '待報到', '已報到', '未錄取', '放棄', '未回覆', '未到面試', '未報到'];
@@ -44,6 +45,15 @@ CREATE TABLE IF NOT EXISTS hr_candidates (
   revision integer NOT NULL DEFAULT 1,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS hr_purged_candidates (
+  id text PRIMARY KEY,
+  status text,
+  employee_id text,
+  payload jsonb NOT NULL DEFAULT '{}',
+  dependents jsonb NOT NULL DEFAULT '{}',
+  purged_at timestamptz NOT NULL DEFAULT now(),
+  reason text NOT NULL DEFAULT '非待報到舊資料清除'
 );
 CREATE TABLE IF NOT EXISTS hr_recruitment_events (
   id text PRIMARY KEY,
@@ -172,6 +182,9 @@ function nowIso() {
 function newId(prefix) {
   return prefix + randomBytes(6).toString('hex');
 }
+function sqlInList(ids, start = 1) {
+  return ids.map((_, i) => '$' + (start + i)).join(', ');
+}
 function active(emp, day = today()) {
   const a = emp.arrivalDate, d = emp.departureDate;
   return (!a || a <= day) && (!d || d >= day);
@@ -200,8 +213,210 @@ export class HrStore {
     );
   }
 
-  async state() {
+  async distinctJobTitles() {
+    const r = await this.pool.query(`
+      SELECT DISTINCT trim(job) AS job FROM (
+        SELECT payload->>'job' AS job FROM hr_employees
+        UNION ALL
+        SELECT payload->>'job' FROM hr_candidates
+        UNION ALL
+        SELECT payload->>'desiredPosition' FROM hr_candidates
+      ) t WHERE job IS NOT NULL AND trim(job) <> ''`);
+    return jobTitleOptions(r.rows);
+  }
+
+  async state(opts = {}) {
+    const view = (opts && opts.view) || 'full';
+    const id = (opts && opts.id) || '';
+    if (view === 'staff') return this.staffState();
+    if (view === 'recruitment') return this.recruitmentState();
+    if (view === 'home') return this.homeState();
+    if (view === 'profile') return this.profileState(id);
+    if (view === 'candidate') return this.candidateState(id);
+    return this.fullState();
+  }
+
+  async settingsBundle() {
+    const [settings, lastImport] = await Promise.all([
+      this.pool.query('SELECT key, value FROM hr_settings'),
+      this.pool.query("SELECT value FROM hr_settings WHERE key='lastImport'"),
+    ]);
+    const deptPrefixes = { ...DEFAULT_DEPT_PREFIXES, ...((settings.rows.find((r) => r.key === 'deptPrefixes')?.value) || {}) };
+    return {
+      settings: Object.fromEntries(settings.rows.map((r) => [r.key, r.value])),
+      lastImport: lastImport.rows[0]?.value || null,
+      deptPrefixes,
+      leaveYearBasis: (settings.rows.find((r) => r.key === 'leaveYearBasis')?.value) || DEFAULT_BASIS,
+      leaveSettleDefault: (settings.rows.find((r) => r.key === 'leaveSettleDefault')?.value) || '未休完已折現',
+      jobTitlesOfficial: STANDARD_JOBS,
+      departmentsOfficial: STANDARD_DEPARTMENTS,
+      departmentJobs: DEPARTMENT_JOBS,
+    };
+  }
+
+  mapDocument(r) {
+    return {
+      id: r.id, category: r.category, relativePath: r.relative_path, filename: r.filename,
+      size: Number(r.size), mtime: Number(r.mtime), available: r.available,
+      employeeId: r.employee_id, candidateId: r.candidate_id, suggestions: r.suggestions || [], expiresOn: r.expires_on,
+    };
+  }
+
+  async staffState() {
+    const [employees, documents, settings, leaveYears, leaveEntries, pii, ocrReviews, jobTitles] = await Promise.all([
+      this.pool.query('SELECT id, payload, revision FROM hr_employees ORDER BY id'),
+      this.pool.query('SELECT * FROM hr_documents ORDER BY category, filename'),
+      this.settingsBundle(),
+      this.pool.query('SELECT * FROM hr_leave_years ORDER BY starts_on DESC, id'),
+      this.pool.query('SELECT * FROM hr_leave_entries ORDER BY taken_on DESC, id'),
+      this.pool.query('SELECT * FROM hr_employee_pii'),
+      this.pool.query("SELECT * FROM hr_ocr_reviews WHERE status='pending' ORDER BY created_at DESC, id"),
+      this.distinctJobTitles(),
+    ]);
+    const mapEmp = (r) => ({id: r.id, revision: r.revision, ...r.payload});
+    const piiByEmp = Object.fromEntries(pii.rows.map((r) => [r.employee_id, publicPii(r)]));
+    const docs = documents.rows.map((r) => this.mapDocument(r));
+    const emps = employees.rows.map(mapEmp).map((e) => ({...e, pii: piiByEmp[e.id] || null}));
+    const years = this.decorateYears(leaveYears.rows, leaveEntries.rows);
+    return {
+      view: 'staff',
+      employees: emps,
+      documents: docs,
+      records: [],
+      candidates: [],
+      recruitmentEvents: [],
+      recruitmentGoals: [],
+      leaveExcel: [],
+      salaries: [],
+      audit: [],
+      ...settings,
+      leaveYears: years,
+      leaveEntries: [],
+      ocrReviews: ocrReviews.rows.map((r) => mapOcrReview(r, {reveal: r.status === 'pending'})),
+      ocr: {geminiConfigured: false, piiKeyConfigured: hasPiiKey()},
+      jobTitles,
+      leaveExpiryReminders: endingSoon(years, today(), 60).map((y) => {
+        const emp = emps.find((e) => e.id === y.employeeId);
+        return {employeeId: y.employeeId, name: emp?.name || y.employeeId, endsOn: y.endsOn, remaining: y.remaining, summary: y.summary};
+      }),
+    };
+  }
+
+  async recruitmentState() {
+    const [candidates, goals, employees, settings, jobTitles] = await Promise.all([
+      this.pool.query('SELECT id, payload, revision, created_at, updated_at FROM hr_candidates ORDER BY updated_at DESC, id'),
+      this.pool.query('SELECT department, payload, revision FROM hr_recruitment_goals ORDER BY department'),
+      this.pool.query('SELECT id, payload FROM hr_employees'),
+      this.settingsBundle(),
+      this.distinctJobTitles(),
+    ]);
+    const emps = employees.rows.map((r) => ({id: r.id, ...r.payload}));
+    return {
+      view: 'recruitment',
+      employees: emps.map((e) => ({id: e.id, name: e.name, department: e.department, job: e.job, arrivalDate: e.arrivalDate, departureDate: e.departureDate})),
+      records: [],
+      documents: [],
+      candidates: candidates.rows.map(publicCandidate),
+      recruitmentEvents: [],
+      recruitmentGoals: goals.rows.map((r) => this.decorateGoal(r.department, r.payload, emps)),
+      leaveExcel: [],
+      salaries: [],
+      audit: [],
+      ...settings,
+      leaveYears: [],
+      leaveEntries: [],
+      ocrReviews: [],
+      ocr: {geminiConfigured: false, piiKeyConfigured: hasPiiKey()},
+      jobTitles,
+      leaveExpiryReminders: [],
+    };
+  }
+
+  async homeState() {
+    const t = today();
+    const open = ['待聯絡', '待面試', '待回覆', '錄取', '待報到'];
+    const [follow, overdue, staff] = await Promise.all([
+      this.pool.query(
+        `SELECT count(*)::int AS n FROM hr_candidates
+         WHERE COALESCE(payload->>'archived','') NOT IN ('true','t')
+           AND payload->>'status' = ANY($1)
+           AND payload->>'followupDate' = $2`,
+        [open, t],
+      ),
+      this.pool.query(
+        `SELECT count(*)::int AS n FROM hr_candidates
+         WHERE COALESCE(payload->>'archived','') NOT IN ('true','t')
+           AND payload->>'status' = ANY($1)
+           AND COALESCE(payload->>'followupDate','') <> ''
+           AND payload->>'followupDate' < $2`,
+        [open, t],
+      ),
+      this.staffState(),
+    ]);
+    const limit = new Date(t); limit.setDate(limit.getDate() + 60);
+    const until = limit.toISOString().slice(0, 10);
+    const expiry = staff.documents.filter((d) => d.expiresOn && d.expiresOn <= until).length;
+    const onboard = staff.employees.filter((e) => {
+      if (!e.arrivalDate || e.arrivalDate < t) return false;
+      const hasId = staff.documents.some((d) => d.employeeId === e.id && d.available && d.category === 'identity');
+      return !e.emergencyContact || !e.paperLocation || !hasId;
+    }).length;
+    return {
+      ...staff,
+      view: 'home',
+      home: {
+        followupToday: follow.rows[0].n,
+        overdue: overdue.rows[0].n,
+        expiry,
+        onboard,
+        leaveSoon: staff.leaveExpiryReminders || [],
+      },
+    };
+  }
+
+  async profileState(id) {
+    if (!id) return this.staffState();
+    const full = await this.fullState();
+    const emp = full.employees.find((e) => e.id === id);
+    const list = emp
+      ? [emp, ...full.employees.filter((e) => e.id !== id).map((e) => ({id: e.id, name: e.name, department: e.department, job: e.job, arrivalDate: e.arrivalDate, departureDate: e.departureDate}))]
+      : full.employees;
+    return {
+      ...full,
+      view: 'profile',
+      employees: list,
+      records: full.records.filter((r) => r.employeeId === id),
+      documents: full.documents.filter((d) => d.employeeId === id),
+      salaries: full.salaries.filter((s) => s.employeeId === id),
+      leaveYears: full.leaveYears.filter((y) => y.employeeId === id),
+      leaveEntries: full.leaveEntries.filter((e) => e.employeeId === id),
+      ocrReviews: (full.ocrReviews || []).filter((r) => r.employeeId === id),
+      candidates: [],
+      recruitmentEvents: [],
+      leaveExcel: [],
+    };
+  }
+
+  async candidateState(id) {
+    const recruit = await this.recruitmentState();
+    if (!id) return recruit;
+    const [events, documents, ocrReviews] = await Promise.all([
+      this.pool.query('SELECT * FROM hr_recruitment_events WHERE candidate_id=$1 ORDER BY created_at DESC, id DESC', [id]),
+      this.pool.query('SELECT * FROM hr_documents WHERE candidate_id=$1 ORDER BY category, filename', [id]),
+      this.pool.query('SELECT * FROM hr_ocr_reviews WHERE candidate_id=$1 ORDER BY created_at DESC, id', [id]),
+    ]);
+    return {
+      ...recruit,
+      view: 'candidate',
+      documents: documents.rows.map((r) => this.mapDocument(r)),
+      recruitmentEvents: events.rows.map((r) => ({id: r.id, candidateId: r.candidate_id, kind: r.kind, created: r.created_at, ...r.payload})),
+      ocrReviews: ocrReviews.rows.map((r) => mapOcrReview(r, {reveal: r.status === 'pending'})),
+    };
+  }
+
+  async fullState() {
     const [employees, records, documents, candidates, events, goals, leaveExcel, salaries, audit, settings, lastImport, leaveYears, leaveEntries, pii, ocrReviews] = await Promise.all([
+
       this.pool.query('SELECT id, payload, revision FROM hr_employees ORDER BY id'),
       this.pool.query('SELECT id, employee_id, kind, payload, created_at FROM hr_records ORDER BY created_at DESC, id'),
       this.pool.query('SELECT * FROM hr_documents ORDER BY category, filename'),
@@ -246,6 +461,10 @@ export class HrStore {
     result.ocrReviews = ocrReviews.rows.map((r) => mapOcrReview(r, {reveal: r.status === 'pending'}));
     result.ocr = {geminiConfigured: false, piiKeyConfigured: hasPiiKey()};
     result.jobTitles = jobTitleOptions(result.employees, result.candidates);
+    result.jobTitlesOfficial = STANDARD_JOBS;
+    result.departmentsOfficial = STANDARD_DEPARTMENTS;
+    result.departmentJobs = DEPARTMENT_JOBS;
+    result.view = result.view || 'full';
     result.leaveExpiryReminders = endingSoon(result.leaveYears, today(), 60).map((y) => {
       const emp = result.employees.find((e) => e.id === y.employeeId);
       return {employeeId: y.employeeId, name: emp?.name || y.employeeId, endsOn: y.endsOn, remaining: y.remaining, summary: y.summary};
@@ -328,7 +547,7 @@ export class HrStore {
       if (!create && !cur.rowCount) throw new AppError(404, '找不到應徵者');
       const prev = cur.rows[0]?.payload || {};
       const merged = {...prev, ...data};
-      if (!merged.name || !merged.phone) throw new AppError(400, '請填寫應徵者姓名與電話');
+      if (!String(merged.name || '').trim()) throw new AppError(400, '請填寫應徵者姓名');
       if (merged.status && !STATUSES.includes(merged.status)) throw new AppError(400, '招募進度不正確');
       if (merged.status === '已報到' && !merged.employeeId && !prev.employeeId) {
         throw new AppError(400, '尚未建立員工檔案，不能標示為已報到。請使用「報到並轉為員工」。');
@@ -902,6 +1121,98 @@ export class HrStore {
       job: packed.desiredPosition || packed.job,
     };
     return this.upsertCandidate(candidateId, Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined && v !== '')), actor);
+  }
+
+
+  async listRecruitmentPurgePlan() {
+    const cands = (await this.pool.query('SELECT id, payload, revision, created_at, updated_at FROM hr_candidates ORDER BY id')).rows;
+    const keep = cands.filter((r) => isKeptRecruitmentStatus(r.payload && r.payload.status));
+    const drop = cands.filter((r) => !isKeptRecruitmentStatus(r.payload && r.payload.status));
+    const ids = drop.map((r) => r.id);
+    const empty = {rows: []};
+    const inIds = sqlInList(ids);
+    const [events, importRows, documents, ocr] = ids.length ? await Promise.all([
+      this.pool.query('SELECT * FROM hr_recruitment_events WHERE candidate_id IN (' + inIds + ') ORDER BY id', ids),
+      this.pool.query('SELECT * FROM hr_recruitment_import_rows WHERE candidate_id IN (' + inIds + ') ORDER BY id', ids),
+      this.pool.query('SELECT id, category, relative_path, filename, employee_id, candidate_id, available FROM hr_documents WHERE candidate_id IN (' + inIds + ') ORDER BY id', ids),
+      this.pool.query('SELECT id, document_id, employee_id, candidate_id, category, status FROM hr_ocr_reviews WHERE candidate_id IN (' + inIds + ') ORDER BY id', ids),
+    ]) : [empty, empty, empty, empty];
+    return {
+      keepStatus: KEEP_RECRUITMENT_STATUS,
+      keepCount: keep.length,
+      deleteCount: drop.length,
+      keep: keep.map((r) => ({id: r.id, name: r.payload && r.payload.name, status: r.payload && r.payload.status, employeeId: r.payload && (r.payload.employeeId || r.payload.employee_id || '')})),
+      drop: drop.map((r) => ({id: r.id, payload: r.payload, revision: r.revision, created: r.created_at, updated: r.updated_at})),
+      events: events.rows,
+      importRows: importRows.rows,
+      documents: documents.rows,
+      ocrReviews: ocr.rows,
+    };
+  }
+
+  async purgeRecruitmentExceptPending(actor, {reason} = {}) {
+    const why = reason || '非待報到舊資料清除';
+    const c = await this.pool.connect();
+    try {
+      await c.query('BEGIN');
+      const cands = (await c.query('SELECT id, payload, revision, created_at, updated_at FROM hr_candidates ORDER BY id FOR UPDATE')).rows;
+      const keep = cands.filter((r) => isKeptRecruitmentStatus(r.payload && r.payload.status));
+      const drop = cands.filter((r) => !isKeptRecruitmentStatus(r.payload && r.payload.status));
+      const ids = drop.map((r) => r.id);
+      if (ids.length) {
+        const inIds = sqlInList(ids);
+        const events = (await c.query('SELECT * FROM hr_recruitment_events WHERE candidate_id IN (' + inIds + ')', ids)).rows;
+        const importRows = (await c.query('SELECT * FROM hr_recruitment_import_rows WHERE candidate_id IN (' + inIds + ')', ids)).rows;
+        const documents = (await c.query('SELECT id, category, relative_path, filename, employee_id, candidate_id FROM hr_documents WHERE candidate_id IN (' + inIds + ')', ids)).rows;
+        const ocr = (await c.query('SELECT id, document_id, employee_id, candidate_id, category, status FROM hr_ocr_reviews WHERE candidate_id IN (' + inIds + ')', ids)).rows;
+        for (const row of drop) {
+          const employeeId = (row.payload && (row.payload.employeeId || row.payload.employee_id)) || null;
+          const dependents = {
+            events: events.filter((e) => e.candidate_id === row.id).map((e) => e.id),
+            importRows: importRows.filter((e) => e.candidate_id === row.id).map((e) => e.id),
+            documents: documents.filter((e) => e.candidate_id === row.id).map((e) => ({id: e.id, path: e.relative_path, employeeId: e.employee_id})),
+            ocrReviews: ocr.filter((e) => e.candidate_id === row.id).map((e) => e.id),
+          };
+          await c.query(
+            `INSERT INTO hr_purged_candidates(id, status, employee_id, payload, dependents, reason)
+             VALUES($1,$2,$3,$4,$5,$6)
+             ON CONFLICT(id) DO UPDATE SET status=excluded.status, employee_id=excluded.employee_id, payload=excluded.payload, dependents=excluded.dependents, purged_at=now(), reason=excluded.reason`,
+            [row.id, (row.payload && row.payload.status) || '', employeeId, row.payload || {}, dependents, why]
+          );
+        }
+        // OCR first (FK to documents and candidates). Keep employee-linked reviews, just unlink the candidate.
+        await c.query('DELETE FROM hr_ocr_reviews WHERE candidate_id IN (' + inIds + ') AND employee_id IS NULL', ids);
+        await c.query('UPDATE hr_ocr_reviews SET candidate_id=NULL WHERE candidate_id IN (' + inIds + ')', ids);
+        await c.query(
+          'UPDATE hr_ocr_reviews SET document_id=NULL WHERE document_id IN (SELECT id FROM hr_documents WHERE candidate_id IN (' + inIds + ') AND employee_id IS NULL)',
+          ids
+        );
+        // Résumé links only: keep rows already bound to an employee, never delete files on disk.
+        await c.query('UPDATE hr_documents SET candidate_id=NULL WHERE candidate_id IN (' + inIds + ') AND employee_id IS NOT NULL', ids);
+        await c.query('DELETE FROM hr_documents WHERE candidate_id IN (' + inIds + ') AND employee_id IS NULL', ids);
+        await c.query('DELETE FROM hr_recruitment_events WHERE candidate_id IN (' + inIds + ')', ids);
+        await c.query('DELETE FROM hr_recruitment_import_rows WHERE candidate_id IN (' + inIds + ')', ids);
+        await c.query('DELETE FROM hr_candidates WHERE id IN (' + inIds + ')', ids);
+      }
+      await c.query(
+        `INSERT INTO hr_settings(key, value) VALUES('recruitmentReimport', $1::jsonb)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+        [JSON.stringify({skipPurged: true, purgedAt: new Date().toISOString(), deleted: ids.length, kept: keep.length, reason: why, keepStatus: KEEP_RECRUITMENT_STATUS})]
+      );
+      await this.audit(c, actor, '清除非待報到應徵者', 'recruitment', '刪除 ' + ids.length + ' 筆，保留待報到 ' + keep.length + ' 筆');
+      await c.query('COMMIT');
+      return {ok: true, keepStatus: KEEP_RECRUITMENT_STATUS, keepCount: keep.length, deleteCount: ids.length, keptIds: keep.map((r) => r.id), deletedIds: ids};
+    } catch (e) {
+      try { await c.query('ROLLBACK'); } catch {}
+      throw e;
+    } finally {
+      c.release();
+    }
+  }
+
+  async purgedCandidateIds() {
+    const r = await this.pool.query('SELECT id FROM hr_purged_candidates');
+    return new Set(r.rows.map((row) => row.id));
   }
 
   async archiveCandidate(id, actor) {

@@ -104,3 +104,18 @@
 #hr-root .cand-list{display:flex;flex-direction:column}
 #hr-root .cand-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--hr-line);cursor:pointer}
 #hr-root .kanban-item .kanban-del{margin-top:6px}
+
+#hr-root .hr-skeleton{padding:8px 0 24px}
+#hr-root .hr-skel-card,#hr-root .hr-skel-row{background:linear-gradient(90deg,#eef2f4 25%,#f7f9fa 50%,#eef2f4 75%);background-size:200% 100%;animation:hr-skel 1.2s ease-in-out infinite;border-radius:10px;margin:10px 0}
+#hr-root .hr-skel-card{height:72px}
+#hr-root .hr-skel-row{height:44px}
+@keyframes hr-skel{0%{background-position:200% 0}100%{background-position:-200% 0}}
+#hr-root .hr-form-error{color:#9d4930;font-size:14px;margin:8px 0 0;min-height:1.2em}
+#hr-root dialog.hr-dlg{display:flex;flex-direction:column;max-height:min(90vh,calc(100dvh - 24px));overflow:hidden}
+#hr-root dialog.hr-dlg form.dlg-body{display:flex;flex-direction:column;min-height:0;flex:1;padding:12px 20px 0;overflow:hidden}
+#hr-root dialog.hr-dlg .dlg-fields{overflow:auto;-webkit-overflow-scrolling:touch;flex:1;padding-bottom:8px}
+#hr-root dialog.hr-dlg .dlg-actions{position:sticky;bottom:0;flex-shrink:0;display:flex;gap:8px;background:#fff;padding:12px 0 16px;border-top:1px solid var(--hr-line);margin:0 -20px;padding-left:20px;padding-right:20px;padding-bottom:calc(16px + env(safe-area-inset-bottom,0px))}
+#hr-root dialog.hr-dlg .dlg-actions .hr-btn{min-height:44px;padding:10px 16px}
+@media(max-width:760px){
+  #hr-root dialog.hr-dlg{width:calc(100% - 16px);max-width:none;max-height:calc(100dvh - 100px);margin-bottom:76px}
+}

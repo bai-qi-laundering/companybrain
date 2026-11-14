@@ -15,8 +15,39 @@ export const DEPT_PREFIX_CHOICES = {
   洗滓: ['W', 'E'],
 };
 
-/** Standard 職稱／職缺 options. Merged with titles already in employee and candidate records. */
-export const STANDARD_JOBS = ['司機', '物流助理', '洗滌', '摺疊', '撐開', '行政', '會計', '廠務', '客服對帳'];
+/**
+ * Official 部門／職稱 from the payroll sheet「部門預設值」
+ * (spreadsheet 1DkB-tDXzO6PsUuyUE2EPO9e_7IjKYt2ZxlsUJfwdZxo), in sheet order.
+ * GAS seeds (BAIQI_ROLE_SEEDS_) are only used when that tab is first created;
+ * the live tab is the source of truth. Title dropdowns in the sheet use
+ * requireValueInList(..., true) with setAllowInvalid(true), so free text stays
+ * a fallback. 員工編號 prefixes come from the same workbook's 員工資料.
+ */
+export const STANDARD_DEPARTMENT_JOBS = [
+  ['辦公室', '行政'],
+  ['洗滌', '洗滌人員'],
+  ['摺疊', '現場作業員'],
+  ['撐開', '現場作業員'],
+  ['物流', '新進司機'],
+  ['物流', '司機'],
+  ['摺疊', '作業員'],
+  ['撐開', '作業員'],
+  ['洗滌', '早班作業員'],
+];
+export const STANDARD_DEPARTMENTS = [...new Set(STANDARD_DEPARTMENT_JOBS.map((row) => row[0]))];
+export const STANDARD_JOBS = [...new Set(STANDARD_DEPARTMENT_JOBS.map((row) => row[1]))];
+export const DEPARTMENT_JOBS = STANDARD_DEPARTMENT_JOBS.reduce((map, [dept, job]) => {
+  if (!map[dept]) map[dept] = [];
+  if (!map[dept].includes(job)) map[dept].push(job);
+  return map;
+}, {});
+
+/** Titles allowed for a department, official sheet order. Unknown depts get the full official list. */
+export function jobsForDepartment(department, extra = []) {
+  const canon = normalizeDepartment(department);
+  const official = (canon && DEPARTMENT_JOBS[canon]) ? DEPARTMENT_JOBS[canon] : STANDARD_JOBS;
+  return mergeJobTitles(official, extra);
+}
 
 export const PAY_TYPES = ['正職', '兼職'];
 export const PAYMENT_METHODS = ['匯款', '現金'];

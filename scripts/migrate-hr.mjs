@@ -17,6 +17,8 @@ const arrivalMod = await import(process.env.HR_MIGRATE_FROM_APP ? './hr-arrival.
 const {HrStore} = storeMod;
 const {hoursToDays, parsePeriod, DEFAULT_BASIS} = leaveMod;
 const {planArrivalFromInsurance, applyArrivalFill} = arrivalMod;
+const purgeMod = await import(process.env.HR_MIGRATE_FROM_APP ? './hr-purge.mjs' : '../backend/hr-purge.mjs');
+const {shouldSkipMigratedRecruitment} = purgeMod;
 
 
 function arg(name, fallback) {
@@ -175,6 +177,8 @@ const pg = await import('pg');
 const pool = new pg.default.Pool({max: 5, connectionTimeoutMillis: 10000});
 const hr = new HrStore(pool);
 await hr.ensure();
+const purgedIds = await hr.purgedCandidateIds();
+if (purgedIds.size) console.log('略過已清除的應徵者（避免舊 SQLite 再匯入）：' + purgedIds.size + ' 筆');
 
 async function skipOr(table, id, insert) {
   if (!id) return 'skip';
@@ -234,6 +238,7 @@ for (const row of data.documents) {
 
 for (const row of data.candidates) {
   const payload = parseJson(row.data, {});
+  if (shouldSkipMigratedRecruitment(row.id, row.id, purgedIds)) { result.candidates.skipped += 1; continue; }
   const exists = await pool.query('SELECT 1 FROM hr_candidates WHERE id=$1', [row.id]);
   if (exists.rowCount) result.candidates.exists += 1;
   else {
@@ -245,6 +250,7 @@ for (const row of data.candidates) {
 
 for (const row of data.recruitmentEvents) {
   const payload = parseJson(row.data, {});
+  if (shouldSkipMigratedRecruitment(row.id, row.candidate_id, purgedIds)) { result.recruitmentEvents.skipped += 1; continue; }
   const st = await skipOr('hr_recruitment_events', row.id, () => pool.query(
     'INSERT INTO hr_recruitment_events(id, candidate_id, kind, payload, created_at) VALUES($1,$2,$3,$4,COALESCE($5::timestamptz, now()))',
     [row.id, row.candidate_id, row.kind, payload, row.created || null]
@@ -253,6 +259,7 @@ for (const row of data.recruitmentEvents) {
 }
 for (const row of data.recruitmentImportRows) {
   const payload = parseJson(row.data, {});
+  if (shouldSkipMigratedRecruitment(row.id, row.candidate_id, purgedIds)) { result.recruitmentImportRows.skipped += 1; continue; }
   const st = await skipOr('hr_recruitment_import_rows', row.id, () => pool.query(
     'INSERT INTO hr_recruitment_import_rows(id, candidate_id, payload, created_at) VALUES($1,$2,$3,COALESCE($4::timestamptz, now()))',
     [row.id, row.candidate_id, payload, row.created || null]

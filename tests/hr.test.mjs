@@ -603,16 +603,143 @@ test('HR state jobTitles always include 司機 and merge stored titles', async (
   const ctx = await start();
   try {
     const before = await (await ctx.api('/api/hr/state')).json();
-    assert.ok(before.jobTitles.includes('司機'));
-    assert.ok(before.jobTitles.includes('客服對帳'));
+    assert.deepEqual(before.jobTitlesOfficial, ['行政', '洗滌人員', '現場作業員', '新進司機', '司機', '作業員', '早班作業員']);
+    for (const title of before.jobTitlesOfficial) assert.ok(before.jobTitles.includes(title));
+    assert.ok(!before.jobTitles.includes('客服對帳'));
     await ctx.api('/api/hr/employees', 'POST', {
-      id: 'EMP-JOB', name: '職稱測試', department: '洗滌', job: '現場作業員', employmentType: '正職', arrivalDate: '2026-01-01',
+      id: 'EMP-JOB', name: '職稱測試', department: '洗滌', job: '洗滌作業員', employmentType: '正職', arrivalDate: '2026-01-01',
     });
     const after = await (await ctx.api('/api/hr/state')).json();
-    assert.ok(after.jobTitles.includes('現場作業員'));
+    assert.ok(after.jobTitles.includes('洗滌作業員'));
     assert.ok(after.jobTitles.includes('司機'));
     assert.equal(after.deptPrefixes['洗滌'], 'W');
     assert.equal(after.deptPrefixes['洗滓'], 'W');
+  } finally {
+    await new Promise((r) => ctx.server.close(r));
+    await ctx.db.close();
+    await rm(ctx.docRoot, {recursive: true, force: true});
+  }
+});
+
+
+test('candidate can be created with only a name', async () => {
+  const ctx = await start();
+  try {
+    const res = await ctx.api('/api/hr/candidates', 'POST', {name: '僅姓名應徵者'});
+    assert.equal(res.status, 200);
+    const row = await res.json();
+    assert.equal(row.name, '僅姓名應徵者');
+    assert.equal(row.status, '待聯絡');
+    const missing = await ctx.api('/api/hr/candidates', 'POST', {name: '  ', phone: '0912-000-000'});
+    assert.equal(missing.status, 400);
+    const err = await missing.json();
+    assert.match(err.error, /姓名/);
+    assert.doesNotMatch(err.error, /電話/);
+  } finally {
+    await new Promise((r) => ctx.server.close(r));
+    await ctx.db.close();
+    await rm(ctx.docRoot, {recursive: true, force: true});
+  }
+});
+
+test('HR state views omit heavy collections and gzip when requested', async () => {
+  const ctx = await start();
+  try {
+    for (let i = 0; i < 8; i++) {
+      await ctx.api('/api/hr/candidates', 'POST', {id: 'R-V' + i, name: '名單' + i, phone: '09' + String(10000000 + i), department: '物流', job: '司機', status: '待聯絡'});
+      await ctx.api('/api/hr/candidates/R-V' + i + '/events', 'POST', {kind: 'phone', outcome: '未接', notes: 'x'.repeat(80)});
+    }
+    const full = await (await ctx.api('/api/hr/state')).json();
+    assert.ok(full.candidates.length >= 8);
+    assert.ok((full.recruitmentEvents || []).length >= 8);
+    assert.ok(full.jobTitles.includes('司機'));
+    assert.deepEqual(full.jobTitlesOfficial[0], '行政');
+
+    const staff = await (await ctx.api('/api/hr/state?view=staff')).json();
+    assert.equal(staff.view, 'staff');
+    assert.equal((staff.candidates || []).length, 0);
+    assert.equal((staff.recruitmentEvents || []).length, 0);
+    assert.ok(staff.jobTitles.includes('司機'));
+
+    const recruit = await (await ctx.api('/api/hr/state?view=recruitment')).json();
+    assert.equal(recruit.view, 'recruitment');
+    assert.ok(recruit.candidates.length >= 8);
+    assert.equal((recruit.recruitmentEvents || []).length, 0);
+
+    const {gunzipSync} = await import('node:zlib');
+    const raw = await new Promise((resolve, reject) => {
+      const u = new URL(ctx.url + '/api/hr/state?view=recruitment');
+      http.get({
+        hostname: u.hostname, port: u.port, path: u.pathname + u.search,
+        headers: {Origin: 'http://127.0.0.1', Cookie: ctx.cookie, 'accept-encoding': 'gzip'},
+      }, (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => resolve({status: res.statusCode, encoding: res.headers['content-encoding'], buf: Buffer.concat(chunks)}));
+      }).on('error', reject);
+    });
+    assert.equal(raw.status, 200);
+    assert.equal(raw.encoding, 'gzip');
+    const parsed = JSON.parse(gunzipSync(raw.buf).toString('utf8'));
+    assert.ok(parsed.candidates.length >= 8);
+    assert.ok(raw.buf.length < Buffer.byteLength(JSON.stringify(parsed)));
+  } finally {
+    await new Promise((r) => ctx.server.close(r));
+    await ctx.db.close();
+    await rm(ctx.docRoot, {recursive: true, force: true});
+  }
+});
+
+
+test('purge keeps only 待報到 candidates, leaves employees, and blocks migrate re-import', async () => {
+  const ctx = await start();
+  try {
+    await ctx.api('/api/hr/employees', 'POST', {
+      id: 'D900', name: '已轉員工', department: '物流', job: '司機', employmentType: '正職', arrivalDate: '2024-01-01',
+    });
+    await ctx.api('/api/hr/candidates', 'POST', {id: 'R-KEEP', name: '待報到者', department: '物流', job: '司機', status: '待報到'});
+    await ctx.api('/api/hr/candidates', 'POST', {id: 'R-DROP', name: '舊應徵', phone: '0912-000-001', department: '物流', job: '新進司機', status: '待聯絡'});
+    await ctx.api('/api/hr/candidates', 'POST', {id: 'R-HIRED', name: '已轉但非待報到', department: '物流', job: '司機', status: '已報到', employeeId: 'D900'});
+    await ctx.hr.addEvent('R-DROP', 'phone', {note: '打過電話', outcome: '未接'}, 'test');
+    await ctx.hr.pool.query(
+      'INSERT INTO hr_recruitment_import_rows(id, candidate_id, payload) VALUES($1,$2,$3)',
+      ['IMP-DROP', 'R-DROP', {source: '舊表'}]
+    );
+    await ctx.hr.pool.query(
+      `INSERT INTO hr_documents(id, category, relative_path, filename, size, mtime, available, candidate_id)
+       VALUES('DOC-DROP','resume','drop.pdf','drop.pdf',1,0,true,'R-DROP')`
+    );
+    await ctx.hr.pool.query(
+      `INSERT INTO hr_documents(id, category, relative_path, filename, size, mtime, available, employee_id, candidate_id)
+       VALUES('DOC-HIRED','resume','hired.pdf','hired.pdf',1,0,true,'D900','R-HIRED')`
+    );
+    const plan = await ctx.hr.listRecruitmentPurgePlan();
+    assert.equal(plan.keepCount, 1);
+    assert.equal(plan.deleteCount, 2);
+    assert.ok(plan.events.some((e) => e.candidate_id === 'R-DROP'));
+    assert.ok(plan.importRows.some((e) => e.id === 'IMP-DROP'));
+    const result = await ctx.hr.purgeRecruitmentExceptPending('test');
+    assert.equal(result.deleteCount, 2);
+    assert.equal(result.keepCount, 1);
+    const after = await (await ctx.api('/api/hr/state?view=recruitment')).json();
+    assert.deepEqual(after.candidates.map((c) => c.id).sort(), ['R-KEEP']);
+    assert.equal(after.candidates[0].status, '待報到');
+    assert.equal((await ctx.hr.getEmployee('D900')).name, '已轉員工');
+    const ev = await ctx.hr.pool.query("SELECT 1 FROM hr_recruitment_events WHERE candidate_id='R-DROP'");
+    assert.equal(ev.rowCount, 0);
+    const imp = await ctx.hr.pool.query("SELECT 1 FROM hr_recruitment_import_rows WHERE id='IMP-DROP'");
+    assert.equal(imp.rowCount, 0);
+    const goneDoc = await ctx.hr.pool.query("SELECT 1 FROM hr_documents WHERE id='DOC-DROP'");
+    assert.equal(goneDoc.rowCount, 0);
+    const keptDoc = await ctx.hr.pool.query("SELECT employee_id, candidate_id FROM hr_documents WHERE id='DOC-HIRED'");
+    assert.equal(keptDoc.rows[0].employee_id, 'D900');
+    assert.equal(keptDoc.rows[0].candidate_id, null);
+    const purged = await ctx.hr.purgedCandidateIds();
+    assert.ok(purged.has('R-DROP') && purged.has('R-HIRED') && !purged.has('R-KEEP'));
+    const {shouldSkipMigratedRecruitment} = await import('../backend/hr-purge.mjs');
+    assert.equal(shouldSkipMigratedRecruitment('R-DROP', 'R-DROP', purged), true);
+    assert.equal(shouldSkipMigratedRecruitment('EV1', 'R-DROP', purged), true);
+    assert.equal(shouldSkipMigratedRecruitment('R-KEEP', 'R-KEEP', purged), false);
   } finally {
     await new Promise((r) => ctx.server.close(r));
     await ctx.db.close();

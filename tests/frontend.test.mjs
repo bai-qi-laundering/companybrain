@@ -114,3 +114,18 @@ test('header search for 天車 shows 永隆五金 with a highlighted record snip
  assert(html.includes('<mark>')||html.includes('天車維修'));
  assert(!html.includes('沒有符合的對象'));
 });
+
+test('background NAS refresh leaves an open HR form alone', async () => {
+  const html = await readFile(new URL('../index.html', import.meta.url), 'utf8');
+  assert(html.includes('function syncBlocked'));
+  assert(html.includes('正在載入人事資料'));
+  assert(html.includes('if(hrOpen&&!(opts&&opts.manual))'));
+  const c = sandbox(true);
+  await new Promise((r) => setTimeout(r, 0));
+  vm.runInContext("view='staff';", c.context);
+  c.$('#content').innerHTML = '<div id="hr-root"><p id="keep">編輯中</p></div>';
+  const before = c.$('#content').innerHTML;
+  await vm.runInContext('refreshNas()', c.context);
+  assert.equal(c.$('#content').innerHTML, before);
+  assert.ok(before.includes('編輯中'));
+});

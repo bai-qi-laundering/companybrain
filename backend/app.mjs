@@ -1,5 +1,7 @@
 import {garmentNotify} from './garment-notify.mjs';
 import {readFile} from 'node:fs/promises';
+import {createHash} from 'node:crypto';
+import {sendJson} from './http-send.mjs';
 import nodePath from 'node:path';
 import {handleHr} from './hr-routes.mjs';
 import {hasPiiKey} from './hr-crypto.mjs';
@@ -11,13 +13,32 @@ export function createHandler({store,config,htmlPath,line,ai=extractDraft,queryA
  const limits=new Map(),dummyHash=hashPassword(token());
  function limit(key,max){const now=Date.now();if(limits.size>10000)for(const [k,v] of limits)if(now-v.since>60000)limits.delete(k);let v=limits.get(key);if(!v||now-v.since>60000){v={since:now,n:0};limits.set(key,v)}if(++v.n>max)throw new AppError(429,'操作太頻繁，請一分鐘後重試');}
  async function body(req){let size=0,parts=[];for await(const p of req){size+=p.length;if(size>3*1024*1024)throw new AppError(413,'資料太大，請分批處理');parts.push(p)}try{return JSON.parse(Buffer.concat(parts).toString('utf8'))}catch{throw new AppError(400,'請提供有效的 JSON')}}
- return async(req,res)=>{res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','same-origin');res.setHeader('X-Frame-Options','DENY');res.setHeader('Cache-Control','no-store');res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");const send=(status,data)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(data))};
+ return async(req,res)=>{res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','same-origin');res.setHeader('X-Frame-Options','DENY');res.setHeader('Cache-Control','no-store');res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");const send=(status,data)=>sendJson(res,status,data,req);
  try{const path=new URL(req.url,'http://localhost').pathname;
  if(req.method==='POST'&&path==='/api/line/webhook'){if(!line)throw new AppError(503,'LINE 尚未設定');return send(200,await line.webhook(req));}
  if(req.method==='POST'&&path==='/api/garment/notify'){if(!line)throw new AppError(503,'LINE 尚未設定');return send(202,await garmentNotify(req,{line,config}));}
  if(req.method==='GET'&&path==='/api/health'){await store.health();return send(200,{ok:true,service:'companybrain-api'})}
- if(req.method==='GET'&&['/','/index.html'].includes(path)){res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});res.end((await readFile(htmlPath,'utf8')).replace('</head>','<meta name="companybrain-runtime" content="nas"></head>'));return}
- if(req.method==='GET'&&publicDir&&['/hr-app.js','/hr.css'].includes(path)){const file=nodePath.join(publicDir,path.slice(1));const type=path.endsWith('.css')?'text/css; charset=utf-8':'application/javascript; charset=utf-8';res.writeHead(200,{'Content-Type':type,'Cache-Control':'no-store'});res.end(await readFile(file));return}
+ if(req.method==='GET'&&['/','/index.html'].includes(path)){
+  let html=await readFile(htmlPath,'utf8');
+  if(publicDir){
+    try{
+      const js=await readFile(nodePath.join(publicDir,'hr-app.js'));
+      const css=await readFile(nodePath.join(publicDir,'hr.css'));
+      const ver=createHash('sha1').update(js).update(css).digest('hex').slice(0,10);
+      html=html.replaceAll('href="/hr.css"','href="/hr.css?v='+ver+'"').replaceAll('src="/hr-app.js"','src="/hr-app.js?v='+ver+'"');
+    }catch{}
+  }
+  res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store'});
+  res.end(html.replace('</head>','<meta name="companybrain-runtime" content="nas"></head>'));
+  return}
+ if(req.method==='GET'&&publicDir&&['/hr-app.js','/hr.css'].includes(path)){
+  const file=nodePath.join(publicDir,path.slice(1));
+  const type=path.endsWith('.css')?'text/css; charset=utf-8':'application/javascript; charset=utf-8';
+  const versioned=new URL(req.url,'http://localhost').searchParams.has('v');
+  res.setHeader('Cache-Control', versioned?'public, max-age=31536000, immutable':'no-store');
+  res.writeHead(200,{'Content-Type':type});
+  res.end(await readFile(file));
+  return}
  if(!path.startsWith('/api/'))throw new AppError(404,'找不到頁面');
  if(!['GET','HEAD'].includes(req.method)&&req.headers.origin!==config.origin)throw new AppError(403,'網址不符，請檢查 NAS 的 PUBLIC_ORIGIN');
  if(req.method==='POST'&&path==='/api/login'){limit('login:'+req.socket.remoteAddress,8);const b=await body(req),name=requireText(b.username,'帳號',100),password=requireText(b.password,'密碼',200);const user=await store.user(name);const valid=verifyPassword(password,user?.password_hash||dummyHash);if(!user||!valid)throw new AppError(401,'帳號或密碼錯誤');const raw=token(),csrf=token();await store.addSession(digest(raw),name,csrf);res.setHeader('Set-Cookie',sessionCookie(raw,config.secure));return send(200,{username:name,csrf})}
