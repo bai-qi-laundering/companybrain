@@ -36,9 +36,10 @@ export function leftIdentityPath() {
   return process.env.NAS_IDENTITY_LEFT_PATH || '';
 }
 
-/** Primary write folder first, then the 離職 identity/license sibling if configured. */
+/** Primary write folder first, then the other 在職 identity/license folder, then 離職. */
 export function folderRoots(category) {
-  const primary = folderConfig()[category] || '';
+  const folders = folderConfig();
+  const primary = folders[category] || '';
   const roots = [];
   const add = (root) => {
     if (!root) return;
@@ -46,7 +47,11 @@ export function folderRoots(category) {
     if (!roots.some((r) => path.resolve(r) === key)) roots.push(root);
   };
   add(primary);
-  if (category === 'identity' || category === 'license') add(leftIdentityPath());
+  if (category === 'identity' || category === 'license') {
+    add(folders.identity);
+    add(folders.license);
+    add(leftIdentityPath());
+  }
   return roots;
 }
 

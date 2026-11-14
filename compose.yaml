@@ -54,10 +54,12 @@ services:
       NAS_LICENSE_PATH: ${NAS_LICENSE_PATH:-${NAS_IDENTITY_PATH}}
       NAS_RESUME_PATH: ${NAS_RESUME_PATH}
       NAS_IDENTITY_LEFT_PATH: ${NAS_IDENTITY_LEFT_PATH}
-    # Bind each unique host path once (身分證 and 駕照 may share one folder).
-    # If 駕照 is a separate folder, add a third bind for NAS_LICENSE_PATH in a compose override.
+    # Bind 身分證 and 駕照 separately when they live in different folders.
+    # If they still share one folder, set NAS_LICENSE_PATH to the same path as NAS_IDENTITY_PATH
+    # and omit a duplicate bind by keeping this list unique at deploy time.
     volumes:
       - ${NAS_IDENTITY_PATH}:${NAS_IDENTITY_PATH}
+      - ${NAS_LICENSE_PATH}:${NAS_LICENSE_PATH}
       - ${NAS_BANK_PATH}:${NAS_BANK_PATH}
       - ${NAS_RESUME_PATH}:${NAS_RESUME_PATH}
       - ${NAS_IDENTITY_LEFT_PATH}:${NAS_IDENTITY_LEFT_PATH}

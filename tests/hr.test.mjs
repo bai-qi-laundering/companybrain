@@ -557,6 +557,48 @@ test('identity and license records resolve from the 離職 sibling folder withou
   }
 });
 
+test('identity and license resolve across split 在職 folders and the 離職 sibling', async () => {
+  const ctx = await start();
+  try {
+    const identityDir = process.env.NAS_IDENTITY_PATH;
+    const licenseDir = process.env.NAS_LICENSE_PATH;
+    const left = process.env.NAS_IDENTITY_LEFT_PATH;
+    assert.notEqual(path.resolve(identityDir), path.resolve(licenseDir));
+    await writeFile(path.join(identityDir, 'id-in-id.jpg'), Buffer.from('id-primary'));
+    await writeFile(path.join(licenseDir, 'lic-in-lic.jpg'), Buffer.from('lic-primary'));
+    await writeFile(path.join(identityDir, 'lic-still-in-id.jpg'), Buffer.from('lic-in-identity-folder'));
+    await writeFile(path.join(licenseDir, 'id-still-in-lic.jpg'), Buffer.from('id-in-license-folder'));
+    await writeFile(path.join(left, 'left-only.jpg'), Buffer.from('left-only'));
+    const rows = [
+      {id: 'D-split-id', category: 'identity', relativePath: 'id-in-id.jpg', filename: 'id-in-id.jpg'},
+      {id: 'D-split-lic', category: 'license', relativePath: 'lic-in-lic.jpg', filename: 'lic-in-lic.jpg'},
+      {id: 'D-split-lic-cross', category: 'license', relativePath: 'lic-still-in-id.jpg', filename: 'lic-still-in-id.jpg'},
+      {id: 'D-split-id-cross', category: 'identity', relativePath: 'id-still-in-lic.jpg', filename: 'id-still-in-lic.jpg'},
+      {id: 'D-split-left', category: 'identity', relativePath: 'left-only.jpg', filename: 'left-only.jpg'},
+    ];
+    for (const row of rows) {
+      await ctx.hr.insertDocument({...row, size: 10, mtime: Date.now(), available: false}, null);
+    }
+    const state = await (await ctx.api('/api/hr/state')).json();
+    for (const row of rows) {
+      const doc = state.documents.find((d) => d.id === row.id);
+      assert.equal(doc?.available, true, row.id);
+    }
+    const {folderRoots, resolveDocFile} = await import('../backend/hr-docs.mjs');
+    const roots = folderRoots('license');
+    assert.ok(roots.some((r) => path.resolve(r) === path.resolve(identityDir)));
+    assert.ok(roots.some((r) => path.resolve(r) === path.resolve(licenseDir)));
+    assert.ok(roots.some((r) => path.resolve(r) === path.resolve(left)));
+    const crossed = await resolveDocFile('license', 'lic-still-in-id.jpg');
+    assert.ok(crossed && path.resolve(crossed.root) === path.resolve(identityDir));
+  } finally {
+    await new Promise((r) => ctx.server.close(r));
+    await ctx.db.close();
+    await rm(ctx.docRoot, {recursive: true, force: true});
+  }
+});
+
+
 test('HR state jobTitles always include 司機 and merge stored titles', async () => {
   const ctx = await start();
   try {
