@@ -1,9 +1,10 @@
 import {parseTaskCommand} from './tasks.mjs';
-import {cameraDestination,cameraImageMessages} from './camera-routing.mjs';
 import {createHmac,timingSafeEqual,createHash,randomUUID} from 'node:crypto';
 import {AppError,validateState,normalizeDraft,taskHistory} from './domain.mjs';
 import {AssistantStore} from './assistant-store.mjs';
 import {understand,describeMedia,answerQuestion,expirySummary,expiryText,taipeiDay,taipeiHour} from './assistant.mjs';
+function cameraDestination(raw){const value=String(raw||'').normalize('NFKC').trim().replace(/\s+/g,'');if(!value||value.length>80)return null;const hotel=value.replace(/(?:制服|客衣)$/u,'');if(!hotel||hotel.length>40||!(/^[\p{L}\p{N}_-]+$/u.test(hotel)))return null;return {hotel,label:value};}
+function cameraImageMessages(url,label){const parsed=new URL(url);if(parsed.protocol!=='https:')throw new AppError(400,'照片網址必須使用 HTTPS');return [{type:'text',text:'📷 '+label},{type:'image',originalContentUrl:parsed.href,previewImageUrl:parsed.href}];}
 const digest=s=>createHash('sha256').update(s).digest('hex');
 export function validSignature(raw,signature,secret){if(!secret||typeof signature!=='string')return false;const a=Buffer.from(createHmac('sha256',secret).update(raw).digest('base64')),b=Buffer.from(signature);return a.length===b.length&&timingSafeEqual(a,b);}
 export function stripTextUrls(text){return String(text||'').replace(/\[([^\]]+)\]\(https?:\/\/[^)]+\)/g,'$1').replace(/https?:\/\/[^\s]+/g,'').replace(/\n{3,}/g,'\n\n').trim()}
@@ -53,7 +54,7 @@ export function createLineService({store,config,ai=understand,mediaAI=describeMe
   const groupId=await db.cameraGroup(destination.hotel);
   if(!groupId)throw new AppError(409,'尚未綁定飯店群組：'+destination.hotel);
   const response=await callLine('push',{to:groupId,messages:cameraImageMessages(url,destination.label)},id);
-  if(!response.ok&&response.status!==409)throw new AppError(502,'LINE 照片傳送失敗：HTTP '+response.status);
+  if(!response.ok&&!(response.status===409&&response.headers.get('x-line-accepted-request-id')))throw new AppError(502,'LINE 照片傳送失敗：HTTP '+response.status);
   return {ok:true,hotel:destination.hotel,label:destination.label};
  }
  async function callLine(path,data,retryKey){const r=await fetchImpl('https://api.line.me/v2/bot/message/'+path,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+config.lineToken,...(retryKey?{'X-Line-Retry-Key':retryKey}:{})},body:JSON.stringify(data),signal:AbortSignal.timeout(10000)});return r;}
