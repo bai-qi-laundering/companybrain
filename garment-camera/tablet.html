@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f8a42">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="客衣拍照">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <title>客衣拍照確認</title>
+  <style>
+    :root { --bg:#102116; --card:#1a2c1f; --text:#f4fff6; --muted:#b7d0bc; --pre:#0f8a42; --post:#1d6aa2; --flash:#39e07a; }
+    * { box-sizing:border-box; }
+    html,body { margin:0; min-height:100%; background:var(--bg); color:var(--text); font-family:"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif; }
+    body { padding:24px; }
+    body.flash { background:var(--flash); }
+    h1 { margin:0 0 8px; font-size:28px; }
+    .sub { color:var(--muted); margin-bottom:20px; }
+    .mode { display:flex; gap:16px; }
+    button.stage { flex:1; min-height:120px; border:0; border-radius:20px; font-size:42px; font-weight:700; color:#fff; opacity:.55; }
+    button.stage.on { opacity:1; box-shadow:0 0 0 6px rgba(255,255,255,.25); }
+    button[data-stage="洗前"] { background:var(--pre); }
+    button[data-stage="洗後"] { background:var(--post); }
+    #banner { margin:20px 0; padding:18px 20px; border-radius:16px; background:var(--card); font-size:22px; min-height:64px; }
+    #banner.ok { background:var(--pre); color:#fff; }
+    h2 { font-size:20px; margin:24px 0 12px; }
+    .list { display:grid; gap:10px; }
+    .item { display:flex; gap:12px; align-items:center; background:var(--card); border-radius:14px; padding:10px 14px; }
+    .item img { width:72px; height:54px; object-fit:cover; border-radius:8px; background:#000; }
+    .item .meta { flex:1; }
+    .item .label { font-size:20px; }
+    .item .when { color:var(--muted); font-size:14px; }
+    .hint { color:var(--muted); font-size:14px; margin-top:16px; }
+  </style>
+</head>
+<body>
+  <h1>客衣拍照確認</h1>
+  <div class="sub">監視器掃到 QR 後會依目前模式存成待傳照片，不會立刻推播 LINE。</div>
+  <div class="mode">
+    <button class="stage" data-stage="洗前" type="button">洗前</button>
+    <button class="stage" data-stage="洗後" type="button">洗後</button>
+  </div>
+  <div id="banner">目前模式：載入中…</div>
+  <h2>最近拍照</h2>
+  <div class="list" id="recent"></div>
+  <p class="hint">請把這個頁面加入主畫面，並保持開啟。第一次點模式按鈕會啟用提示音，並嘗試保持螢幕常亮。</p>
+  <script>
+    const banner = document.getElementById('banner');
+    const recentEl = document.getElementById('recent');
+    let stage = '';
+    let lastId = 0;
+    let audioCtx = null;
+
+    function unlockAudio() {
+      if (audioCtx) return;
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      audioCtx = new Ctx();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+    }
+
+    function beep() {
+      if (!audioCtx) return;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.2, audioCtx.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.25);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.26);
+    }
+
+    async function keepAwake() {
+      try { if (navigator.wakeLock) await navigator.wakeLock.request('screen'); } catch (e) {}
+    }
+
+    function renderStage(next) {
+      stage = next;
+      document.querySelectorAll('button.stage').forEach(btn => {
+        btn.classList.toggle('on', btn.dataset.stage === stage);
+      });
+      if (!banner.classList.contains('ok')) banner.textContent = '目前模式：' + stage;
+    }
+
+    function renderRecent(items) {
+      const rows = (items || []).slice().reverse();
+      recentEl.innerHTML = rows.length ? rows.map(item => {
+        const src = item.photo ? '/photos/' + encodeURIComponent(item.photo) : '';
+        const status = item.status === 'stored' ? '已上傳' : '排隊中';
+        return '<div class="item">' +
+          (src ? '<img src="'+src+'" alt="">' : '') +
+          '<div class="meta"><div class="label">'+escapeHtml(item.stage||'')+'　'+escapeHtml(item.label||'')+'</div>' +
+          '<div class="when">'+escapeHtml(item.at||'')+'　'+status+'</div></div></div>';
+      }).join('') : '<div class="item"><div class="meta">還沒有拍照紀錄。</div></div>';
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    }
+
+    function flash(item) {
+      if (item && item.id && item.id === lastId) return;
+      if (item && item.id) lastId = item.id;
+      document.body.classList.add('flash');
+      banner.classList.add('ok');
+      banner.textContent = '已拍照：' + (item && item.stage ? item.stage + '　' : '') + (item && item.label ? item.label : '');
+      beep();
+      setTimeout(() => {
+        document.body.classList.remove('flash');
+        banner.classList.remove('ok');
+        renderStage(stage);
+      }, 1500);
+    }
+
+    async function apply(data, isCapture) {
+      if (data.stage) renderStage(data.stage);
+      if (data.recent) renderRecent(data.recent);
+      if (isCapture || data.type === 'capture') flash(data);
+    }
+
+    async function refresh() {
+      const res = await fetch('/api/status', {cache:'no-store'});
+      const data = await res.json();
+      const newest = (data.recent || []).at(-1);
+      const isNew = newest && newest.id && newest.id !== lastId && lastId !== 0;
+      if (!lastId && newest && newest.id) lastId = newest.id;
+      await apply(data, isNew);
+      if (isNew && newest) lastId = newest.id;
+    }
+
+    async function choose(next) {
+      unlockAudio();
+      keepAwake();
+      const res = await fetch('/api/stage', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({stage:next})});
+      const data = await res.json();
+      if (data.stage) renderStage(data.stage);
+    }
+
+    document.querySelectorAll('button.stage').forEach(btn => {
+      btn.addEventListener('click', () => choose(btn.dataset.stage));
+    });
+    document.addEventListener('click', () => { unlockAudio(); keepAwake(); }, {once:false});
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) keepAwake(); });
+    keepAwake();
+    refresh().catch(() => { banner.textContent = '無法連到確認頁服務，請檢查平板是否在同一區網。'; });
+    setInterval(() => refresh().catch(() => {}), 2000);
+    try {
+      const events = new EventSource('/api/events');
+      events.onmessage = ev => {
+        const data = JSON.parse(ev.data);
+        apply(data, data.type === 'capture');
+      };
+    } catch (e) {}
+  </script>
+</body>
+</html>
