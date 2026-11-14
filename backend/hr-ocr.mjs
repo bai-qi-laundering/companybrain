@@ -28,6 +28,22 @@ const ID_SCHEMA = {
   },
   required: ['nationalId', 'name', 'birthDate', 'warnings'],
 };
+const RESUME_SCHEMA = {
+  type: 'object',
+  properties: {
+    name: {type: ['string', 'null']},
+    phone: {type: ['string', 'null']},
+    birthDate: {type: ['string', 'null']},
+    nationalId: {type: ['string', 'null']},
+    address: {type: ['string', 'null']},
+    education: {type: ['string', 'null']},
+    experience: {type: ['string', 'null']},
+    desiredPosition: {type: ['string', 'null']},
+    warnings: {type: 'array', items: {type: 'string'}},
+  },
+  required: ['name', 'phone', 'birthDate', 'nationalId', 'address', 'education', 'experience', 'desiredPosition', 'warnings'],
+};
+
 
 export function geminiReady(config) {
   return Boolean(config?.key && config.key !== 'PASTE_YOUR_KEY_HERE');
@@ -46,10 +62,12 @@ export async function extractFromFile({absPath, category, filename, mime, config
     {inlineData: {mimeType: mimeOf(filename, mime), data: buf.toString('base64')}},
     {text: category === 'bank'
       ? '這是台灣存摺或帳戶資料頁的影像或 PDF。請只讀出畫面上看得到的銀行代碼（3位）、分行名稱、帳號、戶名。看不清楚的欄位填 null，不要臆測。warnings 列出無法辨識或模糊的項目。'
-      : '這是台灣身分證影像或 PDF。請只讀出畫面上看得到的身分證字號、姓名、出生年月日（YYYY-MM-DD）。看不清楚的欄位填 null，不要臆測。warnings 列出無法辨識或模糊的項目。'},
+      : category === 'resume'
+        ? '這是台灣履歷表（影像或 PDF）。請只讀出畫面上看得到的姓名、電話、出生年月日（YYYY-MM-DD）、身分證字號（若有）、住址、學歷、工作經歷、希望職缺或應徵職稱。看不清楚或沒有的欄位填 null，不要臆測。warnings 列出無法辨識或模糊的項目。'
+        : '這是台灣身分證影像或 PDF。請只讀出畫面上看得到的身分證字號、姓名、出生年月日（YYYY-MM-DD）。看不清楚的欄位填 null，不要臆測。warnings 列出無法辨識或模糊的項目。'},
   ];
-  const system = '你是證件辨識助手，使用繁體中文。只擷取影像中實際可見的文字，不得補造帳號、身分證字號或姓名。回傳指定 JSON。';
-  const schema = category === 'bank' ? BANK_SCHEMA : ID_SCHEMA;
+  const system = '你是證件與履歷辨識助手，使用繁體中文。只擷取影像中實際可見的文字，不得補造帳號、身分證字號、電話或姓名。回傳指定 JSON。';
+  const schema = category === 'bank' ? BANK_SCHEMA : category === 'resume' ? RESUME_SCHEMA : ID_SCHEMA;
   const raw = await generateJson({system, parts, schema, key: config.key, model: config.model || 'gemini-3.1-flash-lite'});
   return normalizeExtract(category, raw);
 }
@@ -62,6 +80,23 @@ export function normalizeExtract(category, raw = {}) {
       account: String(raw.account || '').replace(/[^\d-]/g, '').slice(0, 32),
       accountName: String(raw.accountName || '').slice(0, 80),
       warnings: Array.isArray(raw.warnings) ? raw.warnings.map((w) => String(w).slice(0, 200)) : [],
+    };
+  }
+  if (category === 'resume') {
+    const nationalId = normalizeTaiwanId(raw.nationalId || '');
+    const birth = String(raw.birthDate || '').replace(/\//g, '-').slice(0, 10);
+    const warnings = Array.isArray(raw.warnings) ? raw.warnings.map((w) => String(w).slice(0, 200)) : [];
+    if (nationalId && !isValidTaiwanId(nationalId)) warnings.push('身分證字號檢查碼不正確，請核對後再確認');
+    return {
+      name: String(raw.name || '').slice(0, 80),
+      phone: String(raw.phone || '').slice(0, 40),
+      birthDate: /^\d{4}-\d{2}-\d{2}$/.test(birth) ? birth : '',
+      nationalId,
+      address: String(raw.address || '').slice(0, 200),
+      education: String(raw.education || '').slice(0, 2000),
+      experience: String(raw.experience || '').slice(0, 4000),
+      desiredPosition: String(raw.desiredPosition || '').slice(0, 80),
+      warnings,
     };
   }
   const nationalId = normalizeTaiwanId(raw.nationalId || '');
@@ -112,6 +147,21 @@ export function packConfirmed(category, fields) {
       accountEnc: encryptSecret(account),
     };
   }
+  if (category === 'resume') {
+    const nationalId = fields.nationalId ? normalizeTaiwanId(fields.nationalId) : '';
+    if (nationalId && !isValidTaiwanId(nationalId)) throw new AppError(400, '身分證字號檢查碼不正確');
+    const birth = String(fields.birthDate || '').replace(/\//g, '-').slice(0, 10);
+    return {
+      name: String(fields.name || fields.nationalName || '').slice(0, 80),
+      phone: String(fields.phone || '').slice(0, 40),
+      birthDate: /^\d{4}-\d{2}-\d{2}$/.test(birth) ? birth : '',
+      nationalId,
+      address: String(fields.address || '').slice(0, 200),
+      education: String(fields.education || '').slice(0, 2000),
+      experience: String(fields.experience || '').slice(0, 4000),
+      desiredPosition: String(fields.desiredPosition || fields.job || '').slice(0, 80),
+    };
+  }
   const nationalId = normalizeTaiwanId(fields.nationalId);
   if (!nationalId) throw new AppError(400, '請填身分證字號後再確認');
   if (!isValidTaiwanId(nationalId)) throw new AppError(400, '身分證字號檢查碼不正確');
@@ -128,12 +178,12 @@ export function packConfirmed(category, fields) {
 export {decryptSecret, hasPiiKey, last4, isValidTaiwanId};
 
 export async function runAfterUpload({hr, row, dest, category, config, extract, actor}) {
-  if (category !== 'bank' && category !== 'identity') return {skipped: 'not-applicable'};
+  if (category !== 'bank' && category !== 'identity' && category !== 'resume') return {skipped: 'not-applicable'};
   try {
     const extracted = await extractFromFile({absPath: dest, category, filename: row.filename, config, extract});
     if (extracted?.skipped) return extracted;
     const review = await hr.insertOcrReview({
-      documentId: row.id, employeeId: row.employeeId, category, extracted, status: 'pending',
+      documentId: row.id, employeeId: row.employeeId, candidateId: row.candidateId, category, extracted, status: 'pending',
     }, actor);
     return {review, extracted: review.extracted};
   } catch (e) {
@@ -182,7 +232,7 @@ export async function batchScanDocuments({hr, config, extract, actor, categories
         continue;
       }
       const review = await hr.insertOcrReview({
-        documentId: doc.id, employeeId: doc.employeeId, category: doc.category, extracted, status: 'pending',
+        documentId: doc.id, employeeId: doc.employeeId, candidateId: doc.candidateId, category: doc.category, extracted, status: 'pending',
       }, actor);
       pending += 1;
       reviews.push({id: review.id, employeeId: review.employeeId, documentId: doc.id, filename: doc.filename, category: doc.category});

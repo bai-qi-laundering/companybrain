@@ -13,15 +13,16 @@ export const MIMES = {
   'image/webp': '.webp',
   'application/pdf': '.pdf',
 };
-export const SCAN_NAME = /^[A-Z0-9_-]+_.+_(身分證|存摺|駕照)_\d{8}T\d{6}_[a-f0-9]{12}\.[a-zA-Z]+$/;
+export const SCAN_NAME = /^[A-Z0-9_-]+_.+_(身分證|存摺|駕照|履歷表)_\d{8}T\d{6}_[a-f0-9]{12}\.[a-zA-Z]+$/;
 
-const LABEL_TO_CAT = {身分證: 'identity', 存摺: 'bank', 駕照: 'license'};
+const LABEL_TO_CAT = {身分證: 'identity', 存摺: 'bank', 駕照: 'license', 履歷表: 'resume'};
 
 export function folderConfig() {
   return {
     identity: process.env.NAS_IDENTITY_PATH || '',
     bank: process.env.NAS_BANK_PATH || '',
     license: process.env.NAS_LICENSE_PATH || '',
+    resume: process.env.NAS_RESUME_PATH || '',
   };
 }
 

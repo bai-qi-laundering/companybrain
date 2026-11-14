@@ -1,9 +1,11 @@
 (() => {
-  const STATUSES = ['待聯絡', '待面試', '待回覆', '錄取', '待報到', '已報到', '未錄取', '放棄'];
+  const STATUSES = ['待聯絡', '待面試', '待回覆', '錄取', '待報到', '已報到', '未錄取', '放棄', '未回覆', '未到面試', '未報到'];
   const OPEN = ['待聯絡', '待面試', '待回覆', '錄取', '待報到'];
-  const DOC = {identity: '身分證', bank: '存摺', license: '駕照'};
-  const PHONE = ['已接通', '未接', '忙線', '停話／錯號', '婉拒', '約定面試', '待回覆'];
-  const INTERVIEW = ['已面試', '未到場', '改期', '錄取', '未錄取', '待回覆'];
+  const CLOSED = ['未回覆', '未到面試', '未報到', '未錄取', '放棄', '已報到'];
+  const QUICK_STATUSES = ['未回覆', '未到面試', '未報到'];
+  const DOC = {identity: '身分證', bank: '存摺', license: '駕照', resume: '履歷表'};
+  const PHONE = ['已接通', '未接', '忙線', '停話／錯號', '婉拒', '約定面試', '待回覆', '未回覆'];
+  const INTERVIEW = ['已面試', '未到場', '未到面試', '改期', '錄取', '未錄取', '待回覆'];
   const TYPES = ['正職', '時薪', '兼職'];
   const PAY_TYPES = ['正職', '兼職'];
   const PAY_METHODS = ['匯款', '現金'];
@@ -272,8 +274,25 @@
       const id = body.employeeId || nextEmpId(body.department || (state.candidates.find((x)=>x.id===m[1])||{}).department, body.prefix);
       const employee = {id, name: c.name, department: body.department || c.department, job: body.job || c.job, employmentType: body.employmentType || '正職', payType: body.payType || (body.employmentType === '兼職' || body.employmentType === '時薪' ? '兼職' : '正職'), paymentMethod: body.paymentMethod || '匯款', arrivalDate: body.arrivalDate || c.availableDate || today(), departureDate: '', phone: body.phone || c.phone, emergencyContact: '', paperLocation: '', notes: '由徵人資料轉入；招募歷程保留於徵人頁。', lineBound: '', lineId: body.lineId || ''};
       state.employees.push(employee);
+      employee.address = c.address || '';
+      employee.education = c.education || '';
+      employee.experience = c.experience || '';
+      employee.notes = c.notes ? ('由徵人資料轉入。' + c.notes) : '由徵人資料轉入；招募歷程保留於徵人頁。';
+      if (c.birthDate || c.nationalId) {
+        employee.pii = Object.assign({}, employee.pii || {}, {birthDate: c.birthDate || '', nationalId: c.nationalId || '', nationalIdMask: c.nationalIdMask || ''});
+      }
+      (state.documents || []).forEach((d) => {
+        if (d.candidateId === c.id && !d.employeeId) d.employeeId = id;
+      });
       c.employeeId = id; c.status = '已報到'; c.followupDate = '';
       saveDemo(); return {employee, candidate: c};
+    }
+    if ((m = path.match(/^\/api\/hr\/candidates\/([^/]+)$/)) && method === 'DELETE') {
+      const c = state.candidates.find((x) => x.id === m[1]);
+      if (!c) throw new Error('找不到應徵者');
+      c.archived = true;
+      c.archivedAt = new Date().toISOString();
+      saveDemo(); return c;
     }
     if (path === '/api/hr/goals' && method === 'POST') {
       let g = state.recruitmentGoals.find((x) => x.department === body.department);
@@ -352,8 +371,23 @@
         const idn = String(body.nationalId || '').toUpperCase();
         emp.pii = Object.assign({}, emp.pii || {}, {nationalId: idn, nationalIdMask: idn ? (idn[0] + '****' + idn.slice(-4)) : '', nationalName: body.name || '', birthDate: body.birthDate || ''});
       }
+      const cand = state.candidates.find((x) => x.id === r.candidateId);
+      if (cand && r.category === 'resume') {
+        if (body.name) cand.name = body.name;
+        if (body.phone) cand.phone = body.phone;
+        if (body.birthDate) cand.birthDate = body.birthDate;
+        if (body.nationalId) {
+          const idn = String(body.nationalId).toUpperCase();
+          cand.nationalId = idn;
+          cand.nationalIdMask = idn ? (idn[0] + '****' + idn.slice(-4)) : '';
+        }
+        if (body.address) cand.address = body.address;
+        if (body.education) cand.education = body.education;
+        if (body.experience) cand.experience = body.experience;
+        if (body.desiredPosition || body.job) cand.job = body.desiredPosition || body.job;
+      }
       saveDemo();
-      return {review: r, pii: emp && emp.pii};
+      return {review: r, pii: emp && emp.pii, candidate: cand};
     }
     if ((m = path.match(/^\/api\/hr\/ocr-reviews\/([^/]+)\/dismiss$/)) && method === 'POST') {
       const r = (state.ocrReviews || []).find((x) => x.id === m[1]);
@@ -412,11 +446,12 @@
 
   }
 
-  async function uploadFile(employeeId, category, file, expiresOn) {
+  async function uploadFile(employeeId, category, file, expiresOn, opts = {}) {
     if (!demo && ctx.api) {
       const fd = new FormData();
       fd.append('file', file);
-      fd.append('employeeId', employeeId);
+      if (opts.candidateId) fd.append('candidateId', opts.candidateId);
+      else if (employeeId) fd.append('employeeId', employeeId);
       fd.append('category', category);
       if (expiresOn) fd.append('expiresOn', expiresOn);
       const r = await fetch('/api/hr/documents/upload', {method: 'POST', credentials: 'same-origin', headers: ctx.csrf ? {'X-CSRF-Token': ctx.csrf} : {}, body: fd});
@@ -424,7 +459,7 @@
       if (!r.ok) throw new Error(result.error || '上傳失敗');
       return result;
     }
-    const emp = state.employees.find((e) => e.id === employeeId);
+    const emp = state.employees.find((e) => e.id === employeeId) || state.candidates.find((e) => e.id === (opts.candidateId || employeeId));
     const safe = (emp?.name || '未命名').replace(/[^\w\u3400-\u9fff-]/g, '_').slice(0, 60);
     const ext = (file.name.match(/\.[a-zA-Z0-9]+$/) || ['.jpg'])[0];
     const stamp = new Date();
@@ -433,9 +468,9 @@
     const ts = `${taipei.getFullYear()}${pad(taipei.getMonth() + 1)}${pad(taipei.getDate())}T${pad(taipei.getHours())}${pad(taipei.getMinutes())}${pad(taipei.getSeconds())}`;
     const token = Array.from(crypto.getRandomValues(new Uint8Array(6))).map((b) => b.toString(16).padStart(2, '0')).join('');
     const filename = `${employeeId}_${safe}_${DOC[category]}_${ts}_${token}${ext}`;
-    const folder = {identity: '/volume1/人事資料/身分證', bank: '/volume1/人事資料/存摺', license: '/volume1/人事資料/駕照'}[category];
+    const folder = {identity: '/volume1/人事資料/身分證', bank: '/volume1/人事資料/存摺', license: '/volume1/人事資料/駕照', resume: '/volume1/共用資料匣/履歷表'}[category];
     const displayPath = folder + '/' + filename;
-    const row = {id: 'D-' + Date.now(), category, filename, relativePath: filename, employeeId, size: file.size, mtime: Date.now(), available: true, suggestions: [], expiresOn: expiresOn || '', displayPath, path: displayPath};
+    const row = {id: 'D-' + Date.now(), category, filename, relativePath: filename, employeeId: opts.candidateId ? '' : employeeId, candidateId: opts.candidateId || '', size: file.size, mtime: Date.now(), available: true, suggestions: [], expiresOn: expiresOn || '', displayPath, path: displayPath};
     state.documents.push(row); saveDemo();
     return row;
   }
@@ -474,8 +509,8 @@
     demo = !ctx.nasMode;
     refresh().then(() => {
       const t = today();
-      const follow = state.candidates.filter((c) => OPEN.includes(c.status) && c.followupDate === t);
-      const overdue = state.candidates.filter((c) => OPEN.includes(c.status) && c.followupDate && c.followupDate < t);
+      const follow = visibleCands().filter((c) => OPEN.includes(c.status) && c.followupDate === t);
+      const overdue = visibleCands().filter((c) => OPEN.includes(c.status) && c.followupDate && c.followupDate < t);
       const exp = expirySoon();
       const onboard = state.employees.filter((e) => e.arrivalDate && e.arrivalDate >= t && missingPaper(e).length);
       const leaveSoon = state.leaveExpiryReminders || leaveReminders();
@@ -545,6 +580,9 @@
               ${field('paperLocation', '紙本位置', e.paperLocation)}${field('lineId', 'LINE ID', e.lineId)}
               ${field('lineBound', 'LINE 綁定狀態', e.lineBound)}
               ${field('birthDate', '出生年月日', (e.pii && e.pii.birthDate) || '', 'date')}${field('nationalId', '身分證字號', (e.pii && e.pii.nationalId) || '')}
+              ${field('address', '住址', e.address || '')}
+              <div class="field" style="grid-column:1/-1"><span>學歷</span><textarea name="education">${esc(e.education || '')}</textarea></div>
+              <div class="field" style="grid-column:1/-1"><span>經歷</span><textarea name="experience">${esc(e.experience || '')}</textarea></div>
               <div class="field" style="grid-column:1/-1"><span>備註</span><textarea name="notes">${esc(e.notes)}</textarea></div>
               <div style="grid-column:1/-1"><button class="hr-btn" type="submit">儲存基本資料</button></div>
             </form>
@@ -570,7 +608,7 @@
           <section class="hr-card">
             <h2 class="section-title">證件文件</h2>
             <p class="muted">在這上傳就會自動綁到這位員工，檔名規則與舊系統相同。舊檔保留，不會覆蓋。</p>
-            ${['identity', 'bank', 'license'].map((cat) => `
+            ${['identity', 'bank', 'license', 'resume'].map((cat) => `
               <div class="drop" data-drop="${cat}" style="margin:8px 0">
                 <strong>${DOC[cat]}</strong>
                 <div class="muted">拖放或點此選檔（JPG／PNG／WEBP／PDF，12MB 內）</div>
@@ -599,7 +637,7 @@
     $('#emp-inline', root).onsubmit = async (ev) => {
       ev.preventDefault();
       const f = ev.target;
-      const body = Object.fromEntries(['name', 'department', 'job', 'employmentType', 'payType', 'paymentMethod', 'arrivalDate', 'departureDate', 'phone', 'emergencyContact', 'paperLocation', 'lineId', 'lineBound', 'notes', 'birthDate', 'nationalId'].map((k) => [k, f.elements[k].value]));
+      const body = Object.fromEntries(['name', 'department', 'job', 'employmentType', 'payType', 'paymentMethod', 'arrivalDate', 'departureDate', 'phone', 'emergencyContact', 'paperLocation', 'lineId', 'lineBound', 'notes', 'birthDate', 'nationalId', 'address', 'education', 'experience'].map((k) => [k, f.elements[k].value]));
       try { await write('/api/hr/employees/' + id, 'PATCH', body); toast('已儲存 ' + body.name); await refresh(); paintProfile(root, id); }
       catch (err) { toast(err.message); }
     };
@@ -614,23 +652,35 @@
   }
 
 
-  function pendingOcr(employeeId) {
-    return (state.ocrReviews || []).filter((r) => r.employeeId === employeeId && r.status === 'pending');
+  function pendingOcr(ownerId, {candidateId} = {}) {
+    return (state.ocrReviews || []).filter((r) => r.status === 'pending' && (candidateId ? r.candidateId === candidateId : r.employeeId === ownerId));
   }
-  function ocrCards(employeeId) {
-    const list = pendingOcr(employeeId);
+  function ocrFields(r) {
+    const x = r.extracted || {};
+    if (r.category === 'bank') return field('bankCode', '銀行代碼', x.bankCode) + field('branch', '分行', x.branch) + field('account', '帳號', x.account) + field('accountName', '戶名', x.accountName);
+    if (r.category === 'resume') {
+      return field('name', '姓名', x.name) + field('phone', '電話', x.phone) + field('birthDate', '出生年月日', x.birthDate, 'date') + field('nationalId', '身分證字號', x.nationalId) + field('address', '住址', x.address) + field('desiredPosition', '希望職缺', x.desiredPosition || x.job || '') + `<div class="field" style="grid-column:1/-1"><span>學歷</span><textarea name="education">${esc(x.education || '')}</textarea></div>` + `<div class="field" style="grid-column:1/-1"><span>經歷</span><textarea name="experience">${esc(x.experience || '')}</textarea></div>`;
+    }
+    return field('nationalId', '身分證字號', x.nationalId) + field('name', '姓名', x.name) + field('birthDate', '生日', x.birthDate, 'date');
+  }
+  function ocrTitle(cat) {
+    return {bank: '存摺辨識結果，請核對後確認', identity: '身分證辨識結果，請核對後確認', resume: '履歷辨識結果，請核對後確認'}[cat] || '辨識結果，請核對後確認';
+  }
+  function ocrHint(cat) {
+    if (cat === 'bank') return '確認後銀行帳戶會顯示在員工檔，完整帳號僅登入的管理員可看（可顯示／隱藏），資料庫仍加密。';
+    if (cat === 'resume') return '確認後會寫入這位應徵者的姓名、電話、出生年月日、身分證字號、住址、學歷、經歷與希望職缺。身分證字號若有填寫會檢查檢查碼。';
+    return '身分證字號會檢查檢查碼，確認後會寫入基本資料的出生年月日與身分證字號。';
+  }
+  function ocrCards(employeeId) { return renderOcrCards(pendingOcr(employeeId)); }
+  function candidateOcrCards(candidateId) { return renderOcrCards(pendingOcr('', {candidateId})); }
+  function renderOcrCards(list) {
     if (!list.length) return '';
     return list.map((r) => {
-      const x = r.extracted || {};
-      const bank = r.category === 'bank';
-      const fields = bank
-        ? field('bankCode', '銀行代碼', x.bankCode) + field('branch', '分行', x.branch) + field('account', '帳號', x.account) + field('accountName', '戶名', x.accountName)
-        : field('nationalId', '身分證字號', x.nationalId) + field('name', '姓名', x.name) + field('birthDate', '生日', x.birthDate, 'date');
-      const warns = (x.warnings || r.warnings || []).map((w) => esc(w)).join('、');
+      const warns = (r.extracted?.warnings || r.warnings || []).map((w) => esc(w)).join('、');
       return `<section class="hr-card ocr-confirm" data-ocr="${esc(r.id)}" data-cat="${esc(r.category)}">
-        <h2 class="section-title">${bank ? '存摺辨識結果，請核對後確認' : '身分證辨識結果，請核對後確認'}</h2>
-        <p class="muted">辨識只供預填，按「確認」才會寫入。${bank ? '確認後銀行帳戶會顯示在員工檔，完整帳號僅登入的管理員可看（可顯示／隱藏），資料庫仍加密。' : '身分證字號會檢查檢查碼，確認後會寫入基本資料的出生年月日與身分證字號。'}</p>
-        <form class="inline-grid ocr-form">${fields}</form>
+        <h2 class="section-title">${ocrTitle(r.category)}</h2>
+        <p class="muted">辨識只供預填，按「確認」才會寫入。${ocrHint(r.category)}</p>
+        <form class="inline-grid ocr-form">${ocrFields(r)}</form>
         ${warns ? `<p class="muted">注意：${warns}</p>` : ''}
         <div class="hr-toolbar" style="margin-top:8px"><button class="hr-btn" type="button" data-ocr-ok>確認</button><button class="hr-btn ghost" type="button" data-ocr-skip>略過</button></div>
       </section>`;
@@ -658,18 +708,28 @@
       </form>
     </section>`;
   }
-  function bindOcrCards(root, employeeId) {
+  function bindOcrCards(root, employeeId, opts = {}) {
     $$('.ocr-confirm', root).forEach((card) => {
       const id = card.dataset.ocr;
       $('[data-ocr-ok]', card).onclick = async () => {
         const f = $('.ocr-form', card);
-        const body = Object.fromEntries([...f.querySelectorAll('input')].map((el) => [el.name, el.value]));
-        try { await write('/api/hr/ocr-reviews/' + id + '/confirm', 'POST', body); toast('已確認並寫入'); await refresh(); paintProfile(root, employeeId); }
-        catch (err) { toast(err.message); }
+        const body = Object.fromEntries([...f.querySelectorAll('input,textarea,select')].filter((el) => el.name).map((el) => [el.name, el.value]));
+        try {
+          await write('/api/hr/ocr-reviews/' + id + '/confirm', 'POST', body);
+          toast('已確認並寫入');
+          await refresh();
+          if (opts.onDone) opts.onDone();
+          else paintProfile(root, employeeId);
+        } catch (err) { toast(err.message); }
       };
       $('[data-ocr-skip]', card).onclick = async () => {
-        try { await write('/api/hr/ocr-reviews/' + id + '/dismiss', 'POST', {}); toast('已略過此次辨識'); await refresh(); paintProfile(root, employeeId); }
-        catch (err) { toast(err.message); }
+        try {
+          await write('/api/hr/ocr-reviews/' + id + '/dismiss', 'POST', {});
+          toast('已略過此次辨識');
+          await refresh();
+          if (opts.onDone) opts.onDone();
+          else paintProfile(root, employeeId);
+        } catch (err) { toast(err.message); }
       };
     });
   }
@@ -957,36 +1017,70 @@
   function sel(name, label, opts, value) {
     return `<div class="field"><span>${esc(label)}</span><select name="${name}">${opts.map((o) => `<option ${o === value ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></div>`;
   }
-  function bindDrop(box, employeeId, root) {
+  function bindDrop(box, employeeId, root, opts = {}) {
     const cat = box.dataset.drop;
     const input = $('[data-file]', box);
     box.addEventListener('click', (e) => { if (e.target.closest('a,input,button,.doc,.doc-thumb')) return; input.click(); });
     box.addEventListener('dragover', (e) => { e.preventDefault(); box.classList.add('over'); });
     box.addEventListener('dragleave', () => box.classList.remove('over'));
-    box.addEventListener('drop', (e) => { e.preventDefault(); box.classList.remove('over'); if (e.dataTransfer.files[0]) doUpload(employeeId, cat, e.dataTransfer.files[0], root, box); });
-    input.addEventListener('change', () => { if (input.files[0]) doUpload(employeeId, cat, input.files[0], root, box); input.value = ''; });
+    box.addEventListener('drop', (e) => { e.preventDefault(); box.classList.remove('over'); if (e.dataTransfer.files[0]) doUpload(employeeId, cat, e.dataTransfer.files[0], root, box, opts); });
+    input.addEventListener('change', () => { if (input.files[0]) doUpload(employeeId, cat, input.files[0], root, box, opts); input.value = ''; });
   }
-  async function doUpload(employeeId, cat, file, root, box) {
+  async function doUpload(employeeId, cat, file, root, box, opts = {}) {
     const exp = box ? $('[data-exp]', box)?.value : '';
     try {
-      const saved = await uploadFile(employeeId, cat, file, exp);
+      const saved = await uploadFile(employeeId, cat, file, exp, opts);
       let msg = '已存到 ' + (saved.displayPath || saved.path || saved.filename);
       if (saved.ocr && saved.ocr.skipped === 'no-gemini') msg += '。尚未設定 Gemini，無法自動辨識，請自行核對。';
       else if (saved.ocr && saved.ocr.skipped === 'ocr-error') msg += '。' + (saved.ocr.message || '自動辨識暫時無法使用。');
       else if (saved.ocr && saved.ocr.review) msg += '。已預填辨識結果，請核對後按確認才會寫入。';
       toast(msg);
       await refresh();
-      paintProfile(root, employeeId);
+      if (opts.onDone) opts.onDone();
+      else paintProfile(root, employeeId);
     } catch (e) { toast(e.message); }
+  }
+
+
+  function visibleCands() {
+    return (state.candidates || []).filter((c) => !c.archived);
+  }
+  function candTime(c) {
+    const evs = (state.recruitmentEvents || []).filter((e) => e.candidateId === c.id).map((e) => e.created || e.at || '').sort();
+    return c.updated || evs[evs.length - 1] || c.created || c.interviewAt || c.followupDate || '';
+  }
+  function sortNewest(list) {
+    return [...list].sort((a, b) => String(candTime(b)).localeCompare(String(candTime(a))) || String(b.id).localeCompare(String(a.id)));
+  }
+  function confirmDeleteCand(root, id, after) {
+    const c = state.candidates.find((x) => x.id === id);
+    if (!c) return;
+    if (!window.confirm('確定封存「' + c.name + '」？名單上不會再顯示，招募紀錄會保留，需要時可在已封存區塊查看。')) return;
+    write('/api/hr/candidates/' + id, 'DELETE', {}).then(async () => {
+      toast('已封存 ' + c.name);
+      await refresh();
+      after();
+    }).catch((e) => toast(e.message));
   }
 
   function paintRecruitment(root) {
     if (route.page === 'candidate' && route.id) return paintCandidate(root, route.id);
-    const t = today();
-    const open = state.candidates.filter((c) => OPEN.includes(c.status));
-    const todayList = open.filter((c) => c.followupDate === t);
-    const overdue = open.filter((c) => c.followupDate && c.followupDate < t);
+    const tday = today();
+    const live = visibleCands().filter((c) => match(c, ['name', 'phone', 'department', 'job']));
+    const open = live.filter((c) => OPEN.includes(c.status));
+    const todayList = open.filter((c) => c.followupDate === tday);
+    const overdue = open.filter((c) => c.followupDate && c.followupDate < tday);
     const cols = ['待聯絡', '待面試', '待回覆', '錄取', '待報到'];
+    const card = (c) => `<article class="kanban-item${c.followupDate && c.followupDate < tday ? ' overdue' : ''}" draggable="true" data-open="${esc(c.id)}"><div class="name">${esc(c.name)}</div><div class="meta">${esc(c.department || '')} ${esc(c.job || '')}<br>${esc(c.phone)} ${c.followupDate ? '跟進 ' + esc(c.followupDate) : ''}</div><button type="button" class="hr-btn ghost kanban-del" data-del="${esc(c.id)}" title="封存">封存</button></article>`;
+    const closedBlocks = CLOSED.map((s) => {
+      const items = sortNewest(live.filter((c) => c.status === s));
+      if (!items.length) return '';
+      return `<section class="hr-card" style="margin-top:12px"><h2 class="section-title">${esc(s)} <span class="muted">${items.length}</span></h2>
+        <div class="cand-list">${items.map((c) => `<div class="cand-row" data-open="${esc(c.id)}"><strong>${esc(c.name)}</strong><span class="muted">${esc(c.department || '')} ${esc(c.job || '')}　${esc(c.phone)}</span><button type="button" class="hr-btn ghost" data-del="${esc(c.id)}">封存</button></div>`).join('')}</div></section>`;
+    }).join('');
+    const archived = sortNewest((state.candidates || []).filter((c) => c.archived && match(c, ['name', 'phone', 'department', 'job'])));
+    const archBlock = archived.length ? `<section class="hr-card" style="margin-top:12px"><h2 class="section-title">已封存 <span class="muted">${archived.length}</span></h2>
+      <div class="cand-list muted">${archived.map((c) => `<div class="cand-row"><strong>${esc(c.name)}</strong><span>${esc(c.status)}　${esc((c.archivedAt || '').slice(0, 10))}</span></div>`).join('')}</div></section>` : '';
     root.innerHTML = `
       <div class="hr-grid">
         <div class="hr-card today"><div class="k">今日待聯絡</div><div class="n">${todayList.length}</div></div>
@@ -1004,11 +1098,22 @@
       </section>
       <div class="kanban">
         ${cols.map((s) => {
-          const items = state.candidates.filter((c) => c.status === s && match(c, ['name', 'phone', 'department', 'job']));
-          return `<div class="kanban-col" data-col="${s}"><h3>${s} <span class="muted">${items.length}</span></h3>${items.map((c) => `<article class="kanban-item${c.followupDate && c.followupDate < t ? ' overdue' : ''}" draggable="true" data-open="${esc(c.id)}"><div class="name">${esc(c.name)}</div><div class="meta">${esc(c.department || '')} ${esc(c.job || '')}<br>${esc(c.phone)} ${c.followupDate ? '跟進 ' + esc(c.followupDate) : ''}</div></article>`).join('')}</div>`;
+          const raw = live.filter((c) => c.status === s);
+          const items = s === '待報到' ? raw : sortNewest(raw);
+          return `<div class="kanban-col" data-col="${s}"><h3>${s} <span class="muted">${items.length}</span></h3>${items.map(card).join('')}</div>`;
         }).join('')}
-      </div>`;
-    $$('[data-open]', root).forEach((el) => el.onclick = () => { route = {page: 'candidate', id: el.dataset.open}; paintCandidate(root, el.dataset.open); });
+      </div>
+      ${closedBlocks}
+      ${archBlock}
+      <div id="hr-dialogs"></div>`;
+    $$('[data-open]', root).forEach((el) => el.onclick = (ev) => {
+      if (ev.target.closest('[data-del]')) return;
+      route = {page: 'candidate', id: el.dataset.open}; paintCandidate(root, el.dataset.open);
+    });
+    $$('[data-del]', root).forEach((el) => el.onclick = (ev) => {
+      ev.preventDefault(); ev.stopPropagation();
+      confirmDeleteCand(root, el.dataset.del, () => { route = {page: 'list'}; paintRecruitment(root); });
+    });
     $$('.kanban-item', root).forEach((el) => {
       el.addEventListener('dragstart', (ev) => ev.dataTransfer.setData('text/plain', el.dataset.open));
     });
@@ -1031,11 +1136,13 @@
     const c = state.candidates.find((x) => x.id === id);
     if (!c) { route = {page: 'list'}; return paintRecruitment(root); }
     const evs = state.recruitmentEvents.filter((e) => e.candidateId === id);
+    const resumes = (state.documents || []).filter((d) => d.candidateId === id || (d.category === 'resume' && d.employeeId && d.employeeId === c.employeeId));
+    const canConvert = !c.employeeId && c.status !== '已報到' && !c.archived;
     root.innerHTML = `
       <div class="hr-toolbar"><button class="hr-btn ghost" data-act="back">← 返回徵人看板</button></div>
       <div class="profile">
         <section class="hr-card">
-          <h2 class="section-title">${esc(c.name)} <span class="pill st-${esc(c.status)}">${esc(c.status)}</span></h2>
+          <h2 class="section-title">${esc(c.name)} <span class="pill st-${esc(c.status)}">${esc(c.status)}</span>${c.archived ? ' <span class="pill">已封存</span>' : ''}</h2>
           <form id="cand-inline" class="inline-grid">
             ${field('name', '姓名', c.name)}${field('phone', '電話', c.phone)}
             ${field('department', '部門', c.department)}${field('job', '職缺', c.job)}
@@ -1043,6 +1150,10 @@
             ${field('availableDate', '可到職', c.availableDate, 'date')}${field('followupDate', '下次跟進', c.followupDate, 'date')}
             ${field('interviewAt', '面試時間', c.interviewAt)}
             ${sel('status', '進度', STATUSES, c.status)}
+            ${field('birthDate', '出生年月日', c.birthDate || '', 'date')}${field('nationalId', '身分證字號', c.nationalId || '')}
+            ${field('address', '住址', c.address || '')}
+            <div class="field" style="grid-column:1/-1"><span>學歷</span><textarea name="education">${esc(c.education || '')}</textarea></div>
+            <div class="field" style="grid-column:1/-1"><span>經歷</span><textarea name="experience">${esc(c.experience || '')}</textarea></div>
             <div class="field" style="grid-column:1/-1"><span>備註</span><textarea name="notes">${esc(c.notes)}</textarea></div>
             <div style="grid-column:1/-1"><button class="hr-btn" type="submit">儲存</button> <span class="muted">「已報到」只能透過報到轉員工完成。</span></div>
           </form>
@@ -1054,8 +1165,23 @@
               <button class="hr-btn" data-act="call">記錄電話</button>
               <button class="hr-btn ghost" data-act="iv">記錄面試</button>
             </div>
-            ${c.status === '待報到' || c.status === '錄取' ? `<button class="hr-btn" data-act="convert" style="width:100%;margin-top:8px">報到並轉為員工</button>` : ''}
+            <div class="hr-toolbar" style="margin-top:8px;flex-wrap:wrap">
+              ${QUICK_STATUSES.map((s) => `<button type="button" class="hr-btn ghost" data-quick="${esc(s)}">${esc(s)}</button>`).join('')}
+            </div>
+            ${canConvert ? `<button class="hr-btn" data-act="convert" style="width:100%;margin-top:8px">報到並轉為員工</button>` : ''}
             ${c.employeeId ? `<p>已轉為員工 <button class="hr-btn ghost" data-act="goto-emp">${esc(c.employeeId)}</button></p>` : ''}
+            ${c.archived ? '' : `<button class="hr-btn ghost" data-act="delete" style="width:100%;margin-top:8px">封存此應徵者</button>`}
+          </section>
+          ${candidateOcrCards(id)}
+          <section class="hr-card">
+            <h2 class="section-title">履歷表</h2>
+            <p class="muted">面試後可上傳履歷（JPG／PNG／WEBP／PDF）。若已設定 Gemini，會先出現確認卡，按確認才會寫入基本資料。</p>
+            <div class="drop" data-drop="resume" style="margin:8px 0">
+              <strong>履歷表</strong>
+              <div class="muted">拖放或點此選檔（12MB 內）</div>
+              <input type="file" accept="image/jpeg,image/png,image/webp,application/pdf" hidden data-file="resume">
+              ${resumes.map((d) => docRow(d, 'resume')).join('') || ''}
+            </div>
           </section>
           <section class="hr-card">
             <h2 class="section-title">聯絡與面試歷程</h2>
@@ -1068,26 +1194,59 @@
     $('#cand-inline', root).onsubmit = async (ev) => {
       ev.preventDefault();
       const f = ev.target;
-      const body = Object.fromEntries(['name', 'phone', 'department', 'job', 'source', 'contactPerson', 'availableDate', 'followupDate', 'interviewAt', 'status', 'notes'].map((k) => [k, f.elements[k].value]));
+      const body = Object.fromEntries(['name', 'phone', 'department', 'job', 'source', 'contactPerson', 'availableDate', 'followupDate', 'interviewAt', 'status', 'notes', 'birthDate', 'nationalId', 'address', 'education', 'experience'].map((k) => [k, f.elements[k].value]));
       try { await write('/api/hr/candidates/' + id, 'PATCH', body); toast('已儲存'); await refresh(); paintCandidate(root, id); }
       catch (err) { toast(err.message); }
     };
     $('[data-act="call"]', root).onclick = () => openLog(root, id, 'phone');
     $('[data-act="iv"]', root).onclick = () => openLog(root, id, 'interview');
     $('[data-act="convert"]', root)?.addEventListener('click', () => openConvert(root, id));
-    $('[data-act="goto-emp"]', root)?.addEventListener('click', () => {
-      ctx.view = 'staff'; route = {page: 'profile', id: c.employeeId};
-      if (window.navigate) { /* stay in module */ }
-      paintProfile(root, c.employeeId);
+    $('[data-act="delete"]', root)?.addEventListener('click', () => confirmDeleteCand(root, id, () => { route = {page: 'list'}; paintRecruitment(root); }));
+    $$('[data-quick]', root).forEach((b) => b.onclick = async () => {
+      try {
+        await write('/api/hr/candidates/' + id, 'PATCH', {status: b.dataset.quick});
+        toast('已改為 ' + b.dataset.quick);
+        await refresh();
+        paintCandidate(root, id);
+      } catch (e) { toast(e.message); }
     });
+    $('[data-act="goto-emp"]', root)?.addEventListener('click', () => {
+      route = {page: 'profile', id: c.employeeId};
+      ctx.view = 'staff';
+      if (ctx.go) ctx.go('staff', {keepRoute: true});
+      else paintProfile(root, c.employeeId);
+    });
+    const drop = $('[data-drop="resume"]', root);
+    if (drop) bindDrop(drop, '', root, {candidateId: id, onDone: () => paintCandidate(root, id)});
+    bindOcrCards(root, '', {candidateId: id, onDone: () => paintCandidate(root, id)});
   }
 
+  function ensureDialogs(root) {
+    if (!$('#hr-dialogs', root)) root.insertAdjacentHTML('beforeend', '<div id="hr-dialogs"></div>');
+    return $('#hr-dialogs', root);
+  }
   function dlg(root, title, inner, onsubmit) {
-    const host = $('#hr-dialogs', root) || root;
-    host.innerHTML = `<dialog class="hr-dlg" open><h2>${esc(title)}</h2><form class="dlg-body">${inner}<div class="hr-toolbar" style="margin-top:12px"><button class="hr-btn" type="submit">儲存</button><button class="hr-btn ghost" type="button" data-cancel>取消</button></div></form></dialog>`;
+    const host = ensureDialogs(root);
+    host.innerHTML = `<dialog class="hr-dlg"><h2>${esc(title)}</h2><form class="dlg-body">${inner}<div class="hr-toolbar" style="margin-top:12px"><button class="hr-btn" type="submit">確定</button><button class="hr-btn ghost" type="button" data-cancel>取消</button></div></form></dialog>`;
+    const box = $('dialog', host);
     const form = $('form', host);
-    $('[data-cancel]', host).onclick = () => { host.innerHTML = ''; };
-    form.onsubmit = async (e) => { e.preventDefault(); await onsubmit(form); host.innerHTML = ''; };
+    const close = () => { try { box.close(); } catch {} host.innerHTML = ''; };
+    $('[data-cancel]', host).onclick = close;
+    box.addEventListener('cancel', (e) => { e.preventDefault(); close(); });
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const btn = form.querySelector('[type="submit"]');
+      if (btn) btn.disabled = true;
+      try {
+        await onsubmit(form);
+        close();
+      } catch (err) {
+        toast(err.message || '操作失敗');
+        if (btn) btn.disabled = false;
+      }
+    };
+    if (typeof box.showModal === 'function') box.showModal();
+    else box.setAttribute('open', '');
   }
   function openEmpForm(root) {
     if (!$('#hr-dialogs', root)) root.insertAdjacentHTML('beforeend', '<div id="hr-dialogs"></div>');

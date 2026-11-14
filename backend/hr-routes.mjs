@@ -151,6 +151,10 @@ export async function handleHr(req, res, {hr, session, method, path: p, config =
     send(res, 200, await hr.convert(decodeURIComponent(m[1]), body || {}, actor));
     return true;
   }
+  if (method === 'DELETE' && (m = pathname.match(/^\/api\/hr\/candidates\/([^/]+)$/))) {
+    send(res, 200, await hr.archiveCandidate(decodeURIComponent(m[1]), actor));
+    return true;
+  }
 
   if (method === 'POST' && pathname === '/api/hr/goals') {
     const body = JSON.parse(await readRaw(req, 200_000));
@@ -245,20 +249,34 @@ export async function handleHr(req, res, {hr, session, method, path: p, config =
     if (!file?.body?.length) throw new AppError(400, '請選擇檔案');
     const field = (n) => parts.find((p) => p.name === n)?.body.toString('utf8').trim() || '';
     const employeeId = field('employeeId');
+    const candidateId = field('candidateId');
     const category = field('category');
     const expiresOn = field('expiresOn');
     if (!DOC_TYPES[category]) throw new AppError(400, '文件種類不正確');
-    const emp = await hr.getEmployee(employeeId);
+    if (category === 'resume' && !candidateId && !employeeId) throw new AppError(400, '請先選擇應徵者或員工再上傳履歷');
+    if (category !== 'resume' && !employeeId) throw new AppError(400, '請先選擇員工再上傳文件');
+    let ownerName = '';
+    let empId = employeeId || '';
+    if (empId) {
+      const emp = await hr.getEmployee(empId);
+      ownerName = emp.name;
+    }
+    if (candidateId) {
+      const st = await hr.state();
+      const cand = st.candidates.find((c) => c.id === candidateId);
+      if (!cand) throw new AppError(404, '找不到應徵者');
+      ownerName = ownerName || cand.name;
+    }
     const {Readable} = await import('node:stream');
     const saved = await saveUpload({
-      category, employeeId, employeeName: emp.name,
+      category, employeeId: empId || candidateId, employeeName: ownerName,
       mime: file.mime || mimeFromName(file.filename),
       stream: Readable.from(file.body),
       size: file.body.length,
     });
     const row = {
       id: fileId(), category, relativePath: saved.filename, filename: saved.filename,
-      size: saved.size, mtime: saved.mtime, available: true, employeeId, suggestions: [],
+      size: saved.size, mtime: saved.mtime, available: true, employeeId: empId || null, candidateId: candidateId || null, suggestions: [],
       expiresOn: expiresOn || null,
     };
     await hr.insertDocument(row, actor);

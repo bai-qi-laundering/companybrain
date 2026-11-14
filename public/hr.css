@@ -98,3 +98,9 @@
 #hr-root .bank-block .secret-row{display:flex;gap:8px;align-items:center}
 #hr-root .bank-block .secret-row input{flex:1;min-width:0}
 #hr-root .bank-block .secret-row .hr-btn{white-space:nowrap}
+
+#hr-root dialog.hr-dlg{position:fixed;z-index:80}
+#hr-root dialog.hr-dlg::backdrop{background:#12253299}
+#hr-root .cand-list{display:flex;flex-direction:column}
+#hr-root .cand-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--hr-line);cursor:pointer}
+#hr-root .kanban-item .kanban-del{margin-top:6px}

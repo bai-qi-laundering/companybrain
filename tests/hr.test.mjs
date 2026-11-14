@@ -407,3 +407,95 @@ test('salary import degrades with setup instructions when not configured', async
     await rm(ctx.docRoot, {recursive: true, force: true});
   }
 });
+
+test('recruitment: new statuses, archive, résumé confirm, and convert carries data', async () => {
+  const prev = process.env.HR_PII_KEY;
+  process.env.HR_PII_KEY = 'ab'.repeat(32);
+  const ctx = await start({
+    geminiKey: 'test-key',
+    extract: async ({category}) => {
+      if (category === 'resume') {
+        return {
+          name: '許雅琪', phone: '0988-100-003', birthDate: '1995-04-12', nationalId: 'A123456789',
+          address: '台北市中正區', education: '大學', experience: '客服兩年', desiredPosition: '人資行政', warnings: [],
+        };
+      }
+      return {skipped: 'not-applicable'};
+    },
+  });
+  try {
+    const cand = await (await ctx.api('/api/hr/candidates', 'POST', {
+      id: 'R-88', name: '許雅琪', phone: '0988-100-003', department: '行政', job: '人資行政', status: '待面試',
+    })).json();
+    assert.equal(cand.status, '待面試');
+    assert.ok(cand.created || cand.updated);
+
+    const badStatus = await ctx.api('/api/hr/candidates/R-88', 'PATCH', {status: '不存在的狀態'});
+    assert.equal(badStatus.status, 400);
+    for (const status of ['未回覆', '未到面試', '未報到']) {
+      const r = await (await ctx.api('/api/hr/candidates/R-88', 'PATCH', {status})).json();
+      assert.equal(r.status, status);
+      assert.equal(r.archived, false);
+    }
+    await ctx.api('/api/hr/candidates/R-88', 'PATCH', {status: '待報到'});
+
+    const jpeg = Buffer.from('/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAGfAD//2Q==', 'base64');
+    const boundary = '----testhrboundary';
+    const raw = Buffer.concat([
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="candidateId"\r\n\r\nR-88\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="category"\r\n\r\nresume\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="resume.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
+      jpeg,
+      Buffer.from(`\r\n--${boundary}--\r\n`),
+    ]);
+    const up = await ctx.api('/api/hr/documents/upload', 'POST', raw, {raw, headers: {'content-type': 'multipart/form-data; boundary=' + boundary}});
+    assert.equal(up.status, 200);
+    const saved = await up.json();
+    assert.equal(saved.category, 'resume');
+    assert.equal(saved.candidateId, 'R-88');
+    assert.ok(saved.ocr && saved.ocr.review);
+    const reviewId = saved.ocr.review.id;
+    const confirmed = await (await ctx.api('/api/hr/ocr-reviews/' + reviewId + '/confirm', 'POST', saved.ocr.extracted || saved.ocr.review.extracted)).json();
+    assert.equal(confirmed.candidate.name, '許雅琪');
+    assert.equal(confirmed.candidate.birthDate, '1995-04-12');
+    assert.equal(confirmed.candidate.nationalId, 'A123456789');
+    assert.equal(confirmed.candidate.address, '台北市中正區');
+    assert.equal(confirmed.candidate.education, '大學');
+    assert.equal(confirmed.candidate.experience, '客服兩年');
+    assert.equal(confirmed.candidate.job, '人資行政');
+
+    const conv = await (await ctx.api('/api/hr/candidates/R-88/convert', 'POST', {arrivalDate: '2026-11-14', department: '行政'})).json();
+    assert.equal(conv.employee.phone, '0988-100-003');
+    assert.equal(conv.employee.address, '台北市中正區');
+    assert.equal(conv.employee.education, '大學');
+    assert.equal(conv.employee.experience, '客服兩年');
+    assert.equal(conv.employee.pii.nationalId, 'A123456789');
+    assert.equal(conv.employee.pii.birthDate, '1995-04-12');
+    const st = await (await ctx.api('/api/hr/state')).json();
+    const doc = st.documents.find((d) => d.id === saved.id);
+    assert.equal(doc.employeeId, conv.employee.id);
+    assert.equal(doc.candidateId, 'R-88');
+    const listed = st.candidates.find((c) => c.id === 'R-88');
+    assert.equal(listed.status, '已報到');
+    assert.equal(listed.archived, false);
+
+    const other = await (await ctx.api('/api/hr/candidates', 'POST', {
+      id: 'R-89', name: '測試刪除', phone: '0988-100-009', department: '物流', status: '待聯絡',
+    })).json();
+    const archived = await (await ctx.api('/api/hr/candidates/R-89', 'DELETE')).json();
+    assert.equal(archived.archived, true);
+    const after = await (await ctx.api('/api/hr/state')).json();
+    const gone = after.candidates.find((c) => c.id === 'R-89');
+    assert.equal(gone.archived, true);
+    assert.ok(after.audit.some((a) => a.action === '封存應徵者' && a.target === 'R-89'));
+    const ev = await ctx.api('/api/hr/candidates/R-88/events', 'POST', {kind: 'phone', outcome: '未回覆', notes: '未接回'});
+    // already hired, status stays 已報到
+    assert.equal(ev.status, 200);
+  } finally {
+    if (prev == null) delete process.env.HR_PII_KEY;
+    else process.env.HR_PII_KEY = prev;
+    await new Promise((r) => ctx.server.close(r));
+    await ctx.db.close();
+    await rm(ctx.docRoot, {recursive: true, force: true});
+  }
+});

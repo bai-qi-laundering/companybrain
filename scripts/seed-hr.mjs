@@ -136,13 +136,15 @@ async function seedDocFiles(hr) {
 }
 
 export async function prepareDocFolders(root) {
-  for (const name of ['身分證', '存摺', '駕照']) await mkdir(path.join(root, name), {recursive: true});
+  for (const name of ['身分證', '存摺', '駕照', '履歷表']) await mkdir(path.join(root, name), {recursive: true});
   process.env.NAS_IDENTITY_PATH = path.join(root, '身分證');
   process.env.NAS_BANK_PATH = path.join(root, '存摺');
   process.env.NAS_LICENSE_PATH = path.join(root, '駕照');
+  process.env.NAS_RESUME_PATH = path.join(root, '履歷表');
   return {
     identity: process.env.NAS_IDENTITY_PATH,
     bank: process.env.NAS_BANK_PATH,
     license: process.env.NAS_LICENSE_PATH,
+    resume: process.env.NAS_RESUME_PATH,
   };
 }

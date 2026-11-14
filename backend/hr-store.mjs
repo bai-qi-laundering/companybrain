@@ -6,10 +6,10 @@ import {DEFAULT_SALARY_IMPORT} from './hr-salary-import.mjs';
 import {yearsForEmployee, decorateYear, defaultSettlement, SETTLEMENTS, DEFAULT_BASIS, endingSoon} from './hr-leave.mjs';
 import {DEFAULT_DEPT_PREFIXES, nextPrefixedId, prefixForDepartment, isUsableEmployeeId, PAY_TYPES, PAYMENT_METHODS} from './hr-ids.mjs';
 
-export const DOC_TYPES = {identity: '身分證', bank: '存摺', license: '駕照'};
-export const STATUSES = ['待聯絡', '待面試', '待回覆', '錄取', '待報到', '已報到', '未錄取', '放棄'];
+export const DOC_TYPES = {identity: '身分證', bank: '存摺', license: '駕照', resume: '履歷表'};
+export const STATUSES = ['待聯絡', '待面試', '待回覆', '錄取', '待報到', '已報到', '未錄取', '放棄', '未回覆', '未到面試', '未報到'];
 export const OPEN_STATUSES = ['待聯絡', '待面試', '待回覆', '錄取', '待報到'];
-export const EMP_FIELDS = ['name', 'department', 'job', 'employmentType', 'payType', 'paymentMethod', 'arrivalDate', 'departureDate', 'phone', 'emergencyContact', 'paperLocation', 'notes', 'lineBound', 'lineId'];
+export const EMP_FIELDS = ['name', 'department', 'job', 'employmentType', 'payType', 'paymentMethod', 'arrivalDate', 'departureDate', 'phone', 'emergencyContact', 'paperLocation', 'notes', 'lineBound', 'lineId', 'address', 'education', 'experience'];
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS hr_employees (
@@ -147,6 +147,7 @@ CREATE TABLE IF NOT EXISTS hr_ocr_reviews (
   id text PRIMARY KEY,
   document_id text REFERENCES hr_documents(id),
   employee_id text REFERENCES hr_employees(id),
+  candidate_id text REFERENCES hr_candidates(id),
   category text NOT NULL,
   status text NOT NULL DEFAULT 'pending',
   extracted jsonb NOT NULL DEFAULT '{}',
@@ -186,6 +187,10 @@ export class HrStore {
     await this.setSettingIfAbsent('leaveSettleDefault', '未休完已折現');
     await this.setSettingIfAbsent('deptPrefixes', DEFAULT_DEPT_PREFIXES);
     await this.setSettingIfAbsent('salaryImport', DEFAULT_SALARY_IMPORT);
+    await this.pool.query('ALTER TABLE hr_documents ADD COLUMN IF NOT EXISTS candidate_id text REFERENCES hr_candidates(id)');
+    await this.pool.query('ALTER TABLE hr_ocr_reviews ADD COLUMN IF NOT EXISTS candidate_id text REFERENCES hr_candidates(id)');
+    await this.pool.query('CREATE INDEX IF NOT EXISTS hr_docs_cand ON hr_documents(candidate_id)');
+    await this.pool.query('CREATE INDEX IF NOT EXISTS hr_ocr_reviews_cand ON hr_ocr_reviews(candidate_id, status)');
   }
 
   async audit(client, actor, action, target, detail = '') {
@@ -200,7 +205,7 @@ export class HrStore {
       this.pool.query('SELECT id, payload, revision FROM hr_employees ORDER BY id'),
       this.pool.query('SELECT id, employee_id, kind, payload, created_at FROM hr_records ORDER BY created_at DESC, id'),
       this.pool.query('SELECT * FROM hr_documents ORDER BY category, filename'),
-      this.pool.query('SELECT id, payload, revision FROM hr_candidates ORDER BY id'),
+      this.pool.query('SELECT id, payload, revision, created_at, updated_at FROM hr_candidates ORDER BY id'),
       this.pool.query('SELECT * FROM hr_recruitment_events ORDER BY created_at DESC, id DESC'),
       this.pool.query('SELECT department, payload, revision FROM hr_recruitment_goals ORDER BY department'),
       this.pool.query('SELECT id, employee_id, payload, created_at FROM hr_leave_import_rows ORDER BY created_at DESC, id'),
@@ -221,9 +226,9 @@ export class HrStore {
       documents: documents.rows.map((r) => ({
         id: r.id, category: r.category, relativePath: r.relative_path, filename: r.filename,
         size: Number(r.size), mtime: Number(r.mtime), available: r.available,
-        employeeId: r.employee_id, suggestions: r.suggestions || [], expiresOn: r.expires_on,
+        employeeId: r.employee_id, candidateId: r.candidate_id, suggestions: r.suggestions || [], expiresOn: r.expires_on,
       })),
-      candidates: candidates.rows.map((r) => ({id: r.id, revision: r.revision, ...r.payload})),
+      candidates: candidates.rows.map(publicCandidate),
       recruitmentEvents: events.rows.map((r) => ({id: r.id, candidateId: r.candidate_id, kind: r.kind, created: r.created_at, ...r.payload})),
       recruitmentGoals: goals.rows.map((r) => this.decorateGoal(r.department, r.payload, employees.rows.map(mapEmp))),
       leaveExcel: leaveExcel.rows.map((r) => ({id: r.id, employeeId: r.employee_id, created: r.created_at, ...r.payload})),
@@ -327,10 +332,14 @@ export class HrStore {
       if (merged.status === '已報到' && !merged.employeeId && !prev.employeeId) {
         throw new AppError(400, '尚未建立員工檔案，不能標示為已報到。請使用「報到並轉為員工」。');
       }
-      const payload = pickCand(merged);
+      const payload = pickCand(merged, prev);
       if (prev.employeeId) {
         payload.employeeId = prev.employeeId;
         payload.status = '已報到';
+      }
+      if (prev.archived && data.archived !== false) {
+        payload.archived = true;
+        payload.archivedAt = prev.archivedAt;
       }
       const revision = (cur.rows[0]?.revision || 0) + 1;
       await c.query(
@@ -341,7 +350,8 @@ export class HrStore {
       );
       await this.audit(c, actor, create ? '新增應徵者' : '更新應徵者', id, payload.name + ' ' + (payload.status || ''));
       await c.query('COMMIT');
-      return {id, revision, ...payload};
+      const row = (await this.pool.query('SELECT id, payload, revision, created_at, updated_at FROM hr_candidates WHERE id=$1', [id])).rows[0];
+      return publicCandidate(row);
     } catch (e) {
       await c.query('ROLLBACK');
       throw e;
@@ -370,6 +380,9 @@ export class HrStore {
       if (payload.outcome === '約定面試') status = '待面試';
       if (payload.outcome === '錄取') status = '錄取';
       if (payload.outcome === '未錄取') status = '未錄取';
+      if (payload.outcome === '未回覆') status = '未回覆';
+      if (payload.outcome === '未到面試' || payload.outcome === '未到場') status = '未到面試';
+      if (payload.outcome === '未報到') status = '未報到';
       const next = {
         ...cur,
         status: cur.employeeId ? '已報到' : status,
@@ -397,6 +410,7 @@ export class HrStore {
     if (!empId) empId = await this.nextEmployeeId(body.department || cand.department, body.prefix);
     if (!isUsableEmployeeId(empId)) throw new AppError(400, '員工編號限英數字、底線及短橫線，既有編號會原樣保留');
     empId = empId.toUpperCase();
+    const extraNotes = [cand.notes, cand.address && ('住址：' + cand.address), cand.education && ('學歷：' + cand.education), cand.experience && ('經歷：' + cand.experience)].filter(Boolean).join('\n');
     const payload = pickEmp({
       name: cand.name,
       department: body.department || cand.department,
@@ -404,10 +418,13 @@ export class HrStore {
       employmentType: body.employmentType || '正職',
       payType: body.payType || (body.employmentType === '兼職' || body.employmentType === '時薪' ? '兼職' : '正職'),
       paymentMethod: body.paymentMethod || '匯款',
-      lineId: body.lineId || '',
+      lineId: body.lineId || cand.lineId || '',
       arrivalDate: body.arrivalDate || cand.availableDate || today(),
       phone: body.phone || cand.phone,
-      notes: '由徵人資料轉入；招募歷程保留於徵人頁。',
+      address: cand.address || '',
+      education: cand.education || '',
+      experience: cand.experience || '',
+      notes: extraNotes || '由徵人資料轉入；招募歷程保留於徵人頁。',
     });
     const c = await this.pool.connect();
     try {
@@ -417,9 +434,16 @@ export class HrStore {
       await c.query('INSERT INTO hr_employees(id, payload, revision) VALUES($1,$2,1)', [empId, payload]);
       const nextCand = {...cand, employeeId: empId, status: '已報到', followupDate: '', interviewAt: ''};
       await c.query('UPDATE hr_candidates SET payload=$1, revision=revision+1, updated_at=now() WHERE id=$2', [nextCand, candidateId]);
+      await c.query('UPDATE hr_documents SET employee_id=$1 WHERE candidate_id=$2 AND employee_id IS NULL', [empId, candidateId]);
       await this.audit(c, actor, '報到並轉為員工', candidateId, empId + ' ' + payload.name);
       await c.query('COMMIT');
-      return {employee: {id: empId, ...payload}, candidate: {id: candidateId, ...nextCand}};
+      const pubCand = publicCandidate({id: candidateId, revision: (candR.rows[0].revision || 0) + 1, payload: nextCand, created_at: null, updated_at: new Date()});
+      const nationalId = cand.nationalId || (cand.nationalIdEnc && hasPiiKey() ? (() => { try { return decryptSecret(cand.nationalIdEnc); } catch { return ''; } })() : '');
+      if (cand.birthDate || nationalId) {
+        await this.upsertProfilePii(empId, {birthDate: cand.birthDate || '', nationalId}, actor);
+      }
+      const pii = await this.getEmployeePii(empId);
+      return {employee: {id: empId, ...payload, pii}, candidate: pubCand};
     } catch (e) {
       await c.query('ROLLBACK');
       throw e;
@@ -463,16 +487,17 @@ export class HrStore {
 
   async insertDocument(row, actor) {
     await this.pool.query(
-      `INSERT INTO hr_documents(id, category, relative_path, filename, size, mtime, available, employee_id, suggestions, expires_on)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      `INSERT INTO hr_documents(id, category, relative_path, filename, size, mtime, available, employee_id, candidate_id, suggestions, expires_on)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
        ON CONFLICT(category, relative_path) DO UPDATE SET
          filename=excluded.filename, size=excluded.size, mtime=excluded.mtime, available=true,
          employee_id=COALESCE(hr_documents.employee_id, excluded.employee_id),
+         candidate_id=COALESCE(hr_documents.candidate_id, excluded.candidate_id),
          suggestions=excluded.suggestions, expires_on=COALESCE(hr_documents.expires_on, excluded.expires_on)`,
       [row.id, row.category, row.relativePath, row.filename, row.size, row.mtime, row.available !== false,
-        row.employeeId || null, JSON.stringify(row.suggestions || []), row.expiresOn || null]
+        row.employeeId || null, row.candidateId || null, JSON.stringify(row.suggestions || []), row.expiresOn || null]
     );
-    if (actor && row.employeeId) await this.audit(this.pool, actor, '上傳員工文件', row.employeeId, row.category + ' ' + row.filename);
+    if (actor && (row.employeeId || row.candidateId)) await this.audit(this.pool, actor, '上傳員工文件', row.employeeId || row.candidateId, row.category + ' ' + row.filename);
     return row;
   }
 
@@ -810,15 +835,15 @@ export class HrStore {
     return this.decorateYears(y.rows, entries.rows)[0];
   }
 
-  async insertOcrReview({documentId, employeeId, category, extracted, status = 'pending', skipReason} = {}, actor) {
+  async insertOcrReview({documentId, employeeId, candidateId, category, extracted, status = 'pending', skipReason} = {}, actor) {
     const id = newId('OCR-');
     const sealed = sealExtracted(category, extracted || {});
     await this.pool.query(
-      `INSERT INTO hr_ocr_reviews(id, document_id, employee_id, category, status, extracted, skip_reason)
-       VALUES($1,$2,$3,$4,$5,$6::jsonb,$7)`,
-      [id, documentId || null, employeeId || null, category, status, JSON.stringify(sealed), skipReason || null]
+      `INSERT INTO hr_ocr_reviews(id, document_id, employee_id, candidate_id, category, status, extracted, skip_reason)
+       VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8)`,
+      [id, documentId || null, employeeId || null, candidateId || null, category, status, JSON.stringify(sealed), skipReason || null]
     );
-    if (actor) await this.audit(this.pool, actor, '文件辨識待確認', employeeId || documentId || id, category);
+    if (actor) await this.audit(this.pool, actor, '文件辨識待確認', employeeId || candidateId || documentId || id, category);
     return this.getOcrReview(id, {reveal: true});
   }
 
@@ -845,14 +870,50 @@ export class HrStore {
     const merged = {...extracted, ...(fields || {})};
     const {packConfirmed} = await import('./hr-ocr.mjs');
     const packed = packConfirmed(row.category, merged);
-    await this.upsertEmployeePii(row.employee_id, packed, row.category);
+    let pii = null;
+    let candidate = null;
+    if (row.category === 'resume') {
+      const candId = row.candidate_id;
+      if (!candId) throw new AppError(400, '這份履歷沒有對應應徵者，無法寫入');
+      candidate = await this.applyResumeToCandidate(candId, packed, actor);
+    } else {
+      await this.upsertEmployeePii(row.employee_id, packed, row.category);
+      const piiRow = (await this.pool.query('SELECT * FROM hr_employee_pii WHERE employee_id=$1', [row.employee_id])).rows[0];
+      pii = publicPii(piiRow);
+    }
     await this.pool.query(
       "UPDATE hr_ocr_reviews SET status='confirmed', extracted=$2::jsonb, confirmed_at=now(), confirmed_by=$3, updated_at=now() WHERE id=$1",
       [id, JSON.stringify(sealExtracted(row.category, merged)), actor || '']
     );
-    await this.audit(this.pool, actor, '確認文件辨識', row.employee_id || id, row.category);
-    const pii = (await this.pool.query('SELECT * FROM hr_employee_pii WHERE employee_id=$1', [row.employee_id])).rows[0];
-    return {review: await this.getOcrReview(id), pii: publicPii(pii)};
+    await this.audit(this.pool, actor, '確認文件辨識', row.employee_id || row.candidate_id || id, row.category);
+    return {review: await this.getOcrReview(id), pii, candidate};
+  }
+
+  async applyResumeToCandidate(candidateId, packed, actor) {
+    const patch = {
+      name: packed.name,
+      phone: packed.phone,
+      birthDate: packed.birthDate,
+      nationalId: packed.nationalId,
+      address: packed.address,
+      education: packed.education,
+      experience: packed.experience,
+      job: packed.desiredPosition || packed.job,
+    };
+    return this.upsertCandidate(candidateId, Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined && v !== '')), actor);
+  }
+
+  async archiveCandidate(id, actor) {
+    const cur = await this.pool.query('SELECT payload, revision FROM hr_candidates WHERE id=$1', [id]);
+    if (!cur.rowCount) throw new AppError(404, '找不到應徵者');
+    const prev = cur.rows[0].payload || {};
+    if (prev.archived) return publicCandidate({id, revision: cur.rows[0].revision, payload: prev, created_at: null, updated_at: new Date()});
+    const payload = {...prev, archived: true, archivedAt: nowIso()};
+    const revision = (cur.rows[0].revision || 0) + 1;
+    await this.pool.query('UPDATE hr_candidates SET payload=$1, revision=$2, updated_at=now() WHERE id=$3', [payload, revision, id]);
+    await this.audit(this.pool, actor, '封存應徵者', id, prev.name || '');
+    const row = (await this.pool.query('SELECT id, payload, revision, created_at, updated_at FROM hr_candidates WHERE id=$1', [id])).rows[0];
+    return publicCandidate(row);
   }
 
   async dismissOcrReview(id, actor) {
@@ -978,6 +1039,7 @@ function mapOcrReview(row, {reveal = false} = {}) {
     created: row.created_at,
     confirmedAt: row.confirmed_at,
     confirmedBy: row.confirmed_by || '',
+    candidateId: row.candidate_id || row.candidateId || '',
   };
 }
 function redactExtracted(extracted = {}) {
@@ -1132,8 +1194,14 @@ function pickEmp(data, prev = {}) {
   if (data.arrivalDateSource || prev.arrivalDateSource) o.arrivalDateSource = data.arrivalDateSource || prev.arrivalDateSource;
   return o;
 }
-function pickCand(data) {
-  return {
+function looksLikeMaskedId(value, mask) {
+  const s = String(value || '').trim().toUpperCase();
+  if (!s) return true;
+  if (mask && s === String(mask).toUpperCase()) return true;
+  return /^[A-Z][*•xX]{4}\d{4}$/.test(s);
+}
+function pickCand(data, prev = {}) {
+  const out = {
     name: String(data.name || '').slice(0, 80),
     phone: String(data.phone || '').slice(0, 40),
     department: String(data.department || '').slice(0, 80),
@@ -1146,6 +1214,52 @@ function pickCand(data) {
     status: STATUSES.includes(data.status) ? data.status : '待聯絡',
     notes: String(data.notes || '').slice(0, 4000),
     employeeId: String(data.employeeId || '').slice(0, 40),
+    birthDate: String(data.birthDate || prev.birthDate || '').slice(0, 10),
+    address: String(data.address ?? prev.address ?? '').slice(0, 200),
+    education: String(data.education ?? prev.education ?? '').slice(0, 2000),
+    experience: String(data.experience ?? prev.experience ?? '').slice(0, 4000),
+    nationalIdMask: prev.nationalIdMask || '',
+    nationalIdEnc: prev.nationalIdEnc || null,
+    archived: Boolean(data.archived || prev.archived),
+    archivedAt: data.archivedAt || prev.archivedAt || '',
+  };
+  if (data.nationalId !== undefined) {
+    const raw = String(data.nationalId || '').trim();
+    if (!raw) {
+      out.nationalIdEnc = null;
+      out.nationalIdMask = '';
+    } else if (!looksLikeMaskedId(raw, prev.nationalIdMask)) {
+      const id = normalizeTaiwanId(raw);
+      if (id && !isValidTaiwanId(id)) throw new AppError(400, '身分證字號檢查碼不正確');
+      if (id) {
+        if (!hasPiiKey()) throw new AppError(400, '尚未設定 HR_PII_KEY，無法保存身分證字號。');
+        out.nationalIdEnc = encryptSecret(id);
+        out.nationalIdMask = maskTaiwanId(id);
+      } else {
+        out.nationalIdEnc = null;
+        out.nationalIdMask = '';
+      }
+    }
+  }
+  return out;
+}
+function publicCandidate(row) {
+  if (!row) return null;
+  const p = {...(row.payload || {})};
+  let nationalId = '';
+  if (p.nationalIdEnc && hasPiiKey()) {
+    try { nationalId = decryptSecret(p.nationalIdEnc); } catch { /* keep mask */ }
+  }
+  delete p.nationalIdEnc;
+  return {
+    id: row.id,
+    revision: row.revision,
+    created: row.created_at || p.created || '',
+    updated: row.updated_at || p.updated || '',
+    ...p,
+    nationalId,
+    nationalIdMask: p.nationalIdMask || (nationalId ? maskTaiwanId(nationalId) : ''),
+    archived: Boolean(p.archived || p.archivedAt),
   };
 }
 
