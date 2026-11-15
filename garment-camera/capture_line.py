@@ -71,6 +71,30 @@ def encode_photo(frame):
     raise ValueError('Photo could not fit 2.5MB upload limit')
 
 
+DETECT_FALLBACK_WIDTH = 1280
+
+
+def decode_qr(detector, frame):
+    """Read a QR code from a camera frame.
+
+    Try the native frame first so an 8 cm printed symbol stays large enough
+    in a 2560-wide view. If that yields nothing, fall back to the previous
+    path of shrinking the frame to width 1280. OpenCV's QRCodeDetector can
+    succeed on one scale and fail on the other.
+    """
+    code, _, _ = detector.detectAndDecode(frame)
+    code = (code or '').strip()
+    if code:
+        return code
+    height, width = frame.shape[:2]
+    scale = min(1, DETECT_FALLBACK_WIDTH / width)
+    if scale >= 1:
+        return ''
+    small = cv2.resize(frame, None, fx=scale, fy=scale)
+    code, _, _ = detector.detectAndDecode(small)
+    return (code or '').strip()
+
+
 def current_stage():
     with _lock:
         return _stage
@@ -372,12 +396,8 @@ def main():
             if scan_time - last_scan < scan_interval:
                 continue
             last_scan = scan_time
-            height, width = frame.shape[:2]
-            scale = min(1, 1280 / width)
-            small = cv2.resize(frame, None, fx=scale, fy=scale) if scale < 1 else frame
-            code, _, _ = detector.detectAndDecode(small)
+            code = decode_qr(detector, frame)
             now = time.monotonic()
-            code = code.strip()
             if not code:
                 last_seen_code = None
                 seen_since = 0.0
