@@ -10,13 +10,26 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <title>客衣拍照確認</title>
   <style>
-    :root { --bg:#102116; --card:#1a2c1f; --text:#f4fff6; --muted:#b7d0bc; --pre:#0f8a42; --post:#1d6aa2; --flash:#39e07a; }
+    :root { --bg:#102116; --card:#1a2c1f; --text:#f4fff6; --muted:#b7d0bc; --pre:#0f8a42; --post:#1d6aa2; --flash:#39e07a; --warn:#c9a227; --down:#b33939; }
     * { box-sizing:border-box; }
     html,body { margin:0; min-height:100%; background:var(--bg); color:var(--text); font-family:"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif; }
-    body { padding:24px; }
+    body { padding:24px; transition:background .15s linear; }
     body.flash { background:var(--flash); }
     h1 { margin:0 0 8px; font-size:28px; }
-    .sub { color:var(--muted); margin-bottom:20px; }
+    .sub { color:var(--muted); margin-bottom:12px; }
+    #link {
+      display:inline-block; margin:0 0 16px; padding:8px 14px; border-radius:999px;
+      background:var(--card); font-size:15px; font-weight:600;
+    }
+    #link.connecting { color:#f0e6a8; }
+    #link.ok { color:#8ee8ad; }
+    #link.down { color:#ffb3b3; background:#3a1a1a; }
+    #soundbar {
+      display:none; margin:0 0 16px; padding:22px 20px; border-radius:16px;
+      background:var(--warn); color:#1a1400; font-size:28px; font-weight:800;
+      text-align:center; cursor:pointer;
+    }
+    #soundbar.show { display:block; }
     .mode { display:flex; gap:16px; }
     button.stage { flex:1; min-height:120px; border:0; border-radius:20px; font-size:42px; font-weight:700; color:#fff; opacity:.55; }
     button.stage.on { opacity:1; box-shadow:0 0 0 6px rgba(255,255,255,.25); }
@@ -37,6 +50,8 @@
 <body>
   <h1>客衣拍照確認</h1>
   <div class="sub">監視器掃到 QR 後會依目前模式存成待傳照片，不會立刻推播 LINE。</div>
+  <div id="link" class="connecting">連線中…</div>
+  <div id="soundbar">點一下開啟聲音</div>
   <div class="mode">
     <button class="stage" data-stage="洗前" type="button">洗前</button>
     <button class="stage" data-stage="洗後" type="button">洗後</button>
@@ -44,34 +59,108 @@
   <div id="banner">目前模式：載入中…</div>
   <h2>最近拍照</h2>
   <div class="list" id="recent"></div>
-  <p class="hint">請把這個頁面加入主畫面，並保持開啟。第一次點模式按鈕會啟用提示音，並嘗試保持螢幕常亮。</p>
+  <p class="hint">請把這個頁面加入主畫面，並保持此頁在最前面、螢幕不要鎖。進入頁面後請先點一下以開啟提示音。</p>
   <script>
     const banner = document.getElementById('banner');
     const recentEl = document.getElementById('recent');
+    const linkEl = document.getElementById('link');
+    const soundBar = document.getElementById('soundbar');
+    const POLL_MS = 2500;
+    const STALE_MS = 8000;
+    const DOWN_MS = 12000;
+
     let stage = '';
     let lastId = 0;
+    let hydrated = false;
     let audioCtx = null;
+    let audioUnlocked = false;
+    let source = null;
+    let lastTalk = 0;
+    let linkState = 'connecting';
+    let pollTimer = 0;
+    let watchdogTimer = 0;
+    let reconnectTimer = 0;
+
+    function taipeiNow() {
+      return new Date();
+    }
+
+    function formatTaipei(value, withDate) {
+      const date = value instanceof Date ? value : new Date(value);
+      if (isNaN(date.getTime())) return value ? String(value) : '';
+      const opts = {
+        timeZone: 'Asia/Taipei',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+      };
+      if (withDate) {
+        opts.year = 'numeric';
+        opts.month = '2-digit';
+        opts.day = '2-digit';
+      }
+      return new Intl.DateTimeFormat('zh-TW', opts).format(date);
+    }
+
+    function setLink(state) {
+      linkState = state;
+      const when = lastTalk ? formatTaipei(lastTalk, false) : '—';
+      const label = state === 'ok' ? '已連線' : state === 'down' ? '斷線' : '連線中';
+      linkEl.className = state === 'ok' ? 'ok' : state === 'down' ? 'down' : 'connecting';
+      linkEl.textContent = label + '　更新於 ' + when;
+    }
+
+    function markTalk() {
+      lastTalk = taipeiNow();
+      if (linkState !== 'ok') setLink('ok');
+      else setLink('ok');
+    }
+
+    function showSoundBar() {
+      if (audioUnlocked) soundBar.classList.remove('show');
+      else soundBar.classList.add('show');
+    }
 
     function unlockAudio() {
-      if (audioCtx) return;
       const Ctx = window.AudioContext || window.webkitAudioContext;
-      if (!Ctx) return;
-      audioCtx = new Ctx();
-      if (audioCtx.state === 'suspended') audioCtx.resume();
+      if (!Ctx) {
+        audioUnlocked = true;
+        showSoundBar();
+        return;
+      }
+      try {
+        if (!audioCtx) audioCtx = new Ctx();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        if (audioCtx.state !== 'suspended') {
+          audioUnlocked = true;
+          showSoundBar();
+        }
+      } catch (e) {
+        showSoundBar();
+      }
     }
 
     function beep() {
-      if (!audioCtx) return;
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.type = 'sine';
-      osc.frequency.value = 880;
-      gain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.2, audioCtx.currentTime + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.25);
-      osc.connect(gain).connect(audioCtx.destination);
-      osc.start();
-      osc.stop(audioCtx.currentTime + 0.26);
+      try { if (navigator.vibrate) navigator.vibrate([200, 80, 200]); } catch (e) {}
+      if (!audioCtx || audioCtx.state === 'suspended') {
+        unlockAudio();
+        showSoundBar();
+        if (!audioCtx || audioCtx.state === 'suspended') return;
+      }
+      const start = audioCtx.currentTime;
+      [0, 0.22, 0.44].forEach(offset => {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = offset ? 988 : 880;
+        gain.gain.setValueAtTime(0.0001, start + offset);
+        gain.gain.exponentialRampToValueAtTime(0.22, start + offset + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + offset + 0.2);
+        osc.connect(gain).connect(audioCtx.destination);
+        osc.start(start + offset);
+        osc.stop(start + offset + 0.22);
+      });
     }
 
     async function keepAwake() {
@@ -94,7 +183,7 @@
         return '<div class="item">' +
           (src ? '<img src="'+src+'" alt="">' : '') +
           '<div class="meta"><div class="label">'+escapeHtml(item.stage||'')+'　'+escapeHtml(item.label||'')+'</div>' +
-          '<div class="when">'+escapeHtml(item.at||'')+'　'+status+'</div></div></div>';
+          '<div class="when">'+escapeHtml(formatTaipei(item.at, true))+'　'+status+'</div></div></div>';
       }).join('') : '<div class="item"><div class="meta">還沒有拍照紀錄。</div></div>';
     }
 
@@ -103,8 +192,6 @@
     }
 
     function flash(item) {
-      if (item && item.id && item.id === lastId) return;
-      if (item && item.id) lastId = item.id;
       document.body.classList.add('flash');
       banner.classList.add('ok');
       banner.textContent = '已拍照：' + (item && item.stage ? item.stage + '　' : '') + (item && item.label ? item.label : '');
@@ -113,23 +200,105 @@
         document.body.classList.remove('flash');
         banner.classList.remove('ok');
         renderStage(stage);
-      }, 1500);
+      }, 2500);
     }
 
-    async function apply(data, isCapture) {
+    function newestOf(items) {
+      const rows = items || [];
+      return rows.length ? rows[rows.length - 1] : null;
+    }
+
+    function noteRecords(data, fromCaptureEvent) {
+      const newest = newestOf(data && data.recent);
+      if (!hydrated) {
+        lastId = newest && newest.id ? newest.id : 0;
+        hydrated = true;
+        return false;
+      }
+      if (fromCaptureEvent && data && data.type === 'capture') {
+        const id = data.id;
+        if (id && id === lastId) return false;
+        if (id) lastId = id;
+        return true;
+      }
+      if (newest && newest.id && newest.id !== lastId) {
+        lastId = newest.id;
+        return true;
+      }
+      return false;
+    }
+
+    function apply(data, fromCaptureEvent) {
       if (data.stage) renderStage(data.stage);
       if (data.recent) renderRecent(data.recent);
-      if (isCapture || data.type === 'capture') flash(data);
+      if (noteRecords(data, fromCaptureEvent)) flash(fromCaptureEvent && data.type === 'capture' ? data : newestOf(data.recent));
     }
 
     async function refresh() {
-      const res = await fetch('/api/status', {cache:'no-store'});
+      const res = await fetch('/api/status', {cache: 'no-store'});
       const data = await res.json();
-      const newest = (data.recent || []).at(-1);
-      const isNew = newest && newest.id && newest.id !== lastId && lastId !== 0;
-      if (!lastId && newest && newest.id) lastId = newest.id;
-      await apply(data, isNew);
-      if (isNew && newest) lastId = newest.id;
+      markTalk();
+      apply(data, false);
+    }
+
+    function connectEvents() {
+      if (source) {
+        try { source.close(); } catch (e) {}
+        source = null;
+      }
+      try {
+        source = new EventSource('/api/events');
+      } catch (e) {
+        scheduleReconnect();
+        return;
+      }
+      source.onmessage = ev => {
+        let data;
+        try { data = JSON.parse(ev.data); } catch (err) { return; }
+        markTalk();
+        if (!data || data.type === 'ping') return;
+        apply(data, data.type === 'capture');
+      };
+      source.onerror = () => {
+        if (source) {
+          try { source.close(); } catch (e) {}
+          source = null;
+        }
+        scheduleReconnect();
+      };
+    }
+
+    function scheduleReconnect() {
+      if (reconnectTimer) return;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = 0;
+        connectEvents();
+        refresh().catch(() => {});
+      }, 1000);
+    }
+
+    function wakeAndSync() {
+      keepAwake();
+      unlockAudio();
+      connectEvents();
+      refresh().catch(() => {
+        setLink('down');
+        if (!banner.classList.contains('ok')) banner.textContent = '無法連到確認頁服務，請檢查平板是否在同一區網。';
+      });
+    }
+
+    function onWatchdog() {
+      if (!lastTalk) return;
+      const gap = Date.now() - lastTalk.getTime();
+      if (gap > DOWN_MS) {
+        if (linkState !== 'down') setLink('down');
+        connectEvents();
+        refresh().catch(() => {});
+      } else if (gap > STALE_MS) {
+        if (linkState !== 'connecting') setLink('connecting');
+        connectEvents();
+        refresh().catch(() => {});
+      }
     }
 
     async function choose(next) {
@@ -137,24 +306,30 @@
       keepAwake();
       const res = await fetch('/api/stage', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({stage:next})});
       const data = await res.json();
+      markTalk();
       if (data.stage) renderStage(data.stage);
     }
 
     document.querySelectorAll('button.stage').forEach(btn => {
       btn.addEventListener('click', () => choose(btn.dataset.stage));
     });
-    document.addEventListener('click', () => { unlockAudio(); keepAwake(); }, {once:false});
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) keepAwake(); });
-    keepAwake();
-    refresh().catch(() => { banner.textContent = '無法連到確認頁服務，請檢查平板是否在同一區網。'; });
-    setInterval(() => refresh().catch(() => {}), 2000);
-    try {
-      const events = new EventSource('/api/events');
-      events.onmessage = ev => {
-        const data = JSON.parse(ev.data);
-        apply(data, data.type === 'capture');
-      };
-    } catch (e) {}
+    soundBar.addEventListener('click', ev => {
+      ev.preventDefault();
+      unlockAudio();
+      keepAwake();
+    });
+    document.addEventListener('pointerdown', () => { unlockAudio(); keepAwake(); }, {passive:true});
+    document.addEventListener('click', () => { unlockAudio(); keepAwake(); });
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) wakeAndSync(); });
+    window.addEventListener('pageshow', () => wakeAndSync());
+    window.addEventListener('focus', () => wakeAndSync());
+    window.addEventListener('online', () => wakeAndSync());
+
+    showSoundBar();
+    setLink('connecting');
+    wakeAndSync();
+    pollTimer = setInterval(() => refresh().catch(() => setLink('down')), POLL_MS);
+    watchdogTimer = setInterval(onWatchdog, 2000);
   </script>
 </body>
 </html>
