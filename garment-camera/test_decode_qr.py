@@ -199,5 +199,55 @@ class StreamResilienceTests(unittest.TestCase):
         self.assertFalse(reader.is_alive())
 
 
+class EncodeAndHoldTests(unittest.TestCase):
+    def test_fullres_photo_keeps_native_size(self):
+        frame = blank(2560, 1440)
+        frame[100:200, 100:200] = (40, 80, 200)
+        data = cl.encode_photo(frame)
+        arr = np.frombuffer(data, dtype=np.uint8)
+        import cv2
+        decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        self.assertEqual(tuple(decoded.shape[:2]), (1440, 2560))
+        self.assertLessEqual(len(data), cl.MAX_JPEG)
+        self.assertGreater(len(data), 1000)
+        self.assertEqual(data[:2], b'\xff\xd8')
+
+    def test_preview_is_small_and_under_line_limit(self):
+        frame = blank(2560, 1440)
+        frame[100:400, 100:400] = (20, 180, 80)
+        data = cl.encode_preview(frame)
+        import cv2
+        decoded = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+        self.assertIsNotNone(decoded)
+        self.assertLessEqual(decoded.shape[1], cl.PREVIEW_MAX_WIDTH)
+        self.assertLessEqual(len(data), cl.MAX_PREVIEW_JPEG)
+        self.assertEqual(cl.preview_name('20261115_045730_182270.jpg'), '20261115_045730_182270.thumb.jpg')
+
+    def test_hold_client_errors_but_not_rate_limit_or_server_errors(self):
+        self.assertTrue(cl.should_hold_upload(409))
+        self.assertTrue(cl.should_hold_upload(400))
+        self.assertFalse(cl.should_hold_upload(429))
+        self.assertFalse(cl.should_hold_upload(500))
+        self.assertFalse(cl.should_hold_upload(0))
+
+
+
+class NonBlockingUploadTests(unittest.TestCase):
+
+    def test_failed_hotel_does_not_block_other_uploads(self):
+        src = Path(cl.__file__).read_text(encoding='utf-8')
+        start = src.find('def delivery_worker')
+        end = src.find('\ndef ', start + 4)
+        worker = src[start:end]
+        self.assertIn('retry_at', worker)
+        self.assertIn('retry_at[job]', worker)
+        self.assertNotIn('stop.wait(30)', worker)
+        self.assertNotIn('stop.wait(21600', worker)
+        # A failure records a per-job retry time and continues the loop.
+        self.assertIn('continue', worker)
+        self.assertNotRegex(worker, r'stop\.wait\(.*\)\n\s+break')
+
+
+
 if __name__ == '__main__':
     unittest.main()
