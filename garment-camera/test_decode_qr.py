@@ -109,6 +109,31 @@ class LoadStateTests(unittest.TestCase):
         cl.load_state()
         self.assertEqual(cl._capture_id, 7)
 
+class TabletPrefixTests(unittest.TestCase):
+    def setUp(self):
+        self.prev = cl.TABLET_PATH_PREFIX
+
+    def tearDown(self):
+        cl.TABLET_PATH_PREFIX = self.prev
+
+    def test_no_prefix_passthrough(self):
+        cl.TABLET_PATH_PREFIX = ''
+        self.assertEqual(cl.tablet_request_path('/api/status'), ('/api/status', None))
+        self.assertEqual(cl.tablet_request_path('/'), ('/', None))
+
+    def test_strips_configured_prefix(self):
+        cl.TABLET_PATH_PREFIX = '/cam-abcdef0123456789'
+        self.assertEqual(cl.tablet_request_path('/cam-abcdef0123456789/'), ('/', None))
+        self.assertEqual(cl.tablet_request_path('/cam-abcdef0123456789/api/status'), ('/api/status', None))
+        self.assertEqual(cl.tablet_request_path('/cam-abcdef0123456789/photos/a.jpg'), ('/photos/a.jpg', None))
+        path, redirect = cl.tablet_request_path('/cam-abcdef0123456789')
+        self.assertEqual(path, '/')
+        self.assertEqual(redirect, '/cam-abcdef0123456789/')
+
+    def test_does_not_strip_other_paths(self):
+        cl.TABLET_PATH_PREFIX = '/cam-abcdef0123456789'
+        self.assertEqual(cl.tablet_request_path('/api/status'), ('/api/status', None))
+        self.assertEqual(cl.tablet_request_path('/camera/api/status'), ('/camera/api/status', None))
 
 if __name__ == '__main__':
     unittest.main()
