@@ -12,8 +12,11 @@ services:
       PHOTO_DIR: /data/photos
       TABLET_BIND: 0.0.0.0
       TABLET_PORT: "8790"
+      TABLET_PATH_PREFIX: ${TABLET_PATH_PREFIX:-}
     volumes:
       - ./data:/data
     ports:
-      # LAN only. Do not publish this port on a Tailscale or public address.
+      # LAN NIC only, plus loopback for a local Tailscale Funnel proxy.
+      # Do not publish this port on a Tailscale or public address.
       - "192.168.123.201:8790:8790"
+      - "127.0.0.1:8790:8790"

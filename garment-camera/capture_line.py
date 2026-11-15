@@ -36,6 +36,8 @@ API_KEY = os.environ.get('CAMERA_API_KEY', '')
 MAX_JPEG = 2_500_000
 TABLET_BIND = os.environ.get('TABLET_BIND', '0.0.0.0')
 TABLET_PORT = int(os.environ.get('TABLET_PORT', '8790'))
+# Optional public path prefix (e.g. /cam-xxxxxxxxxxxxxxxx). LAN / still works.
+TABLET_PATH_PREFIX = os.environ.get('TABLET_PATH_PREFIX', '').rstrip('/')
 STAGE_PATH = Path(os.environ.get('STAGE_FILE', str(OUT / 'stage.json')))
 RECENT_PATH = Path(os.environ.get('RECENT_FILE', str(OUT / 'recent.json')))
 APP_DIR = Path(__file__).resolve().parent
@@ -378,6 +380,18 @@ def delivery_worker(stop):
                 break
 
 
+def tablet_request_path(raw_path):
+    """Strip TABLET_PATH_PREFIX when present. Return (path, redirect_to_or_None)."""
+    path = raw_path or '/'
+    prefix = TABLET_PATH_PREFIX
+    if prefix and path == prefix:
+        return '/', prefix + '/'
+    if prefix and path.startswith(prefix + '/'):
+        stripped = path[len(prefix):] or '/'
+        return stripped, None
+    return path, None
+
+
 class TabletHandler(BaseHTTPRequestHandler):
     server_version = 'GarmentTablet/1.0'
 
@@ -395,7 +409,13 @@ class TabletHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        path = urlsplit(self.path).path
+        path, redirect = tablet_request_path(urlsplit(self.path).path)
+        if redirect:
+            self.send_response(HTTPStatus.MOVED_PERMANENTLY)
+            self.send_header('Location', redirect)
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            return
         if path in ('/', '/index.html'):
             self._send(200, (APP_DIR / 'tablet.html').read_bytes(), 'text/html; charset=utf-8')
             return
@@ -458,7 +478,13 @@ class TabletHandler(BaseHTTPRequestHandler):
         return self.client_address[0] in ('127.0.0.1', '::1')
 
     def do_POST(self):
-        path = urlsplit(self.path).path
+        path, redirect = tablet_request_path(urlsplit(self.path).path)
+        if redirect:
+            self.send_response(HTTPStatus.MOVED_PERMANENTLY)
+            self.send_header('Location', redirect)
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            return
         if path in ('/api/test-capture', '/api/test-capture/cleanup'):
             if not self._is_loopback():
                 self._send(HTTPStatus.FORBIDDEN, '{"error":"localhost only"}')
