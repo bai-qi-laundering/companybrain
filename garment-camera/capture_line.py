@@ -20,6 +20,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit, quote, unquote
 
 import cv2
+import numpy as np
 from onvif import ONVIFCamera
 
 HOST = os.environ.get('CAMERA_HOST', '192.168.1.87')
@@ -71,13 +72,108 @@ def encode_photo(frame):
     raise ValueError('Photo could not fit 2.5MB upload limit')
 
 
+DETECT_FAST_WIDTH = int(os.environ.get('DETECT_FAST_WIDTH', '1280'))
+DETECT_MID_WIDTH = int(os.environ.get('DETECT_MID_WIDTH', '1600'))
+FRAME_STALE_SECONDS = 0.75
+# Ignore the camera OSD strips when doing the mid-width pass.
+OSD_MARGIN = (40, 80, 40, 80)  # left, top, right, bottom
+TEST_LABEL = '測試卡片'
+TEST_PHOTO_PREFIX = 'TEST_'
+
+
+def _resize_to_width(frame, width):
+    height, current = frame.shape[:2]
+    scale = min(1, float(width) / current)
+    if scale >= 1:
+        return frame, 1.0
+    return cv2.resize(frame, None, fx=scale, fy=scale), scale
+
+
+def _table_roi(frame):
+    height, width = frame.shape[:2]
+    left, top, right, bottom = OSD_MARGIN
+    left = min(left, max(0, width // 16))
+    right = min(right, max(0, width // 16))
+    top = min(top, max(0, height // 8))
+    bottom = min(bottom, max(0, height // 8))
+    x0, x1 = left, width - right
+    y0, y1 = top, height - bottom
+    if y1 - y0 < 200 or x1 - x0 < 200:
+        return frame, (0, 0)
+    return frame[y0:y1, x0:x1], (x0, y0)
+
+
+def _quad_to_native(pts, scale, offset=(0, 0)):
+    if pts is None or len(pts) == 0:
+        return None
+    quad = pts[0] if getattr(pts, 'ndim', 0) == 3 else pts
+    ox, oy = offset
+    return np.asarray(quad, dtype=np.float32) / float(scale) + np.array([ox, oy], dtype=np.float32)
+
+
+def _crop_around_quad(frame, quad, pad_ratio=0.45, min_size=320):
+    height, width = frame.shape[:2]
+    xs = quad[:, 0]
+    ys = quad[:, 1]
+    sides = [float(np.linalg.norm(quad[i] - quad[(i + 1) % 4])) for i in range(4)]
+    pad = max((max(sides) if sides else 0) * pad_ratio, 24)
+    x0 = max(0, int(xs.min() - pad))
+    y0 = max(0, int(ys.min() - pad))
+    x1 = min(width, int(xs.max() + pad))
+    y1 = min(height, int(ys.max() + pad))
+    if x1 - x0 < min_size or y1 - y0 < min_size:
+        cx, cy = int(xs.mean()), int(ys.mean())
+        half = max(min_size // 2, 1)
+        x0, x1 = max(0, cx - half), min(width, cx + half)
+        y0, y1 = max(0, cy - half), min(height, cy + half)
+    return frame[y0:y1, x0:x1]
+
+
+def _decode_one(detector, image):
+    code, pts, _ = detector.detectAndDecode(image)
+    return (code or '').strip(), pts
+
+
+def decode_qr(detector, frame):
+    """Read a QR code. Must never run on the RTSP capture thread.
+
+    Try the proven 1280-wide path first. If that is empty, try a mid-width
+    (default 1600) pass on the table region, and a native-resolution crop
+    around any detected quad. Do not run detectAndDecode on a full 2560 frame.
+    """
+    if frame is None or getattr(frame, 'size', 0) == 0:
+        return ''
+    small, scale = _resize_to_width(frame, DETECT_FAST_WIDTH)
+    code, pts = _decode_one(detector, small)
+    if code:
+        return code
+    if pts is not None and len(pts):
+        quad = _quad_to_native(pts, scale)
+        if quad is not None:
+            code, _ = _decode_one(detector, _crop_around_quad(frame, quad))
+            if code:
+                return code
+    roi, offset = _table_roi(frame)
+    mid, mid_scale = _resize_to_width(roi, DETECT_MID_WIDTH)
+    code, pts = _decode_one(detector, mid)
+    if code:
+        return code
+    if pts is not None and len(pts):
+        quad = _quad_to_native(pts, mid_scale, offset)
+        if quad is not None:
+            code, _ = _decode_one(detector, _crop_around_quad(frame, quad))
+            if code:
+                return code
+    return ''
+
+
 def current_stage():
     with _lock:
         return _stage
 
 
 def load_state():
-    global _stage, _recent
+    global _stage, _recent, _capture_id
     try:
         data = json.loads(STAGE_PATH.read_text(encoding='utf-8'))
         if data.get('stage') in STAGES:
@@ -88,6 +184,14 @@ def load_state():
         rows = json.loads(RECENT_PATH.read_text(encoding='utf-8'))
         if isinstance(rows, list):
             _recent = rows[-30:]
+            ids = []
+            for item in _recent:
+                try:
+                    ids.append(int((item or {}).get('id') or 0))
+                except (TypeError, ValueError):
+                    pass
+            if ids:
+                _capture_id = max(_capture_id, max(ids))
     except (OSError, ValueError):
         pass
 
@@ -156,6 +260,49 @@ def broadcast(event):
             pass
     with _lock:
         _sse[:] = [pair for pair in _sse if pair in alive]
+
+
+def record_test_capture():
+    """Localhost-only tablet check: a clearly marked row, no CompanyBrain upload."""
+    timestamp = datetime.now().astimezone()
+    filename = TEST_PHOTO_PREFIX + timestamp.strftime('%Y%m%d_%H%M%S_%f') + '.jpg'
+    path = OUT / filename
+    image = np.zeros((180, 240, 3), dtype=np.uint8)
+    image[:] = (40, 90, 40)
+    cv2.putText(image, 'TEST', (40, 110), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (255, 255, 255), 3)
+    if not cv2.imwrite(str(path), image):
+        raise OSError('Failed to write test photo')
+    return record_capture({
+        'at': timestamp.isoformat(timespec='seconds'),
+        'label': TEST_LABEL,
+        'stage': current_stage(),
+        'photo': filename,
+        'status': 'stored',
+    })
+
+
+def cleanup_test_captures():
+    removed = []
+    with _lock:
+        kept = []
+        for item in _recent:
+            photo = str(item.get('photo') or '')
+            label = str(item.get('label') or '')
+            if photo.startswith(TEST_PHOTO_PREFIX) or label == TEST_LABEL:
+                removed.append(photo)
+            else:
+                kept.append(item)
+        _recent[:] = kept
+        rows = list(_recent)
+        persist_recent(rows)
+    for name in removed:
+        if name:
+            try:
+                (OUT / name).unlink()
+            except OSError:
+                pass
+    broadcast({'type': 'status', 'recent': rows, 'stage': current_stage()})
+    return len(removed)
 
 
 def queue_photo(label, frame, filename, stage=None):
@@ -281,7 +428,7 @@ class TabletHandler(BaseHTTPRequestHandler):
                 self.wfile.flush()
                 while True:
                     if not ready.wait(15):
-                        self.wfile.write(b': keepalive\n\n')
+                        self.wfile.write(b'data: {"type":"ping"}\n\n')
                         self.wfile.flush()
                         continue
                     ready.clear()
@@ -307,8 +454,32 @@ class TabletHandler(BaseHTTPRequestHandler):
             return
         self._send(HTTPStatus.NOT_FOUND, '{"error":"not found"}')
 
+    def _is_loopback(self):
+        return self.client_address[0] in ('127.0.0.1', '::1')
+
     def do_POST(self):
         path = urlsplit(self.path).path
+        if path in ('/api/test-capture', '/api/test-capture/cleanup'):
+            if not self._is_loopback():
+                self._send(HTTPStatus.FORBIDDEN, '{"error":"localhost only"}')
+                return
+            length = int(self.headers.get('Content-Length') or 0)
+            if length > 0:
+                self.rfile.read(min(length, 4096))
+            try:
+                if path.endswith('/cleanup'):
+                    removed = cleanup_test_captures()
+                    self._send(200, json.dumps({'ok': True, 'removed': removed}, ensure_ascii=False))
+                else:
+                    entry = record_test_capture()
+                    self._send(200, json.dumps({
+                        'ok': True, 'test': True, 'id': entry['id'],
+                        'photo': entry['photo'], 'label': entry['label'],
+                        'stage': entry['stage'],
+                    }, ensure_ascii=False))
+            except (OSError, ValueError):
+                self._send(HTTPStatus.INTERNAL_SERVER_ERROR, '{"error":"test capture failed"}')
+            return
         if path != '/api/stage':
             self._send(HTTPStatus.NOT_FOUND, '{"error":"not found"}')
             return
@@ -355,29 +526,52 @@ def main():
     if cap is None:
         raise RuntimeError('No usable RTSP profile')
     detector = cv2.QRCodeDetector()
+    latest = {'frame': None, 't': 0.0}
+    latest_lock = threading.Lock()
+    stream_ok = threading.Event()
+    stream_ok.set()
+    stop_capture = threading.Event()
+
+    def capture_loop():
+        try:
+            while not stop_capture.is_set():
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                with latest_lock:
+                    latest['frame'] = frame
+                    latest['t'] = time.monotonic()
+        finally:
+            stream_ok.clear()
+
+    reader = threading.Thread(target=capture_loop, name='camera-capture', daemon=True)
+    reader.start()
     last_photo = 0.0
     last_seen_code = None
     seen_since = 0.0
-    last_scan = 0.0
-    scan_interval = 1.0 / 3.0
+    last_frame_t = 0.0
     log = OUT / 'capture_log.csv'
     print('Watching QR codes; capture interval 8 seconds. Current stage:', current_stage(), flush=True)
+    stopped = False
     try:
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                print('Stream interrupted. Reconnecting.', flush=True)
-                break
-            scan_time = time.monotonic()
-            if scan_time - last_scan < scan_interval:
+        while stream_ok.is_set():
+            with latest_lock:
+                raw = latest['frame']
+                frame_t = latest['t']
+                if raw is None or frame_t == last_frame_t:
+                    frame = None
+                else:
+                    frame = raw.copy()
+            if frame is None:
+                time.sleep(0.02)
                 continue
-            last_scan = scan_time
-            height, width = frame.shape[:2]
-            scale = min(1, 1280 / width)
-            small = cv2.resize(frame, None, fx=scale, fy=scale) if scale < 1 else frame
-            code, _, _ = detector.detectAndDecode(small)
+            last_frame_t = frame_t
+            code = decode_qr(detector, frame)
             now = time.monotonic()
-            code = code.strip()
+            with latest_lock:
+                newest_t = latest['t']
+            if (now - frame_t) > FRAME_STALE_SECONDS or (newest_t - frame_t) > FRAME_STALE_SECONDS:
+                continue
             if not code:
                 last_seen_code = None
                 seen_since = 0.0
@@ -414,10 +608,15 @@ def main():
             last_photo = now
             print('PHOTO SAVED: %s | QR: %s | STAGE: %s' % (path.name, code, stage), flush=True)
     except KeyboardInterrupt:
+        stopped = True
         print('\nStopped.', flush=True)
         raise
     finally:
+        stop_capture.set()
         cap.release()
+        reader.join(timeout=2)
+        if not stopped and not stream_ok.is_set():
+            print('Stream interrupted. Reconnecting.', flush=True)
 
 
 if __name__ == '__main__':
