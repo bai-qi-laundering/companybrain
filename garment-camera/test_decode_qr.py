@@ -230,6 +230,35 @@ class EncodeAndHoldTests(unittest.TestCase):
         self.assertFalse(cl.should_hold_upload(500))
         self.assertFalse(cl.should_hold_upload(0))
 
+    def test_missing_jpeg_is_detected(self):
+        job = Path(cl.QUEUE) / '20261115_999999_000000.json'
+        job.write_text('{"label":"H2O客衣","stage":"洗後"}', encoding='utf-8')
+        self.addCleanup(lambda: job.exists() and job.unlink())
+        self.assertTrue(cl.source_jpeg_missing(job))
+        jpeg = cl.OUT / (job.stem + '.jpg')
+        jpeg.write_bytes(b'\xff\xd8\xff\xd9')
+        self.addCleanup(lambda: jpeg.unlink(missing_ok=True))
+        self.assertFalse(cl.source_jpeg_missing(job))
+
+    def test_cancel_missing_jpeg_moves_json_out_of_queue_and_hold(self):
+        job = Path(cl.QUEUE) / '20261115_888888_000000.json'
+        job.write_text('{"label":"然一客衣","stage":"洗後"}', encoding='utf-8')
+        self.assertTrue(cl.source_jpeg_missing(job))
+        dest = cl.cancel_job(job, 'source JPEG missing')
+        self.assertFalse(job.exists())
+        self.assertTrue(dest.is_file())
+        self.assertEqual(dest.parent.parent.resolve(), Path(cl.CANCELLED).resolve())
+        self.assertIn('然一客衣', dest.read_text(encoding='utf-8'))
+
+        cl.HOLD.mkdir(parents=True, exist_ok=True)
+        held = cl.HOLD / '20261115_777777_000000.json'
+        held.write_text('{"label":"H2O客衣","stage":"洗前"}', encoding='utf-8')
+        dest2 = cl.cancel_job(held, 'source JPEG missing')
+        self.assertFalse(held.exists())
+        self.assertTrue(dest2.is_file())
+        self.assertEqual(dest2.parent.parent.resolve(), Path(cl.CANCELLED).resolve())
+        self.assertIn('H2O客衣', dest2.read_text(encoding='utf-8'))
+
 
 
 class NonBlockingUploadTests(unittest.TestCase):

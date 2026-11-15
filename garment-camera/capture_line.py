@@ -44,6 +44,7 @@ MAX_PREVIEW_JPEG = 1_000_000  # LINE previewImageUrl limit
 PREVIEW_MAX_WIDTH = 800
 HOLD = OUT / 'pending-unbound'
 HOLD_RETRY_SECONDS = 600
+CANCELLED = OUT / 'pending-cancelled'
 TABLET_BIND = os.environ.get('TABLET_BIND', '0.0.0.0')
 TABLET_PORT = int(os.environ.get('TABLET_PORT', '8790'))
 # Optional public path prefix (e.g. /cam-xxxxxxxxxxxxxxxx). LAN / still works.
@@ -144,6 +145,29 @@ def due_hold_jobs():
         if now - path.stat().st_mtime >= HOLD_RETRY_SECONDS:
             due.append(path)
     return due
+
+
+def job_source_jpeg(job):
+    return OUT / (Path(job).stem + '.jpg')
+
+
+def source_jpeg_missing(job):
+    return not job_source_jpeg(job).is_file()
+
+
+def cancel_job(job, reason='source JPEG missing'):
+    """Move a queue/hold JSON out of the upload pipeline without deleting it."""
+    stamp = datetime.now().astimezone().strftime('%Y%m%d-%H%M')
+    dest_dir = CANCELLED / stamp
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / job.name
+    if dest.exists():
+        dest = dest_dir / (job.stem + '-' + datetime.now().astimezone().strftime('%H%M%S') + '.json')
+    if Path(job).resolve() != dest.resolve():
+        job.replace(dest)
+    mark_recent(job.stem + '.jpg', 'cancelled')
+    print('PHOTO CANCELLED (removed from queue):', job.stem, reason, flush=True)
+    return dest
 
 
 DETECT_FAST_WIDTH = int(os.environ.get('DETECT_FAST_WIDTH', '1280'))
@@ -514,12 +538,8 @@ def delivery_worker(stop):
                 return
             photo_name = job.stem + '.jpg'
             try:
-                try:
-                    (OUT / photo_name).stat()
-                except FileNotFoundError:
-                    job.unlink(missing_ok=True)
-                    mark_recent(photo_name, 'deleted')
-                    print('PHOTO CANCELLED: source JPG removed:', job.stem, flush=True)
+                if source_jpeg_missing(job):
+                    cancel_job(job, 'source JPEG missing')
                     continue
                 if time.monotonic() < retry_at.get(job, 0):
                     continue
