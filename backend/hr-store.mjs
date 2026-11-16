@@ -1,13 +1,13 @@
 import {randomBytes} from 'node:crypto';
 import {AppError} from './domain.mjs';
 import {encryptSecret, decryptSecret, hasPiiKey, last4} from './hr-crypto.mjs';
-import {maskTaiwanId, isValidTaiwanId, normalizeTaiwanId} from './hr-twid.mjs';
+import {maskTaiwanId, normalizeTaiwanId} from './hr-twid.mjs';
 import {DEFAULT_SALARY_IMPORT} from './hr-salary-import.mjs';
 import {yearsForEmployee, decorateYear, defaultSettlement, SETTLEMENTS, DEFAULT_BASIS, endingSoon} from './hr-leave.mjs';
 import {DEFAULT_DEPT_PREFIXES, nextPrefixedId, prefixForDepartment, isUsableEmployeeId, PAY_TYPES, PAYMENT_METHODS, jobTitleOptions, STANDARD_JOBS, STANDARD_DEPARTMENTS, DEPARTMENT_JOBS} from './hr-ids.mjs';
 import {KEEP_RECRUITMENT_STATUS, isKeptRecruitmentStatus} from './hr-purge.mjs';
 
-export const DOC_TYPES = {identity: '身分證', bank: '存摺', license: '駕照', resume: '履歷表'};
+export const DOC_TYPES = {identity: '身分證', bank: '存摺', license: '駕照', resume: '履歷表', insurance: '勞健保異動'};
 export const STATUSES = ['待聯絡', '待面試', '待回覆', '錄取', '待報到', '已報到', '未錄取', '放棄', '未回覆', '未到面試', '未報到'];
 export const OPEN_STATUSES = ['待聯絡', '待面試', '待回覆', '錄取', '待報到'];
 export const EMP_FIELDS = ['name', 'department', 'job', 'employmentType', 'payType', 'paymentMethod', 'arrivalDate', 'departureDate', 'phone', 'emergencyContact', 'paperLocation', 'notes', 'lineBound', 'lineId', 'address', 'education', 'experience'];
@@ -200,6 +200,7 @@ export class HrStore {
     await this.setSettingIfAbsent('leaveSettleDefault', '未休完已折現');
     await this.setSettingIfAbsent('deptPrefixes', DEFAULT_DEPT_PREFIXES);
     await this.setSettingIfAbsent('salaryImport', DEFAULT_SALARY_IMPORT);
+    await this.pool.query('ALTER TABLE hr_documents ADD COLUMN IF NOT EXISTS removed_at timestamptz');
     await this.pool.query('ALTER TABLE hr_documents ADD COLUMN IF NOT EXISTS candidate_id text REFERENCES hr_candidates(id)');
     await this.pool.query('ALTER TABLE hr_ocr_reviews ADD COLUMN IF NOT EXISTS candidate_id text REFERENCES hr_candidates(id)');
     await this.pool.query('CREATE INDEX IF NOT EXISTS hr_docs_cand ON hr_documents(candidate_id)');
@@ -265,7 +266,7 @@ export class HrStore {
   async staffState() {
     const [employees, documents, settings, leaveYears, leaveEntries, pii, ocrReviews, jobTitles] = await Promise.all([
       this.pool.query('SELECT id, payload, revision FROM hr_employees ORDER BY id'),
-      this.pool.query('SELECT * FROM hr_documents ORDER BY category, filename'),
+      this.pool.query('SELECT * FROM hr_documents WHERE removed_at IS NULL ORDER BY category, filename'),
       this.settingsBundle(),
       this.pool.query('SELECT * FROM hr_leave_years ORDER BY starts_on DESC, id'),
       this.pool.query('SELECT * FROM hr_leave_entries ORDER BY taken_on DESC, id'),
@@ -402,7 +403,7 @@ export class HrStore {
     if (!id) return recruit;
     const [events, documents, ocrReviews] = await Promise.all([
       this.pool.query('SELECT * FROM hr_recruitment_events WHERE candidate_id=$1 ORDER BY created_at DESC, id DESC', [id]),
-      this.pool.query('SELECT * FROM hr_documents WHERE candidate_id=$1 ORDER BY category, filename', [id]),
+      this.pool.query('SELECT * FROM hr_documents WHERE candidate_id=$1 AND removed_at IS NULL ORDER BY category, filename', [id]),
       this.pool.query('SELECT * FROM hr_ocr_reviews WHERE candidate_id=$1 ORDER BY created_at DESC, id', [id]),
     ]);
     return {
@@ -419,7 +420,7 @@ export class HrStore {
 
       this.pool.query('SELECT id, payload, revision FROM hr_employees ORDER BY id'),
       this.pool.query('SELECT id, employee_id, kind, payload, created_at FROM hr_records ORDER BY created_at DESC, id'),
-      this.pool.query('SELECT * FROM hr_documents ORDER BY category, filename'),
+      this.pool.query('SELECT * FROM hr_documents WHERE removed_at IS NULL ORDER BY category, filename'),
       this.pool.query('SELECT id, payload, revision, created_at, updated_at FROM hr_candidates ORDER BY id'),
       this.pool.query('SELECT * FROM hr_recruitment_events ORDER BY created_at DESC, id DESC'),
       this.pool.query('SELECT department, payload, revision FROM hr_recruitment_goals ORDER BY department'),
@@ -713,12 +714,63 @@ export class HrStore {
          filename=excluded.filename, size=excluded.size, mtime=excluded.mtime, available=true,
          employee_id=COALESCE(hr_documents.employee_id, excluded.employee_id),
          candidate_id=COALESCE(hr_documents.candidate_id, excluded.candidate_id),
-         suggestions=excluded.suggestions, expires_on=COALESCE(hr_documents.expires_on, excluded.expires_on)`,
+         suggestions=excluded.suggestions, expires_on=COALESCE(hr_documents.expires_on, excluded.expires_on) WHERE hr_documents.removed_at IS NULL`,
       [row.id, row.category, row.relativePath, row.filename, row.size, row.mtime, row.available !== false,
         row.employeeId || null, row.candidateId || null, JSON.stringify(row.suggestions || []), row.expiresOn || null]
     );
     if (actor && (row.employeeId || row.candidateId)) await this.audit(this.pool, actor, '上傳員工文件', row.employeeId || row.candidateId, row.category + ' ' + row.filename);
     return row;
+  }
+
+  async removeDocument(id, actor) {
+    const c = await this.pool.connect();
+    try {
+      await c.query('BEGIN');
+      const result = await c.query('UPDATE hr_documents SET removed_at=now(), available=false WHERE id=$1 AND removed_at IS NULL RETURNING *', [id]);
+      if (!result.rowCount) throw new AppError(404, '找不到文件');
+      await c.query("UPDATE hr_ocr_reviews SET status='dismissed', updated_at=now() WHERE document_id=$1 AND status='pending'", [id]);
+      await this.audit(c, actor, '移除文件', id, result.rows[0].filename + '（NAS原檔保留）');
+      await c.query('COMMIT');
+      return {ok: true};
+    } catch (e) { await c.query('ROLLBACK'); throw e; }
+    finally { c.release(); }
+  }
+
+  async confirmInsuranceReview(id, fields, actor) {
+    const {packConfirmed} = await import('./hr-ocr.mjs');
+    const c = await this.pool.connect();
+    try {
+      await c.query('BEGIN');
+      const row = (await c.query('SELECT * FROM hr_ocr_reviews WHERE id=$1 FOR UPDATE', [id])).rows[0];
+      if (!row || row.status !== 'pending') throw new AppError(409, '辨識已處理，請重新載入');
+      const packed = packConfirmed('insurance', {...row.extracted, ...fields});
+      const emp = (await c.query('SELECT payload FROM hr_employees WHERE id=$1 FOR UPDATE', [row.employee_id])).rows[0];
+      if (!emp) throw new AppError(404, '找不到員工');
+      const payload = {...emp.payload};
+      for (const key of ['arrivalDate', 'departureDate']) if (packed[key]) payload[key] = packed[key];
+      if (payload.arrivalDate && payload.departureDate && payload.departureDate < payload.arrivalDate) throw new AppError(400, '離職日不能早於到職日');
+      await c.query('UPDATE hr_employees SET payload=$2::jsonb, revision=revision+1, updated_at=now() WHERE id=$1', [row.employee_id, JSON.stringify(payload)]);
+      for (const [key, action] of [['enrollmentDate', '加保'], ['withdrawalDate', '退保']]) {
+        if (!packed[key]) continue;
+        const record = {date: packed[key], labor: packed.insuranceType.includes('勞') ? action : '—', health: packed.insuranceType.includes('健') ? action : '—', documentId: row.document_id, note: '截圖辨識後人工確認'};
+        await c.query('INSERT INTO hr_records(id, employee_id, kind, payload) VALUES($1,$2,$3,$4::jsonb)', [newId('REC-'), row.employee_id, 'insurance', JSON.stringify(record)]);
+      }
+      await c.query("UPDATE hr_ocr_reviews SET status='confirmed', extracted=$2::jsonb, confirmed_at=now(), confirmed_by=$3, updated_at=now() WHERE id=$1", [id, JSON.stringify(packed), actor || '']);
+      await this.audit(c, actor, '確認勞健保截圖日期', row.employee_id, JSON.stringify(packed));
+      await c.query('COMMIT');
+      return {ok: true};
+    } catch (e) { await c.query('ROLLBACK'); throw e; }
+    finally { c.release(); }
+  }
+
+  async updateInsuranceRecord(id, fields, actor) {
+    const {insuranceDate} = await import('./hr-ocr.mjs');
+    const date = insuranceDate(fields.date);
+    if (!date) throw new AppError(400, '請填生效日期');
+    const result = await this.pool.query("UPDATE hr_records SET payload=payload || $2::jsonb WHERE id=$1 AND kind='insurance' RETURNING employee_id", [id, JSON.stringify({date, note: String(fields.note || '').slice(0, 1000)})]);
+    if (!result.rowCount) throw new AppError(404, '找不到保險紀錄');
+    await this.audit(this.pool, actor, '修改保險生效日', result.rows[0].employee_id, id + ' ' + date);
+    return {ok: true};
   }
 
   async setDocumentExpiry(id, expiresOn, actor) {
@@ -737,7 +789,7 @@ export class HrStore {
   }
 
   async getDocument(id) {
-    const r = await this.pool.query('SELECT * FROM hr_documents WHERE id=$1', [id]);
+    const r = await this.pool.query('SELECT * FROM hr_documents WHERE id=$1 AND removed_at IS NULL', [id]);
     if (!r.rowCount) throw new AppError(404, '找不到文件');
     return r.rows[0];
   }
@@ -1089,6 +1141,7 @@ export class HrStore {
     const extracted = revealExtracted(row.extracted || {});
     const merged = {...extracted, ...(fields || {})};
     const {packConfirmed} = await import('./hr-ocr.mjs');
+    if (row.category === 'insurance') return this.confirmInsuranceReview(id, fields, actor);
     const packed = packConfirmed(row.category, merged);
     let pii = null;
     let candidate = null;
@@ -1425,10 +1478,6 @@ function looksLikeMaskedAccount(value, last4digits) {
   return false;
 }
 function validateProfilePii(fields = {}) {
-  if (fields.nationalId !== undefined && String(fields.nationalId || '').trim()) {
-    const id = normalizeTaiwanId(fields.nationalId);
-    if (!isValidTaiwanId(id)) throw new AppError(400, '身分證字號檢查碼不正確');
-  }
   if (fields.birthDate !== undefined && String(fields.birthDate || '').trim()) validBirth(fields.birthDate);
   if (fields.account !== undefined && String(fields.account || '').trim() && !looksLikeMaskedAccount(fields.account, fields.accountLast4)) {
     if (!hasPiiKey()) throw new AppError(400, '尚未設定 HR_PII_KEY，無法保存完整銀行帳號。');
@@ -1542,7 +1591,6 @@ function pickCand(data, prev = {}) {
       out.nationalIdMask = '';
     } else if (!looksLikeMaskedId(raw, prev.nationalIdMask)) {
       const id = normalizeTaiwanId(raw);
-      if (id && !isValidTaiwanId(id)) throw new AppError(400, '身分證字號檢查碼不正確');
       if (id) {
         if (!hasPiiKey()) throw new AppError(400, '尚未設定 HR_PII_KEY，無法保存身分證字號。');
         out.nationalIdEnc = encryptSecret(id);

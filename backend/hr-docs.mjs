@@ -13,9 +13,9 @@ export const MIMES = {
   'image/webp': '.webp',
   'application/pdf': '.pdf',
 };
-export const SCAN_NAME = /^[A-Z0-9_-]+_.+_(身分證|存摺|駕照|履歷表)_\d{8}T\d{6}_[a-f0-9]{12}\.[a-zA-Z]+$/;
+export const SCAN_NAME = /^[A-Z0-9_-]+_.+_(身分證|存摺|駕照|履歷表|勞健保異動)_\d{8}T\d{6}_[a-f0-9]{12}\.[a-zA-Z]+$/;
 
-const LABEL_TO_CAT = {身分證: 'identity', 存摺: 'bank', 駕照: 'license', 履歷表: 'resume'};
+const LABEL_TO_CAT = {身分證: 'identity', 存摺: 'bank', 駕照: 'license', 履歷表: 'resume', 勞健保異動: 'insurance'};
 
 export function folderConfig() {
   return {
@@ -23,6 +23,7 @@ export function folderConfig() {
     bank: process.env.NAS_BANK_PATH || '',
     license: process.env.NAS_LICENSE_PATH || '',
     resume: process.env.NAS_RESUME_PATH || '',
+    insurance: process.env.NAS_INSURANCE_PATH || (process.env.NAS_RESUME_PATH ? path.join(process.env.NAS_RESUME_PATH, '勞健保異動') : ''),
   };
 }
 
@@ -167,7 +168,7 @@ async function walk(dir) {
 
 function parseManaged(filename) {
   if (!SCAN_NAME.test(filename)) return null;
-  const m = filename.match(/^([A-Z0-9_-]+)_(.+)_(身分證|存摺|駕照|履歷表)_\d{8}T\d{6}_[a-f0-9]{12}\.[a-zA-Z]+$/);
+  const m = filename.match(/^([A-Z0-9_-]+)_(.+)_(身分證|存摺|駕照|履歷表|勞健保異動)_\d{8}T\d{6}_[a-f0-9]{12}\.[a-zA-Z]+$/);
   if (!m) return null;
   return {employeeId: m[1], nameHint: m[2].replaceAll('_', ' '), category: LABEL_TO_CAT[m[3]]};
 }
@@ -210,7 +211,8 @@ export async function scanFolders(hr, employees) {
       if (!st.isFile()) continue;
       const filename = path.basename(abs);
       const relativePath = path.relative(root, abs).split(path.sep).join('/');
-      const cats = categoriesForScan(categories, filename, relativePath, existing);
+      const scanCategories = categories.includes('resume') && relativePath.startsWith('勞健保異動/') ? categories.filter((c) => c !== 'resume') : categories;
+      const cats = categoriesForScan(scanCategories, filename, relativePath, existing);
       if (!cats.length) continue;
       const parsed = parseManaged(filename);
       let employeeId = null;

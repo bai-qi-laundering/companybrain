@@ -208,7 +208,7 @@ test('bank OCR prefills a confirm card and stores only last4 after confirm', asy
   }
 });
 
-test('identity confirm rejects a bad checksum and batch-scan creates pending items', async () => {
+test('identity confirm accepts residence ID and batch-scan creates pending items', async () => {
   const prev = process.env.HR_PII_KEY;
   process.env.HR_PII_KEY = 'ab'.repeat(32);
   const ctx = await start({
@@ -227,12 +227,12 @@ test('identity confirm rejects a bad checksum and batch-scan creates pending ite
     });
     const idSaved = await idRes.json();
     const bad = await ctx.api('/api/hr/ocr-reviews/' + idSaved.ocr.review.id + '/confirm', 'POST', {nationalId: 'A123456788', name: '陳志明'});
-    assert.equal(bad.status, 400);
-    const ok = await ctx.api('/api/hr/ocr-reviews/' + idSaved.ocr.review.id + '/confirm', 'POST', {nationalId: 'A123456789', name: '陳志明', birthDate: '1988-02-03'});
+    assert.equal(bad.status, 200);
+    const ok = bad;
     assert.equal(ok.status, 200, await ok.clone().text());
     const pii = (await ok.json()).pii;
-    assert.equal(pii.nationalIdMask, 'A****6789');
-    assert.equal(pii.nationalId, 'A123456789');
+    assert.equal(pii.nationalIdMask, 'A****6788');
+    assert.equal(pii.nationalId, 'A123456788');
     assert.equal(pii.birthDate, '1988-02-03');
 
     const bankDir = path.join(ctx.docRoot, '存摺');
@@ -294,8 +294,9 @@ test('profile saves birth date and national ID, and keeps encrypted account when
   const ctx = await start({geminiKey: 'test-key'});
   try {
     await ctx.api('/api/hr/employees', 'POST', {id: 'EMP-014', name: '陳志明', department: '物流', arrivalDate: '2022-05-20'});
-    const bad = await ctx.api('/api/hr/employees/EMP-014', 'PATCH', {nationalId: 'A123456788', birthDate: '1988-02-03'});
-    assert.equal(bad.status, 400);
+    const residence = await ctx.api('/api/hr/employees/EMP-014', 'PATCH', {nationalId: 'ARC-123456', birthDate: '1988-02-03'});
+    assert.equal(residence.status, 200);
+    assert.equal((await residence.json()).pii.nationalId, 'ARC-123456');
     const saved = await (await ctx.api('/api/hr/employees/EMP-014', 'PATCH', {nationalId: 'A123456789', birthDate: '1988-02-03', bankCode: '004', bankBranch: '城中', account: '12345678901234', accountName: '陳志明'})).json();
     assert.equal(saved.pii.nationalId, 'A123456789');
     assert.equal(saved.pii.birthDate, '1988-02-03');
@@ -744,5 +745,64 @@ test('purge keeps only 待報到 candidates, leaves employees, and blocks migrat
     await new Promise((r) => ctx.server.close(r));
     await ctx.db.close();
     await rm(ctx.docRoot, {recursive: true, force: true});
+  }
+});
+
+test('multiple candidate photos persist separately; removal hides file and OCR even after rescan', async () => {
+  const ctx = await start({extract: async () => ({name: '測試', warnings: []})});
+  try {
+    const candidate = await (await ctx.api('/api/hr/candidates', 'POST', {name: '測試', phone: '0900000000'})).json();
+    const saved = [];
+    for (const name of ['front.jpg', 'back.jpg']) {
+      const form = new FormData();
+      form.append('candidateId', candidate.id); form.append('category', 'resume');
+      form.append('file', new Blob([new Uint8Array([255, 216, 255, 217])], {type: 'image/jpeg'}), name);
+      const response = await fetch(ctx.url + '/api/hr/documents/upload', {method: 'POST', headers: {Origin: origin, Cookie: ctx.cookie, 'x-csrf-token': ctx.csrf}, body: form});
+      assert.equal(response.status, 200, await response.clone().text()); saved.push(await response.json());
+    }
+    assert.notEqual(saved[0].filename, saved[1].filename);
+    const stateUrl = '/api/hr/state?view=candidate&id=' + candidate.id;
+    assert.equal((await (await ctx.api(stateUrl)).json()).documents.length, 2);
+    assert.equal((await ctx.api('/api/hr/documents/' + saved[0].id, 'DELETE')).status, 200);
+    assert.equal((await ctx.api('/api/hr/documents/' + saved[0].id + '/file')).status, 404);
+    assert.equal((await ctx.api('/api/hr/ocr-reviews/' + saved[0].ocr.review.id + '/confirm', 'POST', {name: '測試'})).status, 400);
+    await ctx.api('/api/hr/documents/scan', 'POST', {});
+    const state = await (await ctx.api(stateUrl)).json();
+    assert.deepEqual(state.documents.map((d) => d.id), [saved[1].id]);
+    assert.ok(!state.ocrReviews.some((r) => r.documentId === saved[0].id && r.status === 'pending'));
+    assert.ok((await readFile(saved[0].displayPath)).length);
+  } finally {
+    await new Promise((r) => ctx.server.close(r)); await ctx.db.close(); await rm(ctx.docRoot, {recursive: true, force: true});
+  }
+});
+
+test('insurance screenshot saves on NAS, confirms edited dates once, supports later manual edits', async () => {
+  const ctx = await start({extract: async () => ({insuranceType: '勞保', enrollmentDate: '115/11/01', arrivalDate: '', withdrawalDate: '', departureDate: '', warnings: []})});
+  try {
+    await ctx.api('/api/hr/employees', 'POST', {id: 'D001', name: '測試', arrivalDate: '2026-10-15'});
+    const upload = jpegBody('D001', 'insurance');
+    const response = await fetch(ctx.url + '/api/hr/documents/upload', {method: 'POST', headers: {Origin: origin, Cookie: ctx.cookie, 'x-csrf-token': ctx.csrf, 'content-type': 'multipart/form-data; boundary=' + upload.boundary}, body: upload.body});
+    assert.equal(response.status, 200, await response.clone().text());
+    const saved = await response.json();
+    assert.ok(saved.displayPath.includes('勞健保異動'));
+    assert.ok((await readFile(saved.displayPath)).length);
+    let state = await (await ctx.api('/api/hr/state')).json();
+    assert.equal(state.records.filter((r) => r.kind === 'insurance').length, 0);
+    const confirm = '/api/hr/ocr-reviews/' + saved.ocr.review.id + '/confirm';
+    const fields = {insuranceType: '勞保', enrollmentDate: '2026-11-02', arrivalDate: '', withdrawalDate: '2026-11-15', departureDate: '2026-11-16'};
+    assert.equal((await ctx.api(confirm, 'POST', {...fields, withdrawalDate: '2026-02-30'})).status, 400);
+    assert.equal((await ctx.api(confirm, 'POST', fields)).status, 200);
+    assert.equal((await ctx.api(confirm, 'POST', fields)).status, 400);
+    state = await (await ctx.api('/api/hr/state')).json();
+    const emp = state.employees.find((e) => e.id === 'D001');
+    assert.equal(emp.arrivalDate, '2026-10-15'); assert.equal(emp.departureDate, '2026-11-16');
+    const records = state.records.filter((r) => r.kind === 'insurance'); assert.equal(records.length, 2);
+    assert.ok(records.every((r) => r.health === '—'));
+    const enrolled = records.find((r) => r.labor === '加保'); assert.equal(enrolled.date, '2026-11-02');
+    assert.equal((await ctx.api('/api/hr/records/' + enrolled.id, 'PATCH', {date: '2026-11-03', note: '人工更正'})).status, 200);
+    state = await (await ctx.api('/api/hr/state')).json();
+    assert.equal(state.records.find((r) => r.id === enrolled.id).date, '2026-11-03');
+  } finally {
+    await new Promise((r) => ctx.server.close(r)); await ctx.db.close(); await rm(ctx.docRoot, {recursive: true, force: true});
   }
 });
