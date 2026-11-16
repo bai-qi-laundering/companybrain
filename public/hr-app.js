@@ -3,7 +3,7 @@
   const OPEN = ['待聯絡', '待面試', '待回覆', '錄取', '待報到'];
   const CLOSED = ['未回覆', '未到面試', '未報到', '未錄取', '放棄', '已報到'];
   const QUICK_STATUSES = ['未回覆', '未到面試', '未報到'];
-  const DOC = {identity: '身分證', bank: '存摺', license: '駕照', resume: '履歷表'};
+  const DOC = {identity: '身分證', bank: '存摺', license: '駕照', resume: '履歷表', insurance: '勞健保異動'};
   const PHONE = ['已接通', '未接', '忙線', '停話／錯號', '婉拒', '約定面試', '待回覆', '未回覆'];
   const INTERVIEW = ['已面試', '未到場', '未到面試', '改期', '錄取', '未錄取', '待回覆'];
   const TYPES = ['正職', '時薪', '兼職'];
@@ -399,6 +399,16 @@
       Object.assign(g, decorateGoal(g, state.employees));
       saveDemo(); return g;
     }
+    if ((m = path.match(/^\/api\/hr\/documents\/([^/]+)$/)) && method === 'DELETE') {
+      state.documents = state.documents.filter((d) => d.id !== m[1]);
+      state.ocrReviews = (state.ocrReviews || []).filter((r) => r.documentId !== m[1]);
+      saveDemo(); return {ok: true};
+    }
+    if ((m = path.match(/^\/api\/hr\/records\/([^/]+)$/)) && method === 'PATCH') {
+      const record = state.records.find((r) => r.id === m[1] && r.kind === 'insurance');
+      if (!record) throw new Error('找不到保險紀錄');
+      Object.assign(record, body); saveDemo(); return {ok: true};
+    }
     if ((m = path.match(/^\/api\/hr\/documents\/([^/]+)$/)) && method === 'PATCH') {
       const d = state.documents.find((x) => x.id === m[1]);
       if (!d) throw new Error('找不到文件');
@@ -710,7 +720,7 @@
               ${field('phone', '電話', e.phone)}${field('emergencyContact', '緊急聯絡人', e.emergencyContact)}
               ${field('paperLocation', '紙本位置', e.paperLocation)}${field('lineId', 'LINE ID', e.lineId)}
               ${field('lineBound', 'LINE 綁定狀態', e.lineBound)}
-              ${field('birthDate', '出生年月日', (e.pii && e.pii.birthDate) || '', 'date')}${field('nationalId', '身分證字號', (e.pii && e.pii.nationalId) || '')}
+              ${field('birthDate', '出生年月日', (e.pii && e.pii.birthDate) || '', 'date')}${field('nationalId', '證件號碼（身分證／居留證等）', (e.pii && e.pii.nationalId) || '')}
               ${field('address', '住址', e.address || '')}
               <div class="field" style="grid-column:1/-1"><span>學歷</span><textarea name="education">${esc(e.education || '')}</textarea></div>
               <div class="field" style="grid-column:1/-1"><span>經歷</span><textarea name="experience">${esc(e.experience || '')}</textarea></div>
@@ -724,7 +734,7 @@
           </section>
           <section class="hr-card">
             <h2 class="section-title">勞健保</h2>
-            ${recs('insurance').map((r) => `<div class="doc"><div>勞保 ${esc(r.labor || '—')}　健保 ${esc(r.health || '—')}　${esc(r.date || '')}</div><div class="muted">${esc(r.note || '')}${r.laborGrade || r.healthGrade ? '（級距已保存）' : ''}</div></div>`).join('') || '<p class="muted">尚無保險紀錄。</p>'}
+            ${recs('insurance').map((r) => `<div class="doc"><div>勞保 ${esc(r.labor || '—')}　健保 ${esc(r.health || '—')}　${esc(r.date || '')}</div><div class="muted">${esc(r.note || '')}${r.laborGrade || r.healthGrade ? '（級距已保存）' : ''}</div><button type="button" class="hr-btn ghost" data-ins-edit="${esc(r.id)}">修改日期</button></div>`).join('') || '<p class="muted">尚無保險紀錄。</p>'}
             <button class="hr-btn ghost" data-act="add-ins" style="margin-top:8px">＋ 新增保險紀錄</button>
           </section>
           <section class="hr-card">
@@ -739,12 +749,12 @@
           <section class="hr-card">
             <h2 class="section-title">證件文件</h2>
             <p class="muted">在這上傳就會自動綁到這位員工，檔名規則與舊系統相同。舊檔保留，不會覆蓋。</p>
-            ${['identity', 'bank', 'license', 'resume'].map((cat) => `
+            ${['identity', 'bank', 'license', 'resume', 'insurance'].map((cat) => `
               <div class="drop" data-drop="${cat}" style="margin:8px 0">
                 <strong>${DOC[cat]}</strong>
                 <div class="muted">拖放或點此選檔（JPG／PNG／WEBP／PDF，12MB 內）</div>
                 ${cat === 'license' ? '<div class="field" style="margin-top:8px;text-align:left"><span>駕照效期</span><input type="date" data-exp="license"></div>' : ''}
-                <input type="file" accept="image/jpeg,image/png,image/webp,application/pdf" hidden data-file="${cat}">
+                <input type="file" accept="image/jpeg,image/png,image/webp,application/pdf" multiple hidden data-file="${cat}">
                 ${docs.filter((d) => d.category === cat).map((d) => docRow(d, cat)).join('')}
               </div>`).join('')}
           </section>
@@ -777,6 +787,8 @@
     $('[data-act="add-ins"]', root).onclick = () => openRecord(root, id, 'insurance');
     $('[data-act="add-chg"]', root).onclick = () => openRecord(root, id, 'change');
     $$('[data-drop]', root).forEach((box) => bindDrop(box, id, root));
+    bindDocumentRemoval(root, () => paintProfile(root, id));
+    bindInsuranceEditing(root, id);
     bindOcrCards(root, id);
     bindBankBlock(root, id);
     bindLightbox(root, id);
@@ -789,19 +801,21 @@
   }
   function ocrFields(r) {
     const x = r.extracted || {};
+    if (r.category === 'insurance') return sel('insuranceType', '保險種類', ['', '勞保', '健保', '勞健保'], x.insuranceType || '') + field('enrollmentDate', '加保生效日', x.enrollmentDate, 'date') + field('arrivalDate', '到職日', x.arrivalDate, 'date') + field('withdrawalDate', '退保生效日', x.withdrawalDate, 'date') + field('departureDate', '離職日', x.departureDate, 'date');
     if (r.category === 'bank') return field('bankCode', '銀行代碼', x.bankCode) + field('branch', '分行', x.branch) + field('account', '帳號', x.account) + field('accountName', '戶名', x.accountName);
     if (r.category === 'resume') {
-      return field('name', '姓名', x.name) + field('phone', '電話', x.phone) + field('birthDate', '出生年月日', x.birthDate, 'date') + field('nationalId', '身分證字號', x.nationalId) + field('address', '住址', x.address) + jobCombo('desiredPosition', '希望職缺', x.desiredPosition || x.job || '') + `<div class="field" style="grid-column:1/-1"><span>學歷</span><textarea name="education">${esc(x.education || '')}</textarea></div>` + `<div class="field" style="grid-column:1/-1"><span>經歷</span><textarea name="experience">${esc(x.experience || '')}</textarea></div>`;
+      return field('name', '姓名', x.name) + field('phone', '電話', x.phone) + field('birthDate', '出生年月日', x.birthDate, 'date') + field('nationalId', '證件號碼（身分證／居留證等）', x.nationalId) + field('address', '住址', x.address) + jobCombo('desiredPosition', '希望職缺', x.desiredPosition || x.job || '') + `<div class="field" style="grid-column:1/-1"><span>學歷</span><textarea name="education">${esc(x.education || '')}</textarea></div>` + `<div class="field" style="grid-column:1/-1"><span>經歷</span><textarea name="experience">${esc(x.experience || '')}</textarea></div>`;
     }
-    return field('nationalId', '身分證字號', x.nationalId) + field('name', '姓名', x.name) + field('birthDate', '生日', x.birthDate, 'date');
+    return field('nationalId', '證件號碼（身分證／居留證等）', x.nationalId) + field('name', '姓名', x.name) + field('birthDate', '生日', x.birthDate, 'date');
   }
   function ocrTitle(cat) {
     return {bank: '存摺辨識結果，請核對後確認', identity: '身分證辨識結果，請核對後確認', resume: '履歷辨識結果，請核對後確認'}[cat] || '辨識結果，請核對後確認';
   }
   function ocrHint(cat) {
+    if (cat === 'insurance') return '請核對姓名與各日期；空白欄位保留原值。確認後新增加退保紀錄，填寫的到離職日會更新員工資料；之後仍可手動修改。';
     if (cat === 'bank') return '確認後銀行帳戶會顯示在員工檔，完整帳號僅登入的管理員可看（可顯示／隱藏），資料庫仍加密。';
-    if (cat === 'resume') return '確認後會寫入這位應徵者的姓名、電話、出生年月日、身分證字號、住址、學歷、經歷與希望職缺。身分證字號若有填寫會檢查檢查碼。';
-    return '身分證字號會檢查檢查碼，確認後會寫入基本資料的出生年月日與身分證字號。';
+    if (cat === 'resume') return '確認後會寫入這位應徵者的姓名、電話、出生年月日、身分證字號、住址、學歷、經歷與希望職缺。證件號碼可填身分證、居留證等格式。';
+    return '證件號碼可填身分證、居留證等格式，確認後會寫入基本資料的出生年月日與身分證字號。';
   }
   function ocrCards(employeeId) { return renderOcrCards(pendingOcr(employeeId)); }
   function candidateOcrCards(candidateId) { return renderOcrCards(pendingOcr('', {candidateId})); }
@@ -938,7 +952,7 @@
         ? `<button type="button" class="hr-btn ghost" data-lightbox="${esc(d.id)}">查看</button>`
         : `<button type="button" class="hr-btn ghost" data-pdf-demo>查看</button>`)
       : `<a href="${esc(fileHref(d))}" target="_blank" rel="noopener">查看</a>`;
-    return `<div class="doc"><div class="doc-main">${thumb}<div class="doc-meta"><div>${esc(d.filename)}</div><div class="path">已存到 ${esc(pathText)}</div>${d.expiresOn ? `<div class="muted">效期 ${esc(d.expiresOn)}</div>` : ''}</div></div>${view}</div>`;
+    return `<div class="doc"><div class="doc-main">${thumb}<div class="doc-meta"><div>${esc(d.filename)}</div><div class="path">已存到 ${esc(pathText)}</div>${d.expiresOn ? `<div class="muted">效期 ${esc(d.expiresOn)}</div>` : ''}</div></div>${view}<button type="button" class="hr-btn ghost" data-doc-remove="${esc(d.id)}">移除</button></div>`;
   }
   function employeeImages(employeeId) {
     const order = {identity: 0, bank: 1, license: 2};
@@ -1149,14 +1163,63 @@
   function sel(name, label, opts, value) {
     return `<div class="field"><span>${esc(label)}</span><select name="${name}">${opts.map((o) => `<option ${o === value ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></div>`;
   }
+  function bindDocumentRemoval(root, repaint) {
+    $$('[data-doc-remove]', root).forEach((button) => button.onclick = async () => {
+      if (!confirm('移除此文件？系統將隱藏文件及待確認辨識結果，NAS原檔保留備查。已確認的人事資料不會刪除。')) return;
+      button.disabled = true;
+      try { await write('/api/hr/documents/' + button.dataset.docRemove, 'DELETE'); await refresh(); repaint(); toast('已移除文件'); }
+      catch (e) { button.disabled = false; toast(e.message); }
+    });
+  }
+  function bindInsuranceEditing(root, employeeId) {
+    $$('[data-ins-edit]', root).forEach((button) => button.onclick = () => {
+      const record = state.records.find((r) => r.id === button.dataset.insEdit);
+      dlg(root, '修改保險生效日期', field('date', '生效日', record.date, 'date') + field('note', '備註', record.note), async (form) => {
+        await write('/api/hr/records/' + record.id, 'PATCH', {date: form.elements.date.value, note: form.elements.note.value});
+        await refresh(); paintProfile(root, employeeId); toast('已修改保險日期');
+      });
+    });
+  }
   function bindDrop(box, employeeId, root, opts = {}) {
     const cat = box.dataset.drop;
     const input = $('[data-file]', box);
+    input.multiple = true;
+    box.insertAdjacentHTML('afterbegin', '<div class="hr-toolbar"><button type="button" class="hr-btn ghost" data-pick>選擇多份檔案</button><button type="button" class="hr-btn ghost" data-camera-button>拍照追加</button><input type="file" accept="image/*" capture="environment" hidden data-camera></div><p class="muted" data-upload-status>可多選檔案，或重複拍攝正反面；每份上限12MB。</p>');
+    const camera = $('[data-camera]', box);
+    $('[data-pick]', box).onclick = () => input.click();
+    $('[data-camera-button]', box).onclick = () => camera.click();
+    const pending = [];
+    let busy = false;
+    const enqueue = async (files) => {
+      pending.push(...Array.from(files));
+      if (busy || !pending.length) return;
+      busy = true;
+      const failures = [];
+      let savedCount = 0, reviewCount = 0, skippedCount = 0;
+      const expiresOn = $('[data-exp]', box)?.value || '';
+      while (pending.length) {
+        const file = pending.shift();
+        $('[data-upload-status]', box).textContent = '正在上傳：' + file.name + '，尚有 ' + pending.length + ' 份';
+        try {
+          const saved = await uploadFile(employeeId, cat, file, expiresOn, opts);
+          savedCount++;
+          if (saved.ocr?.review) reviewCount++;
+          if (saved.ocr?.skipped === 'no-gemini' || saved.ocr?.skipped === 'ocr-error') skippedCount++;
+        } catch (e) { failures.push(file.name + '：' + e.message); }
+      }
+      busy = false;
+      await refresh();
+      if (opts.onDone) opts.onDone(); else paintProfile(root, employeeId);
+      toast('已上傳 ' + savedCount + ' 份' + (reviewCount ? '，' + reviewCount + ' 份辨識結果待核對' : '') + (skippedCount ? '；' + skippedCount + ' 份未完成自動辨識，請手動核對或稍後重試' : '') + (failures.length ? '；未成功：' + failures.join('；') : ''));
+    };
     box.addEventListener('click', (e) => { if (e.target.closest('a,input,button,.doc,.doc-thumb')) return; input.click(); });
     box.addEventListener('dragover', (e) => { e.preventDefault(); box.classList.add('over'); });
     box.addEventListener('dragleave', () => box.classList.remove('over'));
-    box.addEventListener('drop', (e) => { e.preventDefault(); box.classList.remove('over'); if (e.dataTransfer.files[0]) doUpload(employeeId, cat, e.dataTransfer.files[0], root, box, opts); });
-    input.addEventListener('change', () => { if (input.files[0]) doUpload(employeeId, cat, input.files[0], root, box, opts); input.value = ''; });
+    box.addEventListener('drop', (e) => { e.preventDefault(); box.classList.remove('over'); enqueue(e.dataTransfer.files).catch((err) => toast(err.message)); });
+    for (const picker of [input, camera]) picker.addEventListener('change', () => {
+      const files = Array.from(picker.files); picker.value = '';
+      enqueue(files).catch((err) => toast(err.message));
+    });
   }
   async function doUpload(employeeId, cat, file, root, box, opts = {}) {
     const exp = box ? $('[data-exp]', box)?.value : '';
@@ -1286,7 +1349,7 @@
             ${field('availableDate', '可到職', c.availableDate, 'date')}${field('followupDate', '下次跟進', c.followupDate, 'date')}
             ${field('interviewAt', '面試時間', c.interviewAt)}
             ${sel('status', '進度', STATUSES, c.status)}
-            ${field('birthDate', '出生年月日', c.birthDate || '', 'date')}${field('nationalId', '身分證字號', c.nationalId || '')}
+            ${field('birthDate', '出生年月日', c.birthDate || '', 'date')}${field('nationalId', '證件號碼（身分證／居留證等）', c.nationalId || '')}
             ${field('address', '住址', c.address || '')}
             <div class="field" style="grid-column:1/-1"><span>學歷</span><textarea name="education">${esc(c.education || '')}</textarea></div>
             <div class="field" style="grid-column:1/-1"><span>經歷</span><textarea name="experience">${esc(c.experience || '')}</textarea></div>
@@ -1315,7 +1378,7 @@
             <div class="drop" data-drop="resume" style="margin:8px 0">
               <strong>履歷表</strong>
               <div class="muted">拖放或點此選檔（12MB 內）</div>
-              <input type="file" accept="image/jpeg,image/png,image/webp,application/pdf" hidden data-file="resume">
+              <input type="file" accept="image/jpeg,image/png,image/webp,application/pdf" multiple hidden data-file="resume">
               ${resumes.map((d) => docRow(d, 'resume')).join('') || ''}
             </div>
           </section>
@@ -1354,6 +1417,7 @@
     });
     const drop = $('[data-drop="resume"]', root);
     if (drop) bindDrop(drop, '', root, {candidateId: id, onDone: () => paintCandidate(root, id)});
+    bindDocumentRemoval(root, () => paintCandidate(root, id));
     bindOcrCards(root, '', {candidateId: id, onDone: () => paintCandidate(root, id)});
   }
 

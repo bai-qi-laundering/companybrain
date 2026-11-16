@@ -7,6 +7,26 @@ import {AppError} from './domain.mjs';
 import {access} from 'node:fs/promises';
 import {folderConfig, scanFolders, isIgnoredDocFile, resolveDocFile, isPrimaryDocRoot} from './hr-docs.mjs';
 
+const INSURANCE_DATES = ['enrollmentDate', 'arrivalDate', 'withdrawalDate', 'departureDate'];
+const INSURANCE_SCHEMA = {
+  type: 'object', properties: Object.fromEntries([
+    ...INSURANCE_DATES.map((key) => [key, {type: ['string', 'null']}]),
+    ['insuranceType', {type: ['string', 'null']}],
+    ['warnings', {type: 'array', items: {type: 'string'}}],
+  ]), required: [...INSURANCE_DATES, 'insuranceType', 'warnings'],
+};
+export function insuranceDate(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const m = text.match(/^(\d{2,4})[-/年.](\d{1,2})[-/月.](\d{1,2})日?$/);
+  if (!m) throw new AppError(400, '日期請填有效的 YYYY-MM-DD');
+  let year = Number(m[1]);
+  if (year < 1911) year += 1911;
+  const date = `${year}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+  const d = new Date(date + 'T00:00:00Z');
+  if (!Number.isFinite(d.getTime()) || d.toISOString().slice(0, 10) !== date) throw new AppError(400, '日期不存在，請重新核對');
+  return date;
+}
 const BANK_SCHEMA = {
   type: 'object',
   properties: {
@@ -60,19 +80,29 @@ export async function extractFromFile({absPath, category, filename, mime, config
   const buf = await readFile(absPath);
   const parts = [
     {inlineData: {mimeType: mimeOf(filename, mime), data: buf.toString('base64')}},
-    {text: category === 'bank'
+    {text: category === 'insurance'
+      ? '這是勞保或健保異動截圖。擷取 insuranceType（勞保、健保或勞健保）、加保生效日 enrollmentDate、明確標示的到職日 arrivalDate、退保生效日 withdrawalDate、明確標示的離職日 departureDate。民國日期轉西元 YYYY-MM-DD。不得把申報日、收件日或截圖日期當生效日，不得以加保日推測到職日、退保日推測離職日。缺少或多位人員無法確定時填 null 並列 warnings，不要臆測。'
+      : category === 'bank'
       ? '這是台灣存摺或帳戶資料頁的影像或 PDF。請只讀出畫面上看得到的銀行代碼（3位）、分行名稱、帳號、戶名。看不清楚的欄位填 null，不要臆測。warnings 列出無法辨識或模糊的項目。'
       : category === 'resume'
-        ? '這是台灣履歷表（影像或 PDF）。請只讀出畫面上看得到的姓名、電話、出生年月日（YYYY-MM-DD）、身分證字號（若有）、住址、學歷、工作經歷、希望職缺或應徵職稱。看不清楚或沒有的欄位填 null，不要臆測。warnings 列出無法辨識或模糊的項目。'
-        : '這是台灣身分證影像或 PDF。請只讀出畫面上看得到的身分證字號、姓名、出生年月日（YYYY-MM-DD）。看不清楚的欄位填 null，不要臆測。warnings 列出無法辨識或模糊的項目。'},
+        ? '這是台灣履歷表（影像或 PDF）。請只讀出畫面上看得到的姓名、電話、出生年月日（YYYY-MM-DD）、證件號碼（身分證或居留證等，若有）、住址、學歷、工作經歷、希望職缺或應徵職稱。看不清楚或沒有的欄位填 null，不要臆測。warnings 列出無法辨識或模糊的項目。'
+        : '這是身分證、外籍配偶證件或居留證影像或 PDF。請只讀出畫面上看得到的證件號碼、姓名、出生年月日（YYYY-MM-DD）。看不清楚的欄位填 null，不要臆測。warnings 列出無法辨識或模糊的項目。'},
   ];
   const system = '你是證件與履歷辨識助手，使用繁體中文。只擷取影像中實際可見的文字，不得補造帳號、身分證字號、電話或姓名。回傳指定 JSON。';
-  const schema = category === 'bank' ? BANK_SCHEMA : category === 'resume' ? RESUME_SCHEMA : ID_SCHEMA;
+  const schema = category === 'insurance' ? INSURANCE_SCHEMA : category === 'bank' ? BANK_SCHEMA : category === 'resume' ? RESUME_SCHEMA : ID_SCHEMA;
   const raw = await generateJson({system, parts, schema, key: config.key, model: config.model || 'gemini-3.1-flash-lite'});
   return normalizeExtract(category, raw);
 }
 
 export function normalizeExtract(category, raw = {}) {
+  if (category === 'insurance') {
+    const out = {insuranceType: ['勞保', '健保', '勞健保'].includes(raw.insuranceType) ? raw.insuranceType : '', warnings: Array.isArray(raw.warnings) ? raw.warnings.map(String) : []};
+    for (const key of INSURANCE_DATES) {
+      try { out[key] = insuranceDate(raw[key]); }
+      catch { out[key] = ''; out.warnings.push(key + ' 日期無法確認，請手動核對'); }
+    }
+    return out;
+  }
   if (category === 'bank') {
     return {
       bankCode: raw.bankCode ? String(raw.bankCode).replace(/\D/g, '').slice(0, 3) : '',
@@ -86,7 +116,6 @@ export function normalizeExtract(category, raw = {}) {
     const nationalId = normalizeTaiwanId(raw.nationalId || '');
     const birth = String(raw.birthDate || '').replace(/\//g, '-').slice(0, 10);
     const warnings = Array.isArray(raw.warnings) ? raw.warnings.map((w) => String(w).slice(0, 200)) : [];
-    if (nationalId && !isValidTaiwanId(nationalId)) warnings.push('身分證字號檢查碼不正確，請核對後再確認');
     return {
       name: String(raw.name || '').slice(0, 80),
       phone: String(raw.phone || '').slice(0, 40),
@@ -102,7 +131,6 @@ export function normalizeExtract(category, raw = {}) {
   const nationalId = normalizeTaiwanId(raw.nationalId || '');
   const birth = String(raw.birthDate || '').replace(/\//g, '-').slice(0, 10);
   const warnings = Array.isArray(raw.warnings) ? raw.warnings.map((w) => String(w).slice(0, 200)) : [];
-  if (nationalId && !isValidTaiwanId(nationalId)) warnings.push('身分證字號檢查碼不正確，請核對後再確認');
   return {nationalId, name: String(raw.name || '').slice(0, 80), birthDate: /^\d{4}-\d{2}-\d{2}$/.test(birth) ? birth : '', warnings};
 }
 
@@ -135,6 +163,12 @@ export function confirmedPublic(pii) {
 }
 
 export function packConfirmed(category, fields) {
+  if (category === 'insurance') {
+    const out = Object.fromEntries(INSURANCE_DATES.map((key) => [key, insuranceDate(fields[key])]));
+    if (!INSURANCE_DATES.some((key) => out[key])) throw new AppError(400, '請至少填一個日期後再確認');
+    if (!['勞保', '健保', '勞健保'].includes(fields.insuranceType)) throw new AppError(400, '請選擇勞保或健保種類');
+    return {...out, insuranceType: fields.insuranceType};
+  }
   if (category === 'bank') {
     const account = String(fields.account || '').replace(/[^\d-]/g, '');
     if (!account) throw new AppError(400, '請填帳號後再確認');
@@ -149,7 +183,6 @@ export function packConfirmed(category, fields) {
   }
   if (category === 'resume') {
     const nationalId = fields.nationalId ? normalizeTaiwanId(fields.nationalId) : '';
-    if (nationalId && !isValidTaiwanId(nationalId)) throw new AppError(400, '身分證字號檢查碼不正確');
     const birth = String(fields.birthDate || '').replace(/\//g, '-').slice(0, 10);
     return {
       name: String(fields.name || fields.nationalName || '').slice(0, 80),
@@ -164,7 +197,6 @@ export function packConfirmed(category, fields) {
   }
   const nationalId = normalizeTaiwanId(fields.nationalId);
   if (!nationalId) throw new AppError(400, '請填身分證字號後再確認');
-  if (!isValidTaiwanId(nationalId)) throw new AppError(400, '身分證字號檢查碼不正確');
   const out = {
     nationalIdMask: maskTaiwanId(nationalId),
     nationalName: String(fields.name || fields.nationalName || '').slice(0, 80),
@@ -178,7 +210,7 @@ export function packConfirmed(category, fields) {
 export {decryptSecret, hasPiiKey, last4, isValidTaiwanId};
 
 export async function runAfterUpload({hr, row, dest, category, config, extract, actor}) {
-  if (category !== 'bank' && category !== 'identity' && category !== 'resume') return {skipped: 'not-applicable'};
+  if (category !== 'bank' && category !== 'identity' && category !== 'resume' && category !== 'insurance') return {skipped: 'not-applicable'};
   try {
     const extracted = await extractFromFile({absPath: dest, category, filename: row.filename, config, extract});
     if (extracted?.skipped) return extracted;

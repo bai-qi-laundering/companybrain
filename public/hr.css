@@ -119,3 +119,11 @@
 @media(max-width:760px){
   #hr-root dialog.hr-dlg{width:calc(100% - 16px);max-width:none;max-height:calc(100dvh - 100px);margin-bottom:76px}
 }
+
+/* Keep multiple attachments and their actions inside narrow phone cards. */
+#hr-root .profile > *,#hr-root .profile-main,#hr-root .profile-side{min-width:0}
+#hr-root .doc-meta{overflow-wrap:anywhere}
+@media(max-width:600px){
+  #hr-root .doc{flex-wrap:wrap}
+  #hr-root .doc-main{flex-basis:100%}
+}

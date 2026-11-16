@@ -309,6 +309,15 @@ export async function handleHr(req, res, {hr, session, method, path: p, config =
     send(res, 200, await hr.dismissOcrReview(decodeURIComponent(m[1]), actor));
     return true;
   }
+  if (method === 'DELETE' && (m = pathname.match(/^\/api\/hr\/documents\/([^/]+)$/))) {
+    send(res, 200, await hr.removeDocument(decodeURIComponent(m[1]), actor));
+    return true;
+  }
+  if (method === 'PATCH' && (m = pathname.match(/^\/api\/hr\/records\/([^/]+)$/))) {
+    const body = JSON.parse(await readRaw(req, 50_000));
+    send(res, 200, await hr.updateInsuranceRecord(decodeURIComponent(m[1]), body, actor));
+    return true;
+  }
   if (method === 'PATCH' && (m = pathname.match(/^\/api\/hr\/documents\/([^/]+)$/))) {
     const body = JSON.parse(await readRaw(req, 50_000));
     if (body.employeeId) await hr.bindDocument(decodeURIComponent(m[1]), body.employeeId, actor);

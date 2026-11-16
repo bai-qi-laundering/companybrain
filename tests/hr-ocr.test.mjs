@@ -44,11 +44,11 @@ test('missing PII key degrades: cannot pack a bank account', () => {
   }
 });
 
-test('identity confirm requires a valid Taiwan ID checksum', () => {
+test('identity confirm accepts residence IDs and preserves encryption', () => {
   const prev = process.env.HR_PII_KEY;
   process.env.HR_PII_KEY = 'ab'.repeat(32);
   try {
-    assert.throws(() => packConfirmed('identity', {nationalId: 'A123456788', name: '測試'}), /檢查碼/);
+    assert.doesNotThrow(() => packConfirmed('identity', {nationalId: 'ARC-123456', name: '測試'}));
     const packed = packConfirmed('identity', {nationalId: 'A123456789', name: '王小明', birthDate: '1990-01-02'});
     assert.equal(packed.nationalIdMask, 'A****6789');
     assert.ok(packed.nationalIdEnc);
@@ -79,12 +79,13 @@ test('arrival fill uses the earliest 加保 date and leaves others missing', () 
   assert.equal(earliestEnrollmentDate(records.filter((r) => r.employee_id === 'B')), '2016-05-10');
 });
 
-test('Gemini unconfigured is detected and extract warnings flag a bad ID', () => {
+test('Gemini unconfigured is detected and IDs are not checksum restricted', () => {
   assert.equal(geminiReady({key: ''}), false);
   assert.equal(geminiReady({key: 'PASTE_YOUR_KEY_HERE'}), false);
   assert.equal(geminiReady({key: 'real'}), true);
   const extracted = normalizeExtract('identity', {nationalId: 'A123456788', name: '測試', birthDate: '1990-01-02', warnings: []});
-  assert.ok(extracted.warnings.some((w) => w.includes('檢查碼')));
+  assert.equal(extracted.nationalId, 'A123456788');
+  assert.deepEqual(extracted.warnings, []);
 });
 
 test('batch scan skips 離職 folder paths', () => {
@@ -92,4 +93,14 @@ test('batch scan skips 離職 folder paths', () => {
   assert.equal(isLeftJobDocPath('離職'), true);
   assert.equal(isLeftJobDocPath('張三.pdf'), false);
   assert.equal(isLeftJobDocPath('外籍居留證/a.jpg'), false);
+});
+
+test('insurance OCR normalizes ROC dates and refuses impossible or ambiguous dates', () => {
+  const extracted = normalizeExtract('insurance', {insuranceType: '健保', enrollmentDate: '115/11/1', arrivalDate: null, withdrawalDate: '2026-02-30', departureDate: null});
+  assert.equal(extracted.enrollmentDate, '2026-11-01');
+  assert.equal(extracted.arrivalDate, ''); assert.equal(extracted.withdrawalDate, '');
+  assert.ok(extracted.warnings.length);
+  assert.throws(() => packConfirmed('insurance', {insuranceType: '健保', enrollmentDate: '2026-02-30'}), /日期/);
+  assert.throws(() => packConfirmed('insurance', {insuranceType: '健保'}), /日期/);
+  assert.throws(() => packConfirmed('insurance', {insuranceType: '', enrollmentDate: '2026-11-01'}), /種類/);
 });
