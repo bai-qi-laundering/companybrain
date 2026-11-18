@@ -9,7 +9,8 @@ import {AppError,requireText,validateState} from './domain.mjs';
 import {token,digest,cookieToken,sessionCookie,verifyPassword,hashPassword} from './security.mjs';
 import {extractDraft} from './gemini.mjs';
 import {understand,answerQuestion} from './assistant.mjs';
-import {cameraDestination} from './camera-routing.mjs';
+import {cameraDestination,signedCameraImageUrl} from './camera-routing.mjs';
+const escapeHtml=text=>String(text).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 export function createHandler({store,config,htmlPath,line,ai=extractDraft,queryAI=understand,answerAI=answerQuestion,hr=null,publicDir=null,extract=null}){
  const limits=new Map(),dummyHash=hashPassword(token());
  function limit(key,max){const now=Date.now();if(limits.size>10000)for(const [k,v] of limits)if(now-v.since>60000)limits.delete(k);let v=limits.get(key);if(!v||now-v.since>60000){v={since:now,n:0};limits.set(key,v)}if(++v.n>max)throw new AppError(429,'操作太頻繁，請一分鐘後重試');}
@@ -37,6 +38,21 @@ export function createHandler({store,config,htmlPath,line,ai=extractDraft,queryA
   const saved=await line.db.saveCameraPhoto(id,photo,destination.label,{hotel:destination.hotel,stage,kind:destination.kind});
   const done=saved.status==='delivered'||saved.status==='sent';
   return send(200,{ok:true,duplicate:done||saved.status!=='pending',photoId:id,hotel:saved.hotel,stage:saved.stage,kind:saved.kind});
+ }
+ if(req.method==='GET'&&path.startsWith('/api/camera/album/')){
+  if(!line||!config.cameraLinkKey)throw new AppError(503,'相機金鑰尚未設定');
+  const id=path.slice('/api/camera/album/'.length);
+  if(!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id))throw new AppError(404,'相簿不存在或已過期');
+  const photos=await line.db.cameraAlbum(id);
+  if(!photos.length)throw new AppError(404,'相簿不存在或已過期');
+  const title=escapeHtml(photos[0].title);
+  const items=photos.map((photo,index)=>{
+   const url=escapeHtml(signedCameraImageUrl('',photo.id,photo.expiry,config.cameraLinkKey));
+   const label='照片 '+(index+1);
+   return `<li><a href="${url}"><img loading="lazy" src="${url}" alt="${label}"></a><a download="${photo.id}.jpg" href="${url}">下載${label}</a></li>`;
+  }).join('');
+  res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Referrer-Policy':'no-referrer','X-Robots-Tag':'noindex, nofollow'});
+  return res.end(`<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><style>body{font-family:system-ui,sans-serif;margin:24px auto;padding:0 16px;max-width:1100px;color:#18231d;background:#f6f8f6}ul{list-style:none;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:16px}li{background:white;border-radius:8px;padding:8px}img{width:100%;aspect-ratio:4/3;object-fit:contain;background:#eef2ee;border-radius:4px}a{color:#145b39}</style><main><h1>${title}</h1><p>共 ${photos.length} 張</p><ul>${items}</ul></main></html>`);
  }
  if(req.method==='GET'&&path.startsWith('/api/camera/image/')){
   if(!config.cameraLinkKey)throw new AppError(503,'相機金鑰尚未設定');

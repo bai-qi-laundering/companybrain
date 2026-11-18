@@ -16,6 +16,7 @@ export class AssistantStore {
  ALTER TABLE cb_camera_photos ADD COLUMN IF NOT EXISTS expires_at timestamptz NOT NULL DEFAULT (now()+interval '24 hours');
  ALTER TABLE cb_camera_photos ADD COLUMN IF NOT EXISTS delivered_at timestamptz;
  CREATE TABLE IF NOT EXISTS cb_camera_commands(event_id text PRIMARY KEY,result text NOT NULL DEFAULT '',created_at timestamptz NOT NULL DEFAULT now());
+ CREATE TABLE IF NOT EXISTS cb_camera_albums(id text PRIMARY KEY, title text NOT NULL, photo_ids text[] NOT NULL, expires_at timestamptz NOT NULL);
  CREATE INDEX IF NOT EXISTS cb_camera_photos_pending_lookup ON cb_camera_photos(status,hotel,stage,kind,created_at);
  CREATE TABLE IF NOT EXISTS cb_garment_group_binding(kind text PRIMARY KEY,group_id text NOT NULL,updated_by text NOT NULL,updated_at timestamptz NOT NULL DEFAULT now());
  CREATE TABLE IF NOT EXISTS cb_garment_group_commands(event_id text PRIMARY KEY,result text NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
@@ -48,26 +49,32 @@ export class AssistantStore {
  async claimCameraPhoto(id){return (await this.pool.query("UPDATE cb_camera_photos SET status='sending',lease_until=now()+interval '2 minutes' WHERE id=$1 AND (status='pending' OR (status='sending' AND lease_until<now())) RETURNING id",[id])).rowCount>0;}
  async releaseCameraPhoto(id){await this.pool.query("UPDATE cb_camera_photos SET status='pending',lease_until=NULL WHERE id=$1 AND status='sending'",[id]);}
  async releaseCameraPhotos(ids){if(!ids?.length)return;await this.pool.query("UPDATE cb_camera_photos SET status='pending',lease_until=NULL WHERE id=ANY(string_to_array($1,',')) AND status='sending'",[ids.join(',')]);}
- async claimPendingCameraPhotos(hotels,stage,kind,limit=4){
+ async claimPendingCameraPhotos(hotels,stage,kind){
   const names=Array.isArray(hotels)?hotels.filter(Boolean):[];
   if(!names.length||!stage||!kind)return [];
-  const cap=Math.min(Math.max(Number(limit)||0,0),4);
-  if(!cap)return [];
-  return (await this.pool.query(`UPDATE cb_camera_photos SET status='sending',lease_until=now()+interval '2 minutes' WHERE id IN (
-    SELECT id FROM cb_camera_photos WHERE hotel=ANY(string_to_array($1,',')) AND stage=$2 AND kind=$3 AND status='pending' AND expires_at>now() ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT $4
-  ) RETURNING id,hotel,label,stage,kind,extract(epoch from expires_at)::bigint AS expiry`,[names.join(','),stage,kind,cap])).rows;
+  const result=await this.pool.query(`WITH claimed AS (
+    UPDATE cb_camera_photos SET status='sending',lease_until=now()+interval '2 minutes' WHERE id IN (
+     SELECT id FROM cb_camera_photos WHERE hotel=ANY(string_to_array($1,',')) AND stage=$2 AND kind=$3 AND status='pending' AND expires_at>now() ORDER BY created_at,id FOR UPDATE SKIP LOCKED
+    ) RETURNING id,created_at
+   ) SELECT id FROM claimed ORDER BY created_at,id`,[names.join(','),stage,kind]);
+  return result.rows;
  }
- async countPendingCameraPhotos(hotels,stage,kind){
-  const names=Array.isArray(hotels)?hotels.filter(Boolean):[];
-  if(!names.length)return 0;
-  return Number((await this.pool.query("SELECT count(*)::int AS n FROM cb_camera_photos WHERE hotel=ANY(string_to_array($1,',')) AND stage=$2 AND kind=$3 AND status='pending' AND expires_at>now()",[names.join(','),stage,kind])).rows[0]?.n||0);
+ async saveCameraAlbum(id,title,photoIds){
+  await this.pool.query(`INSERT INTO cb_camera_albums(id,title,photo_ids,expires_at)
+   SELECT $1,$2,string_to_array($3,','),max(expires_at) FROM cb_camera_photos WHERE id=ANY(string_to_array($3,','))`,[id,title,photoIds.join(',')]);
+ }
+ async cameraAlbum(id){
+  return (await this.pool.query(`SELECT a.title,p.id,floor(extract(epoch from p.expires_at))::bigint AS expiry
+   FROM cb_camera_albums a CROSS JOIN LATERAL unnest(a.photo_ids) WITH ORDINALITY AS item(id,position)
+   JOIN cb_camera_photos p ON p.id=item.id
+   WHERE a.id=$1 AND a.expires_at>now() AND p.expires_at>now() ORDER BY item.position`,[id])).rows;
  }
  async completeDeliveredCameraPhotos(ids){if(!ids?.length)return;await this.pool.query("UPDATE cb_camera_photos SET status='delivered',lease_until=NULL,delivered_at=now() WHERE id=ANY(string_to_array($1,','))",[ids.join(',')]);}
  async completeCameraPhoto(id){await this.pool.query("UPDATE cb_camera_photos SET status='delivered',lease_until=NULL,delivered_at=now() WHERE id=$1",[id]);}
  async beginCameraCommand(eventId){return (await this.pool.query("INSERT INTO cb_camera_commands(event_id,result) VALUES($1,'processing') ON CONFLICT DO NOTHING RETURNING event_id",[eventId])).rowCount>0;}
  async finishCameraCommand(eventId,result){await this.pool.query("UPDATE cb_camera_commands SET result=$2 WHERE event_id=$1",[eventId,String(result||'done')]);}
  async abortCameraCommand(eventId){await this.pool.query("DELETE FROM cb_camera_commands WHERE event_id=$1 AND result='processing'",[eventId]);}
- async purgeCameraPhotos(){await this.pool.query("DELETE FROM cb_camera_photos WHERE expires_at<now()");}
+ async purgeCameraPhotos(){await this.pool.query("DELETE FROM cb_camera_photos WHERE expires_at<now()");await this.pool.query("DELETE FROM cb_camera_albums WHERE expires_at<now()");}
  async garmentGroupCommand(groupId,command,eventId,userId){
    const client=await this.pool.connect();
    try{

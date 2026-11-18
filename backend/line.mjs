@@ -3,7 +3,7 @@ import {createHmac,timingSafeEqual,createHash,randomUUID} from 'node:crypto';
 import {AppError,validateState,normalizeDraft,taskHistory} from './domain.mjs';
 import {AssistantStore} from './assistant-store.mjs';
 import {understand,describeMedia,answerQuestion,expirySummary,expiryText,taipeiDay,taipeiHour} from './assistant.mjs';
-import {cameraPhotoCommand,cameraBindCommand,signedCameraImageUrl,cameraReplyMessages,pendingPhotoHeader} from './camera-routing.mjs';
+import {cameraPhotoCommand,cameraBindCommand,pendingPhotoHeader} from './camera-routing.mjs';
 const digest=s=>createHash('sha256').update(s).digest('hex');
 export function validSignature(raw,signature,secret){if(!secret||typeof signature!=='string')return false;const a=Buffer.from(createHmac('sha256',secret).update(raw).digest('base64')),b=Buffer.from(signature);return a.length===b.length&&timingSafeEqual(a,b);}
 export function stripTextUrls(text){return String(text||'').replace(/\[([^\]]+)\]\(https?:\/\/[^)]+\)/g,'$1').replace(/https?:\/\/[^\s]+/g,'').replace(/\n{3,}/g,'\n\n').trim()}
@@ -63,15 +63,29 @@ export function createLineService({store,config,ai=understand,mediaAI=describeMe
      await once(e.webhookEventId,async()=>{
        const hotels=await db.cameraGroupNames(groupId);
        if(!hotels.length){await replyGroup([{type:'text',text:'本群組尚未綁定飯店。'}]);return 'unbound';}
-       const claimed=await db.claimPendingCameraPhotos(hotels,photoCommand.stage,photoCommand.kind,4);
-       const remaining=await db.countPendingCameraPhotos(hotels,photoCommand.stage,photoCommand.kind);
-       const header=pendingPhotoHeader({hotels,stage:photoCommand.stage,kind:photoCommand.kind,sent:claimed.length,remaining});
-       if(!claimed.length){await replyGroup([{type:'text',text:header}]);return header;}
-       const urls=claimed.map(photo=>signedCameraImageUrl(config.origin,photo.id,photo.expiry,config.cameraLinkKey));
-       const ok=await replyGroup(cameraReplyMessages(header,urls));
-       if(ok)await db.completeDeliveredCameraPhotos(claimed.map(photo=>photo.id));
-       else{await db.releaseCameraPhotos(claimed.map(photo=>photo.id));throw new AppError(502,'LINE 照片回覆失敗');}
-       return header;
+       const claimed=await db.claimPendingCameraPhotos(hotels,photoCommand.stage,photoCommand.kind);
+       if(!claimed.length){
+         const header=pendingPhotoHeader({hotels,...photoCommand,sent:0});
+         await replyGroup([{type:'text',text:header}]);
+         return header;
+       }
+       const ids=claimed.map(photo=>photo.id);
+       const title=hotels.join('、')+' '+photoCommand.stage+photoCommand.kind;
+       const albumId=randomUUID();
+       try{
+         if(!config.cameraLinkKey)throw new AppError(503,'相機金鑰尚未設定');
+         const url=new URL('/api/camera/album/'+albumId,config.origin);
+         if(url.protocol!=='https:')throw new AppError(400,'相簿網址必須使用 HTTPS');
+         await db.saveCameraAlbum(albumId,title,ids);
+         if(!await replyGroup([{type:'text',text:'📷 '+title+'，共 '+ids.length+' 張\n'+url.href}])){
+           throw new AppError(502,'LINE 相簿回覆失敗');
+         }
+       }catch(err){
+         await db.releaseCameraPhotos(ids);
+         throw err;
+       }
+       await db.completeDeliveredCameraPhotos(ids);
+       return 'album sent';
      });
    }
    }catch(err){console.error('LINE group command failed:',err.status||err.code||err.name);}

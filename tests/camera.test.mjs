@@ -94,38 +94,37 @@ test('camera photos stay pending and never push to LINE',async t=>{
  assert.equal(noStage.status,400);
 });
 
-test('hash commands reply up to four pending photos and leave the rest',async t=>{
+test('one group command replies with an album for all matching photos',async t=>{
  const f=await fixture(t);
  await f.webhook('綁定H2O');
  f.replies.length=0;
- const ids=[];
- for(let i=0;i<5;i++){
+ for(let i=0;i<30;i++){
   const id=randomUUID();
-  ids.push(id);
   assert.equal((await f.postPhoto({photoId:id,label:'H2O客衣',stage:'洗前'})).status,200);
  }
- await f.webhook('#洗前客衣','U-staff','pull-1');
+ await f.webhook('洗前客衣','U-staff','pull-1');
+ assert.equal(f.replies.length,0);
+ await f.webhook('#洗前客衣','U-staff','pull-with-hash');
  assert.equal(f.pushes.length,0);
  assert.equal(f.replies.length,1);
  const msg=f.replies[0].messages;
- assert.equal(msg.length,5);
+ assert.equal(msg.length,1);
  assert.equal(msg[0].type,'text');
- assert.match(msg[0].text,/先傳送 4 張，還有 1 張，請再傳一次「#洗前客衣」/);
- assert.ok(msg.slice(1).every(m=>m.type==='image'&&m.originalContentUrl.startsWith('https://fileserver.example/api/camera/image/')));
- const first=(await f.assistant.pool.query("SELECT status FROM cb_camera_photos ORDER BY created_at,id")).rows;
- assert.equal(first.filter(r=>r.status==='delivered').length,4);
- assert.equal(first.filter(r=>r.status==='pending').length,1);
- f.replies.length=0;
- await f.webhook('＃洗前客衣','U-staff','pull-2');
- assert.equal(f.replies[0].messages.length,2);
- assert.match(f.replies[0].messages[0].text,/共 1 張/);
- const after=(await f.assistant.pool.query("SELECT status FROM cb_camera_photos")).rows;
- assert.ok(after.every(r=>r.status==='delivered'));
+ assert.match(msg[0].text,/共 30 張/);
+ const album=new URL(msg[0].text.split('\n')[1]);
+ assert.equal(album.origin,'https://fileserver.example');
+ const page=await fetch(f.base+album.pathname);
+ assert.equal(page.status,200);
+ const html=await page.text();
+ assert.equal((html.match(/<img /g)||[]).length,30);
+ const image=html.match(/src="([^"]+)"/)[1].replaceAll('&amp;','&');
+ assert.equal((await fetch(f.base+image)).status,200);
+ const rows=(await f.assistant.pool.query("SELECT status FROM cb_camera_photos")).rows;
+ assert.ok(rows.every(row=>row.status==='delivered'));
+ assert.equal((await fetch(f.base+'/api/camera/album/'+randomUUID())).status,404);
  f.replies.length=0;
  await f.webhook('#洗前客衣','U-staff','pull-3');
  assert.match(f.replies[0].messages[0].text,/目前沒有待傳送的H2O 洗前客衣照片/);
- await f.webhook('洗前客衣','U-staff','ignored');
- assert.equal(f.replies.length,1); // ignored, no extra reply
  // other stage/kind stay untouched
  const other=randomUUID();
  assert.equal((await f.postPhoto({photoId:other,label:'H2O制服',stage:'洗後'})).status,200);
@@ -134,6 +133,8 @@ test('hash commands reply up to four pending photos and leave the rest',async t=
  assert.match(f.replies[0].messages[0].text,/目前沒有待傳送/);
  const leftover=(await f.assistant.pool.query("SELECT status,stage,kind FROM cb_camera_photos WHERE id=$1",[other])).rows[0];
  assert.equal(leftover.status,'pending');
+ await f.assistant.pool.query("UPDATE cb_camera_photos SET expires_at=now()-interval '1 second' WHERE status='delivered'");
+ assert.equal((await fetch(f.base+album.pathname)).status,404);
 });
 
 test('bind confirmations use reply and photo commands are idempotent per event',async t=>{
