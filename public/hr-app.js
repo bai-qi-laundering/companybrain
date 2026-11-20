@@ -531,6 +531,18 @@
       state.salaryImport = Object.assign({}, state.salaryImport || {}, body, {configured: Boolean((state.salaryImport || {}).configured)});
       saveDemo(); return state.salaryImport;
     }
+    if ((m = path.match(/^\/api\/directory\/employees\/([^/]+)\/documents$/)) && method === 'GET') {
+      const empId = decodeURIComponent(m[1]);
+      state.directoryFiles = state.directoryFiles || {};
+      const files = (state.directoryFiles[empId] || []).slice().sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
+      return {kind: 'employees', id: empId, name: (state.employees.find((e) => e.id === empId) || {}).name || '', folder: '員工/' + empId + '_' + ((state.employees.find((e) => e.id === empId) || {}).name || ''), displayPath: '示範模式', files};
+    }
+    if ((m = path.match(/^\/api\/directory\/employees\/([^/]+)\/documents$/)) && method === 'POST') {
+      throw new Error('示範模式不寫入 NAS 資料夾；請在正式環境上傳。');
+    }
+    if ((m = path.match(/^\/api\/directory\/employees\/([^/]+)\/documents\/file$/)) && method === 'DELETE') {
+      throw new Error('示範模式不刪除 NAS 檔案。');
+    }
     throw new Error('示範模式不支援 ' + method + ' ' + path);
 
 
@@ -689,6 +701,116 @@
     if (jobSel) jobSel.onchange = () => { jobFilter.staff = jobSel.value; paintStaff(root); };
   }
 
+
+  function formatGeneralSize(n) {
+    if (!Number.isFinite(n)) return '—';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10 * 1024 ? 1 : 0) + ' KB';
+    return (n / 1024 / 1024).toFixed(1) + ' MB';
+  }
+  function formatGeneralTime(ms) {
+    if (!ms) return '—';
+    return new Intl.DateTimeFormat('zh-TW', {timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false}).format(new Date(ms));
+  }
+  function generalFileHref(employeeId, file) {
+    const folder = file.folder || '', path = file.path || file.name || '';
+    return '/api/directory/employees/' + encodeURIComponent(employeeId) + '/documents/file?folder=' + encodeURIComponent(folder) + '&path=' + encodeURIComponent(path);
+  }
+  function generalDocsHTML(data, employeeId) {
+    const files = data.files || [], dirs = data.dirs || [];
+    if (!files.length && !dirs.length) return '<p class="muted">這個資料夾還沒有檔案。</p>';
+    const dirRows = dirs.map((d) => `<div class="doc"><button type="button" class="hr-btn ghost" data-general-open-folder="${esc(d.folder)}" data-general-open-path="${esc(d.path)}">📁 ${esc(d.path)}</button><div class="muted">${esc(d.folder)}</div></div>`).join('');
+    const fileRows = files.map((f) => `<div class="doc"><div>${esc(f.path || f.name)}</div><div class="muted">${esc(formatGeneralSize(f.size))}　${esc(formatGeneralTime(f.mtime))}　${esc(f.folder || '')}</div><div>${demo ? '<span class="muted">示範預覽</span>' : `<a href="${esc(generalFileHref(employeeId, f))}" target="_blank" rel="noopener">開啟</a>`}${demo ? '' : `　<button type="button" class="hr-btn ghost" data-general-del-folder="${esc(f.folder || '')}" data-general-del-path="${esc(f.path || f.name)}">刪除</button>`}</div></div>`).join('');
+    return dirRows + fileRows;
+  }
+  async function bindGeneralDocs(root, employeeId) {
+    const box = $('#emp-general-docs', root);
+    if (!box) return;
+    const pathEl = $('[data-general-path]', box);
+    const listEl = $('[data-general-list]', box);
+    const drop = $('[data-general-drop]', box);
+    const input = $('[data-general-file]', box);
+    const linksEl = $('[data-general-links]', box);
+    const linkInput = $('[data-general-link-path]', box);
+    const linkAdd = $('[data-general-link-add]', box);
+    let browse = {folder: '', path: ''};
+    async function reload() {
+      try {
+        let url = '/api/directory/employees/' + encodeURIComponent(employeeId) + '/documents';
+        if (browse.folder) url += '?folder=' + encodeURIComponent(browse.folder) + (browse.path ? '&path=' + encodeURIComponent(browse.path) : '');
+        const data = await write(url, 'GET');
+        if (pathEl) pathEl.textContent = data.displayPath && data.displayPath !== '示範模式' ? ('新檔上傳到：' + data.displayPath) : (demo ? '示範模式不會寫入 NAS。' : '');
+        if (linksEl) linksEl.innerHTML = (data.folders || []).map((f) => `<div>［${f.role === 'primary' ? '上傳用' : '舊資料夾'}］${esc(f.displayPath || f.relativePath)}${(!demo && f.role === 'linked') ? ' <button type="button" class="hr-btn ghost" data-general-unlink="' + esc(f.relativePath) + '">取消連結</button>' : ''}</div>`).join('');
+        if (listEl) listEl.innerHTML = (browse.folder ? '<p><button type="button" class="hr-btn ghost" data-general-up>← 返回全部</button></p>' : '') + generalDocsHTML(data, employeeId);
+        $$('[data-general-del-path]', box).forEach((b) => {
+          b.onclick = async (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            if (!confirm('確定刪除「' + b.dataset.generalDelPath + '」？刪除後無法復原。')) return;
+            try {
+              await write('/api/directory/employees/' + encodeURIComponent(employeeId) + '/documents/file?folder=' + encodeURIComponent(b.dataset.generalDelFolder || '') + '&path=' + encodeURIComponent(b.dataset.generalDelPath), 'DELETE');
+              toast('已刪除檔案');
+              await reload();
+            } catch (err) { toast(err.message); }
+          };
+        });
+        $$('[data-general-open-folder]', box).forEach((b) => { b.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); browse = {folder: b.dataset.generalOpenFolder, path: b.dataset.generalOpenPath}; reload(); }; });
+        $$('[data-general-up]', box).forEach((b) => { b.onclick = () => { browse = {folder: '', path: ''}; reload(); }; });
+        $$('[data-general-unlink]', box).forEach((b) => {
+          b.onclick = async (ev) => {
+            ev.preventDefault(); ev.stopPropagation();
+            if (!confirm('取消連結「' + b.dataset.generalUnlink + '」？檔案仍留在原資料夾。')) return;
+            try {
+              await write('/api/directory/employees/' + encodeURIComponent(employeeId) + '/folders?path=' + encodeURIComponent(b.dataset.generalUnlink), 'DELETE');
+              toast('已取消連結');
+              browse = {folder: '', path: ''};
+              await reload();
+            } catch (err) { toast(err.message); }
+          };
+        });
+      } catch (err) {
+        if (listEl) listEl.innerHTML = '<p class="muted">' + esc(err.message || '無法載入文件') + '</p>';
+      }
+    }
+    if (linkAdd) linkAdd.onclick = async (ev) => {
+      ev.preventDefault(); ev.stopPropagation();
+      const rel = (linkInput && linkInput.value || '').trim();
+      if (!rel) { toast('請填相對路徑'); return; }
+      if (demo) { toast('示範模式不連結 NAS 資料夾。'); return; }
+      try {
+        await write('/api/directory/employees/' + encodeURIComponent(employeeId) + '/folders', 'POST', {relativePath: rel});
+        if (linkInput) linkInput.value = '';
+        toast('已連結資料夾');
+        await reload();
+      } catch (err) { toast(err.message); }
+    };
+    async function uploadList(fileList) {
+      if (!fileList?.length) return;
+      if (demo) { toast('示範模式不寫入 NAS 資料夾；請在正式環境上傳。'); return; }
+      const fd = new FormData();
+      for (const f of fileList) fd.append('file', f);
+      try {
+        const r = await fetch('/api/directory/employees/' + encodeURIComponent(employeeId) + '/documents', {
+          method: 'POST', credentials: 'same-origin',
+          headers: ctx.csrf ? {'X-CSRF-Token': ctx.csrf} : {},
+          body: fd,
+        });
+        const result = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(result.error || '上傳失敗');
+        toast('已上傳 ' + (result.files?.length || 0) + ' 個檔案');
+        await reload();
+      } catch (err) { toast(err.message); }
+    }
+    if (drop && input) {
+      drop.onclick = () => input.click();
+      drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
+      drop.ondragleave = () => drop.classList.remove('over');
+      drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); uploadList(e.dataTransfer.files); };
+      input.onchange = () => { uploadList(input.files); input.value = ''; };
+    }
+    await reload();
+  }
+
   function paintProfile(root, id) {
     const e = state.employees.find((x) => x.id === id);
     if (!e) { route = {page: 'list'}; return paintStaff(root); }
@@ -748,6 +870,21 @@
                 ${docs.filter((d) => d.category === cat).map((d) => docRow(d, cat)).join('')}
               </div>`).join('')}
           </section>
+          <section class="hr-card" id="emp-general-docs">
+            <h2 class="section-title">一般文件</h2>
+            <p class="muted">新檔案上傳到這位員工自己的資料夾（與上方身分證、駕照、存摺、履歷分開）。已連結的舊資料夾也會顯示，不會搬移原檔。</p>
+            <div class="drop" data-general-drop style="margin:8px 0">
+              <strong>上傳文件</strong>
+              <div class="muted">拖放或點此選檔，可一次多個（PDF、圖片、Office，每個 20MB 內）</div>
+              <input type="file" multiple hidden accept=".pdf,.jpg,.jpeg,.png,.webp,.gif,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.odt,.ods,.odp,image/*,application/pdf" data-general-file>
+            </div>
+            <p class="muted" data-general-path></p>
+            <div class="muted" data-general-links></div>
+            <div class="field" style="margin:8px 0"><span>連結舊資料夾（相對路徑）</span>
+              <div class="secret-row"><input data-general-link-path placeholder="例如 員工/張玉菁"><button type="button" class="hr-btn ghost" data-general-link-add>連結</button></div>
+            </div>
+            <div data-general-list><p class="muted">載入中…</p></div>
+          </section>
           <section class="hr-card" id="salary-ledger">
             ${salaryBlock(id)}
           </section>
@@ -781,6 +918,7 @@
     bindBankBlock(root, id);
     bindLightbox(root, id);
     bindSalary(root, id);
+    bindGeneralDocs(root, id);
   }
 
 

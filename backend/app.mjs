@@ -4,6 +4,7 @@ import {createHash,createHmac,timingSafeEqual} from 'node:crypto';
 import {sendJson} from './http-send.mjs';
 import nodePath from 'node:path';
 import {handleHr} from './hr-routes.mjs';
+import {handleDirectory} from './directory-routes.mjs';
 import {hasPiiKey} from './hr-crypto.mjs';
 import {AppError,requireText,validateState} from './domain.mjs';
 import {token,digest,cookieToken,sessionCookie,verifyPassword,hashPassword} from './security.mjs';
@@ -110,6 +111,7 @@ export function createHandler({store,config,htmlPath,line,ai=extractDraft,queryA
  if(req.method==='GET'&&path==='/api/state')return send(200,await store.read());
  if(req.method==='PUT'&&path==='/api/state'){const b=await body(req);if(!Number.isSafeInteger(b.revision)||b.revision<0)throw new AppError(400,'版本不正確');const state=validateState({organizations:b.organizations,records:b.records,tasks:b.tasks});return send(200,await store.save(b.revision,state,session.username));}
  if(req.method==='POST'&&path==='/api/ai/draft'){limit('ai:'+session.username,10);const b=await body(req),text=requireText(b.text,'輸入文字',8000),state=await store.read();const draft=await ai({text,organizations:state.organizations,records:state.records,tasks:state.tasks,key:config.key,model:config.model});return send(200,{draft,sourceText:text})}
+ if(path.startsWith('/api/directory/')){if(await handleDirectory(req,res,{store,hr,session,method:req.method,path}))return;throw new AppError(404,'找不到這項功能')}
  if(path.startsWith('/api/hr')){if(await handleHr(req,res,{hr,session,method:req.method,path,config,extract}))return;throw new AppError(404,'找不到這項功能')}
  throw new AppError(404,'找不到這項功能');
  }catch(e){if(!res.headersSent)send(e.status||500,{error:e.status?e.message:'服務暫時無法處理，請查看 NAS 容器狀態'});else res.end();if(!e.status)console.error('companybrain request failed:',e.code||e.name);}

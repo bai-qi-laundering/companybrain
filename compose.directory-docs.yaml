@@ -1,0 +1,11 @@
+# Overlay: mount the 百麒 share root so each 名錄 record can have its own document folder.
+# Use with the existing compose files after setting NAS_DIRECTORY_ROOT in settings.env:
+#   docker compose --env-file settings.env -f compose.yaml -f compose.autodeploy.yaml -f compose.directory-docs.yaml up -d
+# NAS_DIRECTORY_ROOT must be a real path and must not duplicate any of the five HR PII volume binds
+# (otherwise Compose fails with "volumes array items must be unique").
+services:
+  app:
+    environment:
+      NAS_DIRECTORY_ROOT: ${NAS_DIRECTORY_ROOT}
+    volumes:
+      - ${NAS_DIRECTORY_ROOT}:${NAS_DIRECTORY_ROOT}

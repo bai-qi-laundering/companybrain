@@ -14,7 +14,16 @@ export class Store {
  CREATE TABLE IF NOT EXISTS cb_tasks (id text PRIMARY KEY,org_id text REFERENCES cb_organizations(id),payload jsonb NOT NULL);
  CREATE TABLE IF NOT EXISTS cb_audit (id bigserial PRIMARY KEY,revision integer NOT NULL,username text NOT NULL,entity_type text NOT NULL,entity_id text NOT NULL,before_data jsonb,after_data jsonb,created_at timestamptz NOT NULL DEFAULT now());
  CREATE INDEX IF NOT EXISTS cb_records_org ON cb_records(org_id);
- CREATE INDEX IF NOT EXISTS cb_tasks_org ON cb_tasks(org_id);`);
+ CREATE INDEX IF NOT EXISTS cb_tasks_org ON cb_tasks(org_id);
+CREATE TABLE IF NOT EXISTS cb_directory_folders (
+ kind text NOT NULL,
+ entity_id text NOT NULL,
+ relative_path text NOT NULL,
+ role text NOT NULL DEFAULT 'primary',
+ source text NOT NULL DEFAULT 'system',
+ created_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY (kind, entity_id, relative_path)
+);`);
  await this.pool.query('INSERT INTO cb_users(username,password_hash) VALUES($1,$2) ON CONFLICT(username) DO UPDATE SET password_hash=excluded.password_hash',[username,hashPassword(password)]);
  await this.pool.query('DELETE FROM cb_sessions');
  const added=await this.pool.query('INSERT INTO cb_meta(id,revision) VALUES(1,0) ON CONFLICT DO NOTHING RETURNING id');
@@ -38,4 +47,24 @@ export class Store {
  for(const change of changes)await c.query('INSERT INTO cb_audit(revision,username,entity_type,entity_id,before_data,after_data) VALUES($1,$2,$3,$4,$5,$6)',[rev,user,change.kind,change.id,change.before,change.after]);
  await c.query('UPDATE cb_meta SET revision=$1 WHERE id=1',[rev]);await c.query('COMMIT');return {...state,revision:rev};}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}}
  async health(){await this.pool.query('SELECT 1');}
+ async ensureDirectoryFolders(){
+  await this.pool.query(`CREATE TABLE IF NOT EXISTS cb_directory_folders (
+    kind text NOT NULL,
+    entity_id text NOT NULL,
+    relative_path text NOT NULL,
+    role text NOT NULL DEFAULT 'primary',
+    source text NOT NULL DEFAULT 'system',
+    created_at timestamptz NOT NULL DEFAULT now()
+  )`);
+  try { await this.pool.query("ALTER TABLE cb_directory_folders ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'primary'"); } catch {}
+  try { await this.pool.query("ALTER TABLE cb_directory_folders ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'system'"); } catch {}
+  try { await this.pool.query('ALTER TABLE cb_directory_folders DROP CONSTRAINT IF EXISTS cb_directory_folders_pkey'); } catch {}
+  try { await this.pool.query('ALTER TABLE cb_directory_folders ADD PRIMARY KEY (kind, entity_id, relative_path)'); } catch {}
+  await this.pool.query("CREATE UNIQUE INDEX IF NOT EXISTS cb_directory_folders_one_primary ON cb_directory_folders (kind, entity_id) WHERE role = 'primary'");
+ }
+ async directoryFolders(kind,entityId){await this.ensureDirectoryFolders();const r=await this.pool.query('SELECT kind, entity_id, relative_path, role, source, created_at FROM cb_directory_folders WHERE kind=$1 AND entity_id=$2 ORDER BY CASE WHEN role=\'primary\' THEN 0 ELSE 1 END, relative_path',[kind,entityId]);return r.rows;}
+ async directoryFolder(kind,entityId){const rows=await this.directoryFolders(kind,entityId);return rows.find((r)=>r.role==='primary')||null;}
+ async saveDirectoryFolder(kind,entityId,relativePath,opts={}){await this.ensureDirectoryFolders();const existing=await this.directoryFolders(kind,entityId);const role=opts.role||(existing.some((r)=>r.role==='primary')?'linked':'primary');const source=opts.source||'system';await this.pool.query('INSERT INTO cb_directory_folders(kind,entity_id,relative_path,role,source) VALUES($1,$2,$3,$4,$5) ON CONFLICT(kind,entity_id,relative_path) DO NOTHING',[kind,entityId,relativePath,role,source]);}
+ async unlinkDirectoryFolder(kind,entityId,relativePath){await this.ensureDirectoryFolders();const row=(await this.directoryFolders(kind,entityId)).find((r)=>r.relative_path===relativePath);if(!row)return {ok:true,removed:false};if(row.role==='primary')throw new AppError(400,'上傳用資料夾不能取消連結');await this.pool.query('DELETE FROM cb_directory_folders WHERE kind=$1 AND entity_id=$2 AND relative_path=$3',[kind,entityId,relativePath]);return {ok:true,removed:true};}
 }
+
