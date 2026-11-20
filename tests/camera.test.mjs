@@ -153,26 +153,24 @@ test('bind confirmations use reply and photo commands are idempotent per event',
 });
 
 test('camera photo stores preview and serves it separately', async t=>{
- const {createHandler}=await import('../backend/app.mjs');
- const {lineConfig,build,KEY,jpegB64}=t.getMeta();
- const f=await build(createHandler,lineConfig());
- const id='cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+ const f=await fixture(t);
+ await f.webhook('綁定H2O');
  const preview=Buffer.concat([Buffer.from([0xff,0xd8]),Buffer.alloc(120,2),Buffer.from([0xff,0xd9])]);
- t.after(()=>f.server.close());
+ const id=randomUUID();
  const res=await fetch(f.base+'/api/camera/photo',{method:'POST',headers:{Authorization:'Bearer api-key','content-type':'application/json'},body:JSON.stringify({photoId:id,label:'H2O客衣',stage:'洗後',imageBase64:jpegB64(),previewBase64:preview.toString('base64')})});
  assert.equal(res.status,200);
- const row=(await f.assistant.pool.query('SELECT stage,kind,length(body)::int AS body_len,length(preview_body)::int AS preview_len FROM cb_camera_photos WHERE id=$1',[id])).rows[0];
+ assert.deepEqual(await res.json(),{ok:true,duplicate:false,photoId:id,hotel:'H2O',stage:'洗後',kind:'客衣'});
+ const row=(await f.assistant.pool.query('SELECT stage,kind,length(body)::int AS body_len,length(preview_body)::int AS preview_len,extract(epoch from expires_at)::bigint AS expiry FROM cb_camera_photos WHERE id=$1',[id])).rows[0];
  assert.equal(row.stage,'洗後');
  assert.equal(row.kind,'客衣');
  assert.ok(row.preview_len>0);
- const expiry=(await f.assistant.pool.query('SELECT extract(epoch from expires_at)::bigint AS expiry FROM cb_camera_photos WHERE id=$1',[id])).rows[0].expiry;
- const {signedCameraImageUrl}=await import('../backend/camera-routing.mjs');
+ const expiry=Math.floor(Number(row.expiry));
  const originalUrl=signedCameraImageUrl(f.config.origin,id,expiry,KEY);
  const previewUrl=signedCameraImageUrl(f.config.origin,id,expiry,KEY,'preview');
  const origRes=await fetch(originalUrl.replace(f.config.origin,f.base));
  const prevRes=await fetch(previewUrl.replace(f.config.origin,f.base));
  assert.equal(origRes.status,200);
  assert.equal(prevRes.status,200);
- const prevBuf=Buffer.from(await prevRes.arrayBuffer());
- assert.deepEqual(prevBuf,preview);
+ assert.deepEqual(Buffer.from(await origRes.arrayBuffer()),jpeg);
+ assert.deepEqual(Buffer.from(await prevRes.arrayBuffer()),preview);
 });
