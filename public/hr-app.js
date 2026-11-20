@@ -531,6 +531,18 @@
       state.salaryImport = Object.assign({}, state.salaryImport || {}, body, {configured: Boolean((state.salaryImport || {}).configured)});
       saveDemo(); return state.salaryImport;
     }
+    if ((m = path.match(/^\/api\/directory\/employees\/([^/]+)\/documents$/)) && method === 'GET') {
+      const empId = decodeURIComponent(m[1]);
+      state.directoryFiles = state.directoryFiles || {};
+      const files = (state.directoryFiles[empId] || []).slice().sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
+      return {kind: 'employees', id: empId, name: (state.employees.find((e) => e.id === empId) || {}).name || '', folder: '員工/' + empId + '_' + ((state.employees.find((e) => e.id === empId) || {}).name || ''), displayPath: '示範模式', files};
+    }
+    if ((m = path.match(/^\/api\/directory\/employees\/([^/]+)\/documents$/)) && method === 'POST') {
+      throw new Error('示範模式不寫入 NAS 資料夾；請在正式環境上傳。');
+    }
+    if ((m = path.match(/^\/api\/directory\/employees\/([^/]+)\/documents\/file$/)) && method === 'DELETE') {
+      throw new Error('示範模式不刪除 NAS 檔案。');
+    }
     throw new Error('示範模式不支援 ' + method + ' ' + path);
 
 
@@ -689,6 +701,79 @@
     if (jobSel) jobSel.onchange = () => { jobFilter.staff = jobSel.value; paintStaff(root); };
   }
 
+
+  function formatGeneralSize(n) {
+    if (!Number.isFinite(n)) return '—';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10 * 1024 ? 1 : 0) + ' KB';
+    return (n / 1024 / 1024).toFixed(1) + ' MB';
+  }
+  function formatGeneralTime(ms) {
+    if (!ms) return '—';
+    return new Intl.DateTimeFormat('zh-TW', {timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false}).format(new Date(ms));
+  }
+  function generalFileHref(employeeId, name) {
+    return '/api/directory/employees/' + encodeURIComponent(employeeId) + '/documents/file?name=' + encodeURIComponent(name);
+  }
+  function generalDocsHTML(files, employeeId) {
+    if (!files.length) return '<p class="muted">這個資料夾還沒有檔案。</p>';
+    return files.map((f) => `<div class="doc"><div>${esc(f.name)}</div><div class="muted">${esc(formatGeneralSize(f.size))}　${esc(formatGeneralTime(f.mtime))}</div><div>${demo ? '<span class="muted">示範預覽</span>' : `<a href="${esc(generalFileHref(employeeId, f.name))}" target="_blank" rel="noopener">開啟</a>`}${demo ? '' : `　<button type="button" class="hr-btn ghost" data-general-del="${esc(f.name)}">刪除</button>`}</div></div>`).join('');
+  }
+  async function bindGeneralDocs(root, employeeId) {
+    const box = $('#emp-general-docs', root);
+    if (!box) return;
+    const pathEl = $('[data-general-path]', box);
+    const listEl = $('[data-general-list]', box);
+    const drop = $('[data-general-drop]', box);
+    const input = $('[data-general-file]', box);
+    async function reload() {
+      try {
+        const data = await write('/api/directory/employees/' + encodeURIComponent(employeeId) + '/documents', 'GET');
+        if (pathEl) pathEl.textContent = data.displayPath && data.displayPath !== '示範模式' ? ('NAS 資料夾：' + data.displayPath) : (demo ? '示範模式不會寫入 NAS。' : '');
+        if (listEl) listEl.innerHTML = generalDocsHTML(data.files || [], employeeId);
+        $$('[data-general-del]', box).forEach((b) => {
+          b.onclick = async (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            if (!confirm('確定刪除「' + b.dataset.generalDel + '」？刪除後無法復原。')) return;
+            try {
+              await write('/api/directory/employees/' + encodeURIComponent(employeeId) + '/documents/file?name=' + encodeURIComponent(b.dataset.generalDel), 'DELETE');
+              toast('已刪除檔案');
+              await reload();
+            } catch (err) { toast(err.message); }
+          };
+        });
+      } catch (err) {
+        if (listEl) listEl.innerHTML = '<p class="muted">' + esc(err.message || '無法載入文件') + '</p>';
+      }
+    }
+    async function uploadList(fileList) {
+      if (!fileList?.length) return;
+      if (demo) { toast('示範模式不寫入 NAS 資料夾；請在正式環境上傳。'); return; }
+      const fd = new FormData();
+      for (const f of fileList) fd.append('file', f);
+      try {
+        const r = await fetch('/api/directory/employees/' + encodeURIComponent(employeeId) + '/documents', {
+          method: 'POST', credentials: 'same-origin',
+          headers: ctx.csrf ? {'X-CSRF-Token': ctx.csrf} : {},
+          body: fd,
+        });
+        const result = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(result.error || '上傳失敗');
+        toast('已上傳 ' + (result.files?.length || 0) + ' 個檔案');
+        await reload();
+      } catch (err) { toast(err.message); }
+    }
+    if (drop && input) {
+      drop.onclick = () => input.click();
+      drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
+      drop.ondragleave = () => drop.classList.remove('over');
+      drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); uploadList(e.dataTransfer.files); };
+      input.onchange = () => { uploadList(input.files); input.value = ''; };
+    }
+    await reload();
+  }
+
   function paintProfile(root, id) {
     const e = state.employees.find((x) => x.id === id);
     if (!e) { route = {page: 'list'}; return paintStaff(root); }
@@ -748,6 +833,17 @@
                 ${docs.filter((d) => d.category === cat).map((d) => docRow(d, cat)).join('')}
               </div>`).join('')}
           </section>
+          <section class="hr-card" id="emp-general-docs">
+            <h2 class="section-title">一般文件</h2>
+            <p class="muted">合約、切結書等放在這位員工自己的資料夾（與上方身分證、駕照、存摺、履歷分開）。也可直接把檔案放到 NAS 對應資料夾，這裡會一起顯示。</p>
+            <div class="drop" data-general-drop style="margin:8px 0">
+              <strong>上傳文件</strong>
+              <div class="muted">拖放或點此選檔，可一次多個（PDF、圖片、Office，每個 20MB 內）</div>
+              <input type="file" multiple hidden accept=".pdf,.jpg,.jpeg,.png,.webp,.gif,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.odt,.ods,.odp,image/*,application/pdf" data-general-file>
+            </div>
+            <p class="muted" data-general-path></p>
+            <div data-general-list><p class="muted">載入中…</p></div>
+          </section>
           <section class="hr-card" id="salary-ledger">
             ${salaryBlock(id)}
           </section>
@@ -781,6 +877,7 @@
     bindBankBlock(root, id);
     bindLightbox(root, id);
     bindSalary(root, id);
+    bindGeneralDocs(root, id);
   }
 
 

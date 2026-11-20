@@ -78,6 +78,8 @@ test('對象名錄 is hidden from the sidebar; 內部 and unknown kinds stay und
  assert(!html.includes('data-view="directory"'));
  assert(html.includes('data-view="vendors"'));
  assert(html.includes('data-view="clients"'));
+ assert(html.includes('對象文件夾'));
+ assert(html.includes('directoryDocsShell'));
  const c=sandbox(true);await new Promise(r=>setTimeout(r,0));
  const run=code=>vm.runInContext(code,c.context);
  const extra=[{id:'dashin',name:'大信設備',kind:'設備商',contact:'',role:'',manager:'',contract:'',memo:'',aliases:[],prices:[],contractEndDate:''},{id:'unknown-org',name:'未分類廠商',kind:'',contact:'',role:'',manager:'',contract:'',memo:'',aliases:[],prices:[],contractEndDate:''},{id:'intercontinental',name:'高雄洲際飯店',kind:'飯店',contact:'',role:'',manager:'',contract:'',memo:'',aliases:['洲際'],prices:[],contractEndDate:''}];

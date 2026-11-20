@@ -14,7 +14,14 @@ export class Store {
  CREATE TABLE IF NOT EXISTS cb_tasks (id text PRIMARY KEY,org_id text REFERENCES cb_organizations(id),payload jsonb NOT NULL);
  CREATE TABLE IF NOT EXISTS cb_audit (id bigserial PRIMARY KEY,revision integer NOT NULL,username text NOT NULL,entity_type text NOT NULL,entity_id text NOT NULL,before_data jsonb,after_data jsonb,created_at timestamptz NOT NULL DEFAULT now());
  CREATE INDEX IF NOT EXISTS cb_records_org ON cb_records(org_id);
- CREATE INDEX IF NOT EXISTS cb_tasks_org ON cb_tasks(org_id);`);
+ CREATE INDEX IF NOT EXISTS cb_tasks_org ON cb_tasks(org_id);
+CREATE TABLE IF NOT EXISTS cb_directory_folders (
+ kind text NOT NULL,
+ entity_id text NOT NULL,
+ relative_path text NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY (kind, entity_id)
+);`);
  await this.pool.query('INSERT INTO cb_users(username,password_hash) VALUES($1,$2) ON CONFLICT(username) DO UPDATE SET password_hash=excluded.password_hash',[username,hashPassword(password)]);
  await this.pool.query('DELETE FROM cb_sessions');
  const added=await this.pool.query('INSERT INTO cb_meta(id,revision) VALUES(1,0) ON CONFLICT DO NOTHING RETURNING id');
@@ -38,4 +45,14 @@ export class Store {
  for(const change of changes)await c.query('INSERT INTO cb_audit(revision,username,entity_type,entity_id,before_data,after_data) VALUES($1,$2,$3,$4,$5,$6)',[rev,user,change.kind,change.id,change.before,change.after]);
  await c.query('UPDATE cb_meta SET revision=$1 WHERE id=1',[rev]);await c.query('COMMIT');return {...state,revision:rev};}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}}
  async health(){await this.pool.query('SELECT 1');}
+ async ensureDirectoryFolders(){await this.pool.query(`CREATE TABLE IF NOT EXISTS cb_directory_folders (
+ kind text NOT NULL,
+ entity_id text NOT NULL,
+ relative_path text NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY (kind, entity_id)
+ )`);}
+ async directoryFolder(kind,entityId){await this.ensureDirectoryFolders();const r=await this.pool.query('SELECT kind, entity_id, relative_path, created_at FROM cb_directory_folders WHERE kind=$1 AND entity_id=$2',[kind,entityId]);return r.rows[0]||null;}
+ async saveDirectoryFolder(kind,entityId,relativePath){await this.ensureDirectoryFolders();await this.pool.query('INSERT INTO cb_directory_folders(kind,entity_id,relative_path) VALUES($1,$2,$3) ON CONFLICT(kind,entity_id) DO NOTHING',[kind,entityId,relativePath]);}
 }
+
