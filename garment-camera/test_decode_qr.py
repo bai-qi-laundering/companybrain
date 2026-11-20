@@ -95,6 +95,20 @@ class DecodeQrTests(unittest.TestCase):
     def test_default_widths(self):
         self.assertEqual(cl.DETECT_FAST_WIDTH, 1280)
         self.assertEqual(cl.DETECT_MID_WIDTH, 1600)
+        self.assertEqual(cl.FRAME_STALE_SECONDS, 0.75)
+        self.assertGreater(cl.DETECT_INTERVAL_SECONDS, 0)
+        self.assertGreater(cl.FRAME_WATCHDOG_SECONDS, cl.DETECT_INTERVAL_SECONDS)
+
+    def test_fast_path_skips_mid_when_not_thorough(self):
+        roi, _ = cl._table_roi(blank())
+        mid, _ = cl._resize_to_width(roi, cl.DETECT_MID_WIDTH)
+        det = FakeDetector({
+            1280: ('', None),
+            mid.shape[1]: ('日航制服', pts_for(mid.shape[1], mid.shape[0])),
+        })
+        self.assertEqual(cl.decode_qr(det, blank(), thorough=False), '')
+        self.assertEqual(det.calls, [1280])
+        self.assertEqual(cl.decode_qr(det, blank(), thorough=True), '日航制服')
 
 
 class LoadStateTests(unittest.TestCase):
@@ -134,6 +148,56 @@ class TabletPrefixTests(unittest.TestCase):
         cl.TABLET_PATH_PREFIX = '/cam-abcdef0123456789'
         self.assertEqual(cl.tablet_request_path('/api/status'), ('/api/status', None))
         self.assertEqual(cl.tablet_request_path('/camera/api/status'), ('/camera/api/status', None))
+
+class StreamResilienceTests(unittest.TestCase):
+    def test_should_reconnect_when_frames_stop(self):
+        self.assertFalse(cl.should_reconnect(100.0, 107.9, 90.0, watchdog=8))
+        self.assertTrue(cl.should_reconnect(100.0, 108.0, 90.0, watchdog=8))
+        self.assertFalse(cl.should_reconnect(0.0, 97.0, 90.0, watchdog=8))
+        self.assertTrue(cl.should_reconnect(0.0, 98.0, 90.0, watchdog=8))
+
+    def test_backoff_steps_up_and_caps(self):
+        self.assertEqual(cl.next_backoff(0), 2)
+        self.assertEqual(cl.next_backoff(2), 4)
+        self.assertEqual(cl.next_backoff(15), 30)
+        self.assertEqual(cl.next_backoff(30), 30)
+        self.assertEqual(cl.next_backoff(99), 30)
+
+    def test_stream_health_and_close_capture_order(self):
+        cl.mark_stream_down()
+        health = cl.stream_health(now=10, watchdog=8)
+        self.assertFalse(health['stream'])
+        self.assertIsNone(health['lastFrameSeconds'])
+        cl.mark_stream_frame(9.5)
+        health = cl.stream_health(now=10, watchdog=8)
+        self.assertTrue(health['stream'])
+        self.assertEqual(health['lastFrameSeconds'], 0.5)
+        cl.mark_stream_frame(1.0)
+        health = cl.stream_health(now=10, watchdog=8)
+        self.assertFalse(health['stream'])
+
+        released = []
+        joined = []
+
+        class FakeCap:
+            def release(self):
+                released.append(len(joined))
+
+        class FakeThread:
+            def __init__(self):
+                self.alive = True
+            def is_alive(self):
+                return self.alive
+            def join(self, timeout=None):
+                joined.append(timeout)
+                self.alive = False
+
+        cap, reader, stop = FakeCap(), FakeThread(), __import__('threading').Event()
+        cl.close_capture(cap, reader, stop, timeout=3)
+        self.assertTrue(stop.is_set())
+        self.assertEqual(released, [1])  # join happened first, then release
+        self.assertFalse(reader.is_alive())
+
 
 if __name__ == '__main__':
     unittest.main()

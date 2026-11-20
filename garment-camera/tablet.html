@@ -88,6 +88,7 @@
     let pollTimer = 0;
     let watchdogTimer = 0;
     let reconnectTimer = 0;
+    let reconnectDelay = 1000;
 
     function taipeiNow() {
       return new Date();
@@ -263,6 +264,7 @@
       source.onmessage = ev => {
         let data;
         try { data = JSON.parse(ev.data); } catch (err) { return; }
+        reconnectDelay = 1000;
         markTalk();
         if (!data || data.type === 'ping') return;
         apply(data, data.type === 'capture');
@@ -272,17 +274,20 @@
           try { source.close(); } catch (e) {}
           source = null;
         }
+        if (linkState === 'ok') setLink('connecting');
         scheduleReconnect();
       };
     }
 
     function scheduleReconnect() {
       if (reconnectTimer) return;
+      const delay = reconnectDelay;
+      reconnectDelay = Math.min(reconnectDelay * 2, 8000);
       reconnectTimer = setTimeout(() => {
         reconnectTimer = 0;
         connectEvents();
-        refresh().catch(() => {});
-      }, 1000);
+        refresh().catch(() => setLink('down'));
+      }, delay);
     }
 
     function wakeAndSync() {
@@ -298,13 +303,14 @@
     function onWatchdog() {
       if (!lastTalk) return;
       const gap = Date.now() - lastTalk.getTime();
+      const sseOpen = source && source.readyState === 1;
       if (gap > DOWN_MS) {
         if (linkState !== 'down') setLink('down');
-        connectEvents();
+        if (!sseOpen && !reconnectTimer) connectEvents();
         refresh().catch(() => {});
       } else if (gap > STALE_MS) {
         if (linkState !== 'connecting') setLink('connecting');
-        connectEvents();
+        if (!sseOpen && !reconnectTimer) connectEvents();
         refresh().catch(() => {});
       }
     }

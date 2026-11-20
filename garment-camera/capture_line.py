@@ -9,6 +9,7 @@ import csv
 import json
 import os
 import threading
+import traceback
 import time
 import uuid
 import urllib.error
@@ -22,6 +23,11 @@ from urllib.parse import urlsplit, urlunsplit, quote, unquote
 import cv2
 import numpy as np
 from onvif import ONVIFCamera
+
+try:
+    cv2.setNumThreads(int(os.environ.get('OPENCV_NUM_THREADS', '1')))
+except (cv2.error, ValueError, TypeError):
+    pass
 
 HOST = os.environ.get('CAMERA_HOST', '192.168.1.87')
 PORT = int(os.environ.get('CAMERA_ONVIF_PORT', '8087'))
@@ -77,10 +83,96 @@ def encode_photo(frame):
 DETECT_FAST_WIDTH = int(os.environ.get('DETECT_FAST_WIDTH', '1280'))
 DETECT_MID_WIDTH = int(os.environ.get('DETECT_MID_WIDTH', '1600'))
 FRAME_STALE_SECONDS = 0.75
+DETECT_INTERVAL_SECONDS = float(os.environ.get('DETECT_INTERVAL_SECONDS', '1.5'))
+THOROUGH_INTERVAL_SECONDS = float(os.environ.get('THOROUGH_INTERVAL_SECONDS', '1.0'))
+FRAME_WATCHDOG_SECONDS = float(os.environ.get('FRAME_WATCHDOG_SECONDS', '8'))
+RECONNECT_BACKOFF = (2, 4, 8, 15, 30)
+FFMPEG_CAPTURE_OPTIONS = 'rtsp_transport;tcp|fflags;nobuffer|max_delay;500000'
 # Ignore the camera OSD strips when doing the mid-width pass.
 OSD_MARGIN = (40, 80, 40, 80)  # left, top, right, bottom
 TEST_LABEL = '測試卡片'
 TEST_PHOTO_PREFIX = 'TEST_'
+
+_stream_lock = threading.Lock()
+_stream = {'ok': False, 'last_frame_t': 0.0}
+
+
+def mark_stream_frame(when=None):
+    with _stream_lock:
+        _stream['ok'] = True
+        _stream['last_frame_t'] = float(when if when is not None else time.monotonic())
+
+
+def mark_stream_down():
+    with _stream_lock:
+        _stream['ok'] = False
+
+
+def stream_health(now=None, watchdog=None):
+    now = time.monotonic() if now is None else now
+    watchdog = FRAME_WATCHDOG_SECONDS if watchdog is None else watchdog
+    with _stream_lock:
+        ok = bool(_stream['ok'])
+        last = float(_stream['last_frame_t'] or 0.0)
+    age = (now - last) if last else None
+    live = bool(ok and age is not None and age < watchdog)
+    return {
+        'stream': live,
+        'lastFrameSeconds': None if age is None else round(age, 2),
+    }
+
+
+def should_reconnect(last_frame_t, now, started_at, watchdog=None):
+    watchdog = FRAME_WATCHDOG_SECONDS if watchdog is None else watchdog
+    if last_frame_t:
+        return (now - last_frame_t) >= watchdog
+    return (now - started_at) >= watchdog
+
+
+def next_backoff(seconds):
+    for step in RECONNECT_BACKOFF:
+        if seconds < step:
+            return step
+    return RECONNECT_BACKOFF[-1]
+
+
+def close_capture(cap, reader=None, stop_event=None, timeout=3):
+    """Stop the reader thread before releasing the capture.
+
+    Releasing while cap.read() is running in another thread can abort
+    the process with FFmpeg/glibc malloc corruption.
+    """
+    if stop_event is not None:
+        stop_event.set()
+    if reader is not None and reader.is_alive():
+        reader.join(timeout=timeout)
+    if cap is not None:
+        try:
+            cap.release()
+        except Exception:
+            pass
+    if reader is not None and reader.is_alive():
+        reader.join(timeout=2)
+
+
+def open_rtsp_capture(uri, user, pwd):
+    os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = FFMPEG_CAPTURE_OPTIONS
+    cap = cv2.VideoCapture()
+    try:
+        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 8000)
+        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
+    except (AttributeError, TypeError, cv2.error):
+        pass
+    if not cap.open(auth_uri(uri, user, pwd), cv2.CAP_FFMPEG):
+        try:
+            cap.release()
+        except Exception:
+            pass
+        return None
+    if not cap.isOpened():
+        cap.release()
+        return None
+    return cap
 
 
 def _resize_to_width(frame, width):
@@ -136,12 +228,14 @@ def _decode_one(detector, image):
     return (code or '').strip(), pts
 
 
-def decode_qr(detector, frame):
+def decode_qr(detector, frame, thorough=True):
     """Read a QR code. Must never run on the RTSP capture thread.
 
-    Try the proven 1280-wide path first. If that is empty, try a mid-width
-    (default 1600) pass on the table region, and a native-resolution crop
-    around any detected quad. Do not run detectAndDecode on a full 2560 frame.
+    Try the proven 1280-wide path first. If that is empty and thorough=True,
+    try a mid-width (default 1600) pass on the table region, and a
+    native-resolution crop around any detected quad. The cheap path is used
+    most of the time so the NAS is not at 300%+ CPU. Do not run
+    detectAndDecode on a full 2560 frame.
     """
     if frame is None or getattr(frame, 'size', 0) == 0:
         return ''
@@ -155,6 +249,8 @@ def decode_qr(detector, frame):
             code, _ = _decode_one(detector, _crop_around_quad(frame, quad))
             if code:
                 return code
+    if not thorough:
+        return ''
     roi, offset = _table_roi(frame)
     mid, mid_scale = _resize_to_width(roi, DETECT_MID_WIDTH)
     code, pts = _decode_one(detector, mid)
@@ -424,7 +520,9 @@ class TabletHandler(BaseHTTPRequestHandler):
             return
         if path == '/api/status':
             with _lock:
-                body = json.dumps({'stage': _stage, 'recent': list(_recent)}, ensure_ascii=False)
+                payload = {'stage': _stage, 'recent': list(_recent)}
+            payload.update(stream_health())
+            body = json.dumps(payload, ensure_ascii=False)
             self._send(200, body)
             return
         if path == '/api/events':
@@ -530,26 +628,35 @@ def start_tablet_server():
     return server
 
 
-def main():
-    print('Laundry QR camera with tablet confirm page and CompanyBrain pending queue.', flush=True)
-    user = os.environ['CAMERA_USERNAME']
-    pwd = os.environ['CAMERA_PASSWORD']
+def list_stream_uris(user, pwd):
     camera = ONVIFCamera(HOST, PORT, user, pwd)
     media = camera.create_media_service()
-    profiles = media.GetProfiles()
-    os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'rtsp_transport;tcp'
-    cap = None
-    for profile in profiles:
+    uris = []
+    for profile in media.GetProfiles():
         req = media.create_type('GetStreamUri')
         req.StreamSetup = {'Stream': 'RTP-Unicast', 'Transport': {'Protocol': 'RTSP'}}
         req.ProfileToken = profile.token
-        uri = media.GetStreamUri(req).Uri
-        candidate = cv2.VideoCapture(auth_uri(uri, user, pwd), cv2.CAP_FFMPEG)
-        if candidate.isOpened():
-            cap = candidate
-            break
-        candidate.release()
+        uris.append(media.GetStreamUri(req).Uri)
+    return uris
+
+
+def open_first_stream(uris, user, pwd):
+    for uri in uris:
+        cap = open_rtsp_capture(uri, user, pwd)
+        if cap is not None:
+            return cap
+    return None
+
+
+def main(uris=None):
+    print('Laundry QR camera with tablet confirm page and CompanyBrain pending queue.', flush=True)
+    user = os.environ['CAMERA_USERNAME']
+    pwd = os.environ['CAMERA_PASSWORD']
+    if uris is None:
+        uris = list_stream_uris(user, pwd)
+    cap = open_first_stream(uris, user, pwd)
     if cap is None:
+        mark_stream_down()
         raise RuntimeError('No usable RTSP profile')
     detector = cv2.QRCodeDetector()
     latest = {'frame': None, 't': 0.0}
@@ -564,11 +671,14 @@ def main():
                 ok, frame = cap.read()
                 if not ok:
                     break
+                seen = time.monotonic()
                 with latest_lock:
                     latest['frame'] = frame
-                    latest['t'] = time.monotonic()
+                    latest['t'] = seen
+                mark_stream_frame(seen)
         finally:
             stream_ok.clear()
+            mark_stream_down()
 
     reader = threading.Thread(target=capture_loop, name='camera-capture', daemon=True)
     reader.start()
@@ -576,24 +686,38 @@ def main():
     last_seen_code = None
     seen_since = 0.0
     last_frame_t = 0.0
+    last_detect = 0.0
+    last_thorough = 0.0
+    started_at = time.monotonic()
     log = OUT / 'capture_log.csv'
     print('Watching QR codes; capture interval 8 seconds. Current stage:', current_stage(), flush=True)
     stopped = False
     try:
         while stream_ok.is_set():
+            now = time.monotonic()
             with latest_lock:
                 raw = latest['frame']
                 frame_t = latest['t']
-                if raw is None or frame_t == last_frame_t:
-                    frame = None
-                else:
-                    frame = raw.copy()
-            if frame is None:
+            if should_reconnect(frame_t, now, started_at):
+                waited = now - (frame_t or started_at)
+                print('No frame for %.1fs. Reconnecting.' % waited, flush=True)
+                break
+            if raw is None or frame_t == last_frame_t:
                 time.sleep(0.02)
                 continue
             last_frame_t = frame_t
-            code = decode_qr(detector, frame)
+            if now - last_detect < DETECT_INTERVAL_SECONDS:
+                continue
+            last_detect = now
+            frame = raw.copy()
+            thorough = (now - last_thorough) >= THOROUGH_INTERVAL_SECONDS
+            code = decode_qr(detector, frame, thorough=thorough)
+            if thorough:
+                last_thorough = time.monotonic()
             now = time.monotonic()
+            leftover = DETECT_INTERVAL_SECONDS - (now - last_detect)
+            if leftover > 0:
+                time.sleep(leftover)
             with latest_lock:
                 newest_t = latest['t']
             if (now - frame_t) > FRAME_STALE_SECONDS or (newest_t - frame_t) > FRAME_STALE_SECONDS:
@@ -638,11 +762,11 @@ def main():
         print('\nStopped.', flush=True)
         raise
     finally:
-        stop_capture.set()
-        cap.release()
-        reader.join(timeout=2)
-        if not stopped and not stream_ok.is_set():
+        close_capture(cap, reader, stop_capture)
+        mark_stream_down()
+        if not stopped:
             print('Stream interrupted. Reconnecting.', flush=True)
+    return uris
 
 
 if __name__ == '__main__':
@@ -651,15 +775,27 @@ if __name__ == '__main__':
     stop = threading.Event()
     worker = threading.Thread(target=delivery_worker, args=(stop,), daemon=True)
     worker.start()
+    backoff = RECONNECT_BACKOFF[0]
+    uris = None
     try:
         while True:
+            started = time.monotonic()
             try:
-                main()
+                uris = main(uris)
+                if time.monotonic() - started > FRAME_WATCHDOG_SECONDS:
+                    backoff = RECONNECT_BACKOFF[0]
+                print('Retrying stream in %s seconds.' % backoff, flush=True)
+                time.sleep(backoff)
+                backoff = next_backoff(backoff)
             except KeyboardInterrupt:
                 break
             except Exception as exc:
-                print('Camera interrupted (%s). Retrying in 10 seconds.' % type(exc).__name__, flush=True)
-                time.sleep(10)
+                mark_stream_down()
+                print('Camera interrupted (%s). Retrying in %s seconds.' % (type(exc).__name__, backoff), flush=True)
+                traceback.print_exc()
+                time.sleep(backoff)
+                backoff = next_backoff(backoff)
+                uris = None
     finally:
         stop.set()
         tablet.shutdown()
