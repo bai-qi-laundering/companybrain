@@ -23,19 +23,26 @@ export function createHandler({store,config,htmlPath,line,ai=extractDraft,queryA
   const provided=String(req.headers.authorization||'').replace(/^Bearer /i,'');
   const x=Buffer.from(provided),y=Buffer.from(config.cameraApiKey);
   if(x.length!==y.length||!timingSafeEqual(x,y))throw new AppError(401,'相機驗證失敗');
-  const data=await body(req,4*1024*1024),label=requireText(data.label,'QR 標籤',80),stage=String(data.stage||'').normalize('NFKC').trim();
+  const data=await body(req,16*1024*1024),label=requireText(data.label,'QR 標籤',80),stage=String(data.stage||'').normalize('NFKC').trim();
   if(stage!=='洗前'&&stage!=='洗後')throw new AppError(400,'請指定洗前或洗後');
   const destination=cameraDestination(label);
   if(!destination)throw new AppError(400,'QR 標籤無效');
   if(!destination.kind)throw new AppError(400,'QR 標籤需為客衣或制服');
   const base64=String(data.imageBase64||'');
-  if(!/^[A-Za-z0-9+/]+={0,2}$/.test(base64)||base64.length>3500000)throw new AppError(400,'照片格式不正確');
+  if(!/^[A-Za-z0-9+/]+={0,2}$/.test(base64)||base64.length>14000000)throw new AppError(400,'照片格式不正確');
   const photo=Buffer.from(base64,'base64');
-  if(photo.length<100||photo.length>2500000||photo[0]!==255||photo[1]!==216||photo.at(-2)!==255||photo.at(-1)!==217)throw new AppError(400,'僅支援 2.5MB 以下 JPEG');
+  if(photo.length<100||photo.length>10000000||photo[0]!==255||photo[1]!==216||photo.at(-2)!==255||photo.at(-1)!==217)throw new AppError(400,'僅支援 10MB 以下 JPEG');
+  let preview=null;
+  if(data.previewBase64){
+    const preview64=String(data.previewBase64);
+    if(!/^[A-Za-z0-9+/]+={0,2}$/.test(preview64)||preview64.length>1400000)throw new AppError(400,'預覽圖格式不正確');
+    preview=Buffer.from(preview64,'base64');
+    if(preview.length<100||preview.length>1000000||preview[0]!==255||preview[1]!==216||preview.at(-2)!==255||preview.at(-1)!==217)throw new AppError(400,'預覽圖僅支援 1MB 以下 JPEG');
+  }
   const id=String(data.photoId||'');
   if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id))throw new AppError(400,'缺少有效照片 ID');
   if(!await line.db.cameraGroup(destination.hotel))throw new AppError(409,'尚未綁定飯店群組：'+destination.hotel);
-  const saved=await line.db.saveCameraPhoto(id,photo,destination.label,{hotel:destination.hotel,stage,kind:destination.kind});
+  const saved=await line.db.saveCameraPhoto(id,photo,destination.label,{hotel:destination.hotel,stage,kind:destination.kind,preview});
   const done=saved.status==='delivered'||saved.status==='sent';
   return send(200,{ok:true,duplicate:done||saved.status!=='pending',photoId:id,hotel:saved.hotel,stage:saved.stage,kind:saved.kind});
  }
@@ -63,8 +70,10 @@ export function createHandler({store,config,htmlPath,line,ai=extractDraft,queryA
   if(!timingSafeEqual(Buffer.from(sig),Buffer.from(expected)))throw new AppError(403,'照片連結驗證失敗');
   const photo=await line.db.cameraPhoto(id);
   if(!photo)throw new AppError(404,'照片已過期');
-  res.writeHead(200,{'Content-Type':'image/jpeg','Content-Length':photo.body.length,'Cache-Control':'private, max-age=60'});
-  res.end(photo.body);return;
+  const wantPreview=params.get('preview')==='1';
+  const body=wantPreview&&photo.preview&&photo.preview.length?photo.preview:photo.body;
+  res.writeHead(200,{'Content-Type':'image/jpeg','Content-Length':body.length,'Cache-Control':'private, max-age=60'});
+  res.end(body);return;
  }
  if(req.method==='POST'&&path==='/api/garment/notify'){if(!line)throw new AppError(503,'LINE 尚未設定');return send(202,await garmentNotify(req,{line,config}));}
  if(req.method==='GET'&&path==='/api/health'){await store.health();return send(200,{ok:true,service:'companybrain-api'})}

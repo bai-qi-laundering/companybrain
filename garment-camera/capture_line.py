@@ -39,7 +39,12 @@ QUEUE = OUT / 'pending'
 QUEUE.mkdir(exist_ok=True)
 API_URL = os.environ.get('COMPANYBRAIN_URL', '').rstrip('/')
 API_KEY = os.environ.get('CAMERA_API_KEY', '')
-MAX_JPEG = 2_500_000
+MAX_JPEG = 10_000_000  # LINE originalContentUrl limit
+MAX_PREVIEW_JPEG = 1_000_000  # LINE previewImageUrl limit
+PREVIEW_MAX_WIDTH = 800
+HOLD = OUT / 'pending-unbound'
+HOLD_RETRY_SECONDS = 600
+CANCELLED = OUT / 'pending-cancelled'
 TABLET_BIND = os.environ.get('TABLET_BIND', '0.0.0.0')
 TABLET_PORT = int(os.environ.get('TABLET_PORT', '8790'))
 # Optional public path prefix (e.g. /cam-xxxxxxxxxxxxxxxx). LAN / still works.
@@ -67,17 +72,102 @@ def auth_uri(uri, user, pwd):
     return urlunsplit((p.scheme, netloc, p.path, p.query, p.fragment))
 
 
-def encode_photo(frame):
-    """Keep the original photo locally; compress upload to server's 2.5MB limit."""
-    for width in (1920, 1600, 1280, 960, 720):
-        height, original_width = frame.shape[:2]
-        scale = min(1, width / original_width)
+def _jpeg_bytes(image, quality):
+    ok, data = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
+    if not ok:
+        raise ValueError('JPEG encode failed')
+    return data.tobytes()
+
+
+def encode_photo(frame, original_jpeg=None):
+    """Upload the saved JPG as-is when it already fits; otherwise encode a full-res JPEG (max 10MB).
+
+    Detection still runs on downscaled frames; this only affects the saved/uploaded photo.
+    Downscale only as a last resort if even low quality cannot fit the LINE limit.
+    """
+    if original_jpeg and len(original_jpeg) <= MAX_JPEG:
+        return original_jpeg
+    for quality in (95, 92, 85, 80, 75, 65, 55):
+        data = _jpeg_bytes(frame, quality)
+        if len(data) <= MAX_JPEG:
+            return data
+    height, width = frame.shape[:2]
+    for target in (1920, 1600, 1280, 960, 720):
+        scale = min(1, target / width)
         image = cv2.resize(frame, None, fx=scale, fy=scale) if scale < 1 else frame
         for quality in (85, 75, 65, 55):
-            ok, data = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, quality])
-            if ok and len(data) <= MAX_JPEG:
-                return data.tobytes()
-    raise ValueError('Photo could not fit 2.5MB upload limit')
+            data = _jpeg_bytes(image, quality)
+            if len(data) <= MAX_JPEG:
+                return data
+    raise ValueError('Photo could not fit 10MB upload limit')
+
+
+def encode_preview(frame, max_width=PREVIEW_MAX_WIDTH):
+    """Small JPEG for LINE previewImageUrl and the tablet thumbnail (max 1MB)."""
+    height, width = frame.shape[:2]
+    scale = min(1, float(max_width) / width)
+    image = cv2.resize(frame, None, fx=scale, fy=scale) if scale < 1 else frame
+    for quality in (80, 70, 60, 50):
+        data = _jpeg_bytes(image, quality)
+        if len(data) <= MAX_PREVIEW_JPEG:
+            return data
+    raise ValueError('Preview could not fit 1MB LINE limit')
+
+
+def preview_name(filename):
+    return Path(filename).stem + '.thumb.jpg'
+
+
+def should_hold_upload(status_code):
+    """Client errors except rate limits are job-specific; do not block later photos."""
+    code = int(status_code or 0)
+    return 400 <= code < 500 and code != 429
+
+
+def hold_job(job, reason):
+    HOLD.mkdir(parents=True, exist_ok=True)
+    dest = HOLD / job.name
+    if job.resolve() != dest.resolve():
+        job.replace(dest)
+    else:
+        os.utime(dest, None)
+    mark_recent(job.stem + '.jpg', 'unbound')
+    print('PHOTO HELD (will not block queue):', job.stem, reason, flush=True)
+    return dest
+
+
+def due_hold_jobs():
+    if not HOLD.exists():
+        return []
+    now = time.time()
+    due = []
+    for path in sorted(HOLD.glob('*.json')):
+        if now - path.stat().st_mtime >= HOLD_RETRY_SECONDS:
+            due.append(path)
+    return due
+
+
+def job_source_jpeg(job):
+    return OUT / (Path(job).stem + '.jpg')
+
+
+def source_jpeg_missing(job):
+    return not job_source_jpeg(job).is_file()
+
+
+def cancel_job(job, reason='source JPEG missing'):
+    """Move a queue/hold JSON out of the upload pipeline without deleting it."""
+    stamp = datetime.now().astimezone().strftime('%Y%m%d-%H%M')
+    dest_dir = CANCELLED / stamp
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / job.name
+    if dest.exists():
+        dest = dest_dir / (job.stem + '-' + datetime.now().astimezone().strftime('%H%M%S') + '.json')
+    if Path(job).resolve() != dest.resolve():
+        job.replace(dest)
+    mark_recent(job.stem + '.jpg', 'cancelled')
+    print('PHOTO CANCELLED (removed from queue):', job.stem, reason, flush=True)
+    return dest
 
 
 DETECT_FAST_WIDTH = int(os.environ.get('DETECT_FAST_WIDTH', '1280'))
@@ -406,12 +496,18 @@ def cleanup_test_captures():
 def queue_photo(label, frame, filename, stage=None):
     if stage is None:
         stage = current_stage()
-    encoded = encode_photo(frame)
+    original = None
+    source = OUT / filename
+    if source.is_file():
+        original = source.read_bytes()
+    encoded = encode_photo(frame, original)
+    preview = encode_preview(frame)
     payload = {
         'photoId': str(uuid.uuid4()),
         'label': label,
         'stage': stage,
         'imageBase64': base64.b64encode(encoded).decode('ascii'),
+        'previewBase64': base64.b64encode(preview).decode('ascii'),
     }
     target = QUEUE / (Path(filename).stem + '.json')
     temp = target.with_suffix('.tmp')
@@ -430,15 +526,23 @@ def delivery_worker(stop):
     if not API_URL.startswith('https://'):
         print('Photo upload disabled: COMPANYBRAIN_URL must use HTTPS.', flush=True)
         return
+    retry_at = {}
     while not stop.is_set():
-        jobs = sorted(QUEUE.glob('*.json'))
+        jobs = sorted(QUEUE.glob('*.json')) + due_hold_jobs()
+        retry_at = {job: retry_at[job] for job in jobs if job in retry_at}
         if not jobs:
             stop.wait(2)
             continue
         for job in jobs:
             if stop.is_set():
                 return
+            photo_name = job.stem + '.jpg'
             try:
+                if source_jpeg_missing(job):
+                    cancel_job(job, 'source JPEG missing')
+                    continue
+                if time.monotonic() < retry_at.get(job, 0):
+                    continue
                 payload = json.loads(job.read_text(encoding='utf-8'))
                 if 'photoId' not in payload:
                     payload['photoId'] = str(uuid.uuid5(uuid.NAMESPACE_URL, 'garment-camera:' + job.stem))
@@ -459,21 +563,25 @@ def delivery_worker(stop):
                     result = json.load(response)
                     if not result.get('ok'):
                         raise ValueError('Server did not confirm successful storage')
-                job.unlink()
-                mark_recent(job.stem + '.jpg', 'stored')
+                job.unlink(missing_ok=True)
+                mark_recent(photo_name, 'stored')
                 print('PHOTO STORED:', job.stem, result.get('hotel'), result.get('stage'), result.get('kind'), flush=True)
             except urllib.error.HTTPError as exc:
-                body = exc.read(500).decode('utf-8', 'replace').replace('\n', ' ')
-                print('PHOTO PENDING:', job.stem, 'HTTP', exc.code, body[:200], flush=True)
-                monthly = exc.code == 429 or 'HTTP 429' in body or 'monthly limit' in body.lower()
+                err_body = exc.read(500).decode('utf-8', 'replace').replace('\n', ' ')
+                if should_hold_upload(exc.code):
+                    hold_job(job, 'HTTP %s %s' % (exc.code, err_body[:200]))
+                    continue
+                print('PHOTO PENDING:', job.stem, 'HTTP', exc.code, err_body[:200], flush=True)
+                monthly = exc.code == 429 or 'HTTP 429' in err_body or 'monthly limit' in err_body.lower()
                 if monthly:
-                    print('Upload paused: official account monthly message limit. Will retry in 6 hours.', flush=True)
-                stop.wait(21600 if monthly else 30)
-                break
+                    print('This photo will retry in 6 hours due to the message limit.', flush=True)
+                # Per-job backoff only: a failed hotel must not block other hotels.
+                retry_at[job] = time.monotonic() + (21600 if monthly else 30)
             except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as exc:
                 print('PHOTO PENDING:', job.stem, type(exc).__name__, flush=True)
-                stop.wait(30)
-                break
+                retry_at[job] = time.monotonic() + 30
+        stop.wait(2)
+
 
 
 def tablet_request_path(raw_path):
@@ -735,9 +843,15 @@ def main(uris=None):
             timestamp = datetime.now().astimezone()
             filename = timestamp.strftime('%Y%m%d_%H%M%S_%f') + '.jpg'
             path = OUT / filename
-            if not cv2.imwrite(str(path), frame):
+            if not cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 95]):
                 print('Failed to save image', flush=True)
                 continue
+            thumb = path.with_name(preview_name(filename))
+            try:
+                thumb.write_bytes(encode_preview(frame))
+            except (OSError, ValueError) as exc:
+                print('Preview thumbnail failed:', type(exc).__name__, flush=True)
+                thumb = None
             with log.open('a', encoding='utf-8-sig', newline='') as f:
                 writer = csv.writer(f)
                 if f.tell() == 0:
@@ -751,6 +865,7 @@ def main(uris=None):
                     'label': code,
                     'stage': stage,
                     'photo': filename,
+                    'thumb': preview_name(filename) if thumb is not None and thumb.is_file() else filename,
                     'status': 'queued',
                 })
             except (OSError, ValueError) as exc:

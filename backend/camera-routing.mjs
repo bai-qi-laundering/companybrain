@@ -30,9 +30,10 @@ export function cameraBindCommand(text){
  return null;
 }
 
-export function signedCameraImageUrl(origin,id,expiry,key){
+export function signedCameraImageUrl(origin,id,expiry,key,kind='original'){
  const sig=createHmac('sha256',key).update(id+':'+expiry).digest('hex');
- return String(origin)+'/api/camera/image/'+id+'?expires='+expiry+'&sig='+sig;
+ const preview=kind==='preview'?'&preview=1':'';
+ return String(origin)+'/api/camera/image/'+id+'?expires='+expiry+'&sig='+sig+preview;
 }
 
 export function cameraImageMessages(url,label){
@@ -42,9 +43,12 @@ export function cameraImageMessages(url,label){
 export function cameraReplyMessages(header,urls){
  const messages=[{type:'text',text:String(header)}];
  for(const url of urls){
-  const parsed=new URL(url);
-  if(parsed.protocol!=='https:')throw new AppError(400,'照片網址必須使用 HTTPS');
-  messages.push({type:'image',originalContentUrl:parsed.href,previewImageUrl:parsed.href});
+  const original=typeof url==='string'?url:url.original;
+  const preview=typeof url==='string'?url:(url.preview||url.original);
+  const parsed=new URL(original);
+  const previewParsed=new URL(preview);
+  if(parsed.protocol!=='https:'||previewParsed.protocol!=='https:')throw new AppError(400,'照片網址必須使用 HTTPS');
+  messages.push({type:'image',originalContentUrl:parsed.href,previewImageUrl:previewParsed.href});
  }
  return messages;
 }

@@ -187,8 +187,8 @@
     function renderRecent(items) {
       const rows = (items || []).slice().reverse();
       recentEl.innerHTML = rows.length ? rows.map(item => {
-        const src = item.photo ? apiUrl('photos/' + encodeURIComponent(item.photo)) : '';
-        const status = item.status === 'stored' ? '已上傳' : '排隊中';
+        const src = item.thumb || item.photo ? apiUrl('photos/' + encodeURIComponent(item.thumb || item.photo)) : '';
+        const status = item.status === 'stored' ? '已上傳' : item.status === 'unbound' ? '未綁定（暫停上傳）' : '排隊中';
         return '<div class="item">' +
           (src ? '<img src="'+src+'" alt="">' : '') +
           '<div class="meta"><div class="label">'+escapeHtml(item.stage||'')+'　'+escapeHtml(item.label||'')+'</div>' +

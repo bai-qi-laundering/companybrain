@@ -199,5 +199,84 @@ class StreamResilienceTests(unittest.TestCase):
         self.assertFalse(reader.is_alive())
 
 
+class EncodeAndHoldTests(unittest.TestCase):
+    def test_fullres_photo_keeps_native_size(self):
+        frame = blank(2560, 1440)
+        frame[100:200, 100:200] = (40, 80, 200)
+        data = cl.encode_photo(frame)
+        arr = np.frombuffer(data, dtype=np.uint8)
+        import cv2
+        decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        self.assertEqual(tuple(decoded.shape[:2]), (1440, 2560))
+        self.assertLessEqual(len(data), cl.MAX_JPEG)
+        self.assertGreater(len(data), 1000)
+        self.assertEqual(data[:2], b'\xff\xd8')
+
+    def test_preview_is_small_and_under_line_limit(self):
+        frame = blank(2560, 1440)
+        frame[100:400, 100:400] = (20, 180, 80)
+        data = cl.encode_preview(frame)
+        import cv2
+        decoded = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+        self.assertIsNotNone(decoded)
+        self.assertLessEqual(decoded.shape[1], cl.PREVIEW_MAX_WIDTH)
+        self.assertLessEqual(len(data), cl.MAX_PREVIEW_JPEG)
+        self.assertEqual(cl.preview_name('20261115_045730_182270.jpg'), '20261115_045730_182270.thumb.jpg')
+
+    def test_hold_client_errors_but_not_rate_limit_or_server_errors(self):
+        self.assertTrue(cl.should_hold_upload(409))
+        self.assertTrue(cl.should_hold_upload(400))
+        self.assertFalse(cl.should_hold_upload(429))
+        self.assertFalse(cl.should_hold_upload(500))
+        self.assertFalse(cl.should_hold_upload(0))
+
+    def test_missing_jpeg_is_detected(self):
+        job = Path(cl.QUEUE) / '20261115_999999_000000.json'
+        job.write_text('{"label":"H2O客衣","stage":"洗後"}', encoding='utf-8')
+        self.addCleanup(lambda: job.exists() and job.unlink())
+        self.assertTrue(cl.source_jpeg_missing(job))
+        jpeg = cl.OUT / (job.stem + '.jpg')
+        jpeg.write_bytes(b'\xff\xd8\xff\xd9')
+        self.addCleanup(lambda: jpeg.unlink(missing_ok=True))
+        self.assertFalse(cl.source_jpeg_missing(job))
+
+    def test_cancel_missing_jpeg_moves_json_out_of_queue_and_hold(self):
+        job = Path(cl.QUEUE) / '20261115_888888_000000.json'
+        job.write_text('{"label":"然一客衣","stage":"洗後"}', encoding='utf-8')
+        self.assertTrue(cl.source_jpeg_missing(job))
+        dest = cl.cancel_job(job, 'source JPEG missing')
+        self.assertFalse(job.exists())
+        self.assertTrue(dest.is_file())
+        self.assertEqual(dest.parent.parent.resolve(), Path(cl.CANCELLED).resolve())
+        self.assertIn('然一客衣', dest.read_text(encoding='utf-8'))
+
+        cl.HOLD.mkdir(parents=True, exist_ok=True)
+        held = cl.HOLD / '20261115_777777_000000.json'
+        held.write_text('{"label":"H2O客衣","stage":"洗前"}', encoding='utf-8')
+        dest2 = cl.cancel_job(held, 'source JPEG missing')
+        self.assertFalse(held.exists())
+        self.assertTrue(dest2.is_file())
+        self.assertEqual(dest2.parent.parent.resolve(), Path(cl.CANCELLED).resolve())
+        self.assertIn('H2O客衣', dest2.read_text(encoding='utf-8'))
+
+
+
+class NonBlockingUploadTests(unittest.TestCase):
+
+    def test_failed_hotel_does_not_block_other_uploads(self):
+        src = Path(cl.__file__).read_text(encoding='utf-8')
+        start = src.find('def delivery_worker')
+        end = src.find('\ndef ', start + 4)
+        worker = src[start:end]
+        self.assertIn('retry_at', worker)
+        self.assertIn('retry_at[job]', worker)
+        self.assertNotIn('stop.wait(30)', worker)
+        self.assertNotIn('stop.wait(21600', worker)
+        # A failure records a per-job retry time and continues the loop.
+        self.assertIn('continue', worker)
+        self.assertNotRegex(worker, r'stop\.wait\(.*\)\n\s+break')
+
+
+
 if __name__ == '__main__':
     unittest.main()
