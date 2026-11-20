@@ -160,7 +160,7 @@ test('camera photo stores preview and serves it separately', async t=>{
  const res=await fetch(f.base+'/api/camera/photo',{method:'POST',headers:{Authorization:'Bearer api-key','content-type':'application/json'},body:JSON.stringify({photoId:id,label:'H2O客衣',stage:'洗後',imageBase64:jpegB64(),previewBase64:preview.toString('base64')})});
  assert.equal(res.status,200);
  assert.deepEqual(await res.json(),{ok:true,duplicate:false,photoId:id,hotel:'H2O',stage:'洗後',kind:'客衣'});
- const row=(await f.assistant.pool.query('SELECT stage,kind,length(body)::int AS body_len,length(preview_body)::int AS preview_len,extract(epoch from expires_at)::bigint AS expiry FROM cb_camera_photos WHERE id=$1',[id])).rows[0];
+ const row=(await f.assistant.pool.query('SELECT stage,kind,length(body)::int AS body_len,length(preview_body)::int AS preview_len,floor(extract(epoch from expires_at))::bigint AS expiry FROM cb_camera_photos WHERE id=$1',[id])).rows[0];
  assert.equal(row.stage,'洗後');
  assert.equal(row.kind,'客衣');
  assert.ok(row.preview_len>0);
