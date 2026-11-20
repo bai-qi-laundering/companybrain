@@ -47,9 +47,12 @@ def run(*args, check=True):
     return subprocess.run(args, cwd=ROOT, check=check, capture_output=True, text=True)
 
 def compose(*args):
+    files = ["-f", "compose.yaml", "-f", str(OVERRIDE)]
+    docs = ROOT / "compose.directory-docs.yaml"
+    if docs.is_file():
+        files += ["-f", str(docs)]
     return run("docker", "compose", "-p", "companybrain",
-               "-f", "compose.yaml", "-f", str(OVERRIDE),
-               "--env-file", "settings.env", *args)
+               *files, "--env-file", "settings.env", *args)
 
 def healthy():
     try:
