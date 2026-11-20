@@ -6,7 +6,10 @@ import {
   canonicalKind, orgDirectoryKind, assertEntityId, directoryRoot,
   resolveEntityFolder, listEntityFiles, saveDirectoryUploads,
   resolveEntityFile, deleteEntityFile, extMime, DIRECTORY_REQUEST_LIMIT,
+  isAllowedLinkPath, isProtectedRelativePath, isValidStoredPath,
+  ensureEntityFolders, listAllEntityDocuments, resolveLinkedFile, safeJoinRoot,
 } from './directory-docs.mjs';
+import {scanDirectoryLinks, applyExactDirectoryLinks} from './directory-link.mjs';
 
 function send(req, res, status, body) {
   return sendJson(res, status, body, req);
@@ -80,30 +83,94 @@ async function loadEntity({store, hr, kind, id}) {
   return {canon, entityId, name: org.name};
 }
 
-const ROUTE = /^\/api\/directory\/([^/]+)\/([^/]+)\/documents(?:\/(file))?$/;
+async function loadCatalog({store, hr}) {
+  const state = await store.read();
+  let employees = [];
+  if (hr) {
+    const hrState = await hr.state();
+    employees = (hrState.employees || []).map((e) => ({id: e.id, name: e.name}));
+  }
+  return {organizations: state.organizations || [], employees};
+}
+
+const DOC_ROUTE = /^\/api\/directory\/([^/]+)\/([^/]+)\/documents(?:\/(file))?$/;
+const FOLDER_ROUTE = /^\/api\/directory\/([^/]+)\/([^/]+)\/folders$/;
 
 export async function handleDirectory(req, res, {store, hr, session, method, path: p} = {}) {
   const url = parseUrl(req);
-  const match = url.pathname.match(ROUTE);
-  if (!match) return false;
   if (!store) throw new AppError(503, '資料庫尚未就緒');
+
+  if (url.pathname === '/api/directory/links/scan' && (method === 'GET' || method === 'POST')) {
+    const catalog = await loadCatalog({store, hr});
+    const scanned = await scanDirectoryLinks({root: directoryRoot(), ...catalog});
+    send(req, res, 200, scanned.summary);
+    return true;
+  }
+  if (url.pathname === '/api/directory/links/apply-exact' && method === 'POST') {
+    const catalog = await loadCatalog({store, hr});
+    const root = directoryRoot();
+    const scanned = await scanDirectoryLinks({root, ...catalog});
+    const result = await applyExactDirectoryLinks({store, root, links: scanned.links, ...catalog});
+    send(req, res, 200, {...result, summary: scanned.summary});
+    return true;
+  }
+
+  const folderMatch = url.pathname.match(FOLDER_ROUTE);
+  if (folderMatch) {
+    const entity = await loadEntity({store, hr, kind: decodeURIComponent(folderMatch[1]), id: decodeURIComponent(folderMatch[2])});
+    const packed = await ensureEntityFolders({store, kind: entity.canon, entityId: entity.entityId, entityName: entity.name, create: method !== 'DELETE'});
+    if (method === 'GET') {
+      send(req, res, 200, {
+        kind: entity.canon, id: entity.entityId, name: entity.name,
+        folders: packed.folders.map((f) => ({role: f.role, relativePath: f.relativePath, displayPath: f.displayPath, source: f.source})),
+      });
+      return true;
+    }
+    if (method === 'POST') {
+      const body = JSON.parse((await readRaw(req, 50_000)).toString('utf8') || '{}');
+      const rel = String(body.relativePath || body.path || '').replace(/\\/g, '/').replace(/^\/+/, '');
+      if (!isAllowedLinkPath(rel)) throw new AppError(400, '資料夾路徑不正確，或這是受保護的證件資料夾');
+      const abs = safeJoinRoot(packed.root, rel);
+      if (!abs) throw new AppError(400, '資料夾路徑不正確');
+      try { await stat(abs); } catch { throw new AppError(404, '找不到這個資料夾'); }
+      const st = await stat(abs);
+      if (!st.isDirectory()) throw new AppError(400, '只能連結資料夾');
+      await store.saveDirectoryFolder(entity.canon, entity.entityId, rel, {role: 'linked', source: 'manual'});
+      const next = await ensureEntityFolders({store, kind: entity.canon, entityId: entity.entityId, entityName: entity.name, create: false});
+      send(req, res, 200, {ok: true, folders: next.folders.map((f) => ({role: f.role, relativePath: f.relativePath, displayPath: f.displayPath, source: f.source}))});
+      return true;
+    }
+    if (method === 'DELETE') {
+      const rel = String(url.searchParams.get('path') || url.searchParams.get('folder') || '').replace(/\\/g, '/').replace(/^\/+/, '');
+      send(req, res, 200, await store.unlinkDirectoryFolder(entity.canon, entity.entityId, rel));
+      return true;
+    }
+    throw new AppError(405, '不支援這個操作');
+  }
+
+  const match = url.pathname.match(DOC_ROUTE);
+  if (!match) return false;
   const kind = decodeURIComponent(match[1]);
   const id = decodeURIComponent(match[2]);
   const isFile = match[3] === 'file';
   const entity = await loadEntity({store, hr, kind, id});
 
   if (!isFile && method === 'GET') {
-    const folder = await resolveEntityFolder({
+    const packed = await ensureEntityFolders({
       store, kind: entity.canon, entityId: entity.entityId, entityName: entity.name, create: true,
     });
-    const files = await listEntityFiles(folder.abs);
+    const folder = url.searchParams.get('folder') || '';
+    const subpath = url.searchParams.get('path') || '';
+    const listed = await listAllEntityDocuments(packed.folders, {folder, subpath, depth: folder || subpath ? 0 : 1});
     send(req, res, 200, {
       kind: entity.canon,
       id: entity.entityId,
       name: entity.name,
-      folder: folder.relativePath,
-      displayPath: folder.displayPath,
-      files,
+      folder: packed.primary.relativePath,
+      displayPath: packed.primary.displayPath,
+      folders: packed.folders.map((f) => ({role: f.role, relativePath: f.relativePath, displayPath: f.displayPath, source: f.source})),
+      files: listed.files,
+      dirs: listed.dirs,
     });
     return true;
   }
@@ -121,20 +188,23 @@ export async function handleDirectory(req, res, {store, hr, session, method, pat
   }
 
   if (isFile && (method === 'GET' || method === 'HEAD')) {
-    const name = url.searchParams.get('name') || '';
-    const folder = await resolveEntityFolder({
+    const packed = await ensureEntityFolders({
       store, kind: entity.canon, entityId: entity.entityId, entityName: entity.name, create: false,
     });
-    const abs = resolveEntityFile(folder.abs, name);
+    const folderRel = url.searchParams.get('folder') || packed.primary.relativePath;
+    const filePath = url.searchParams.get('path') || url.searchParams.get('name') || '';
+    if (!packed.folders.some((f) => f.relativePath === folderRel)) throw new AppError(400, '沒有這個文件資料夾');
+    const abs = resolveLinkedFile(packed.root, folderRel, filePath);
     if (!abs) throw new AppError(400, '檔名不正確');
     let st;
     try { st = await stat(abs); }
     catch { throw new AppError(404, '找不到這個檔案'); }
     if (!st.isFile()) throw new AppError(404, '找不到這個檔案');
+    const base = filePath.split('/').pop();
     res.writeHead(200, {
-      'content-type': extMime(name),
+      'content-type': extMime(base),
       'content-length': st.size,
-      'content-disposition': contentDisposition(name),
+      'content-disposition': contentDisposition(base),
       'cache-control': 'private, max-age=60',
     });
     if (method === 'HEAD') { res.end(); return true; }
@@ -143,11 +213,24 @@ export async function handleDirectory(req, res, {store, hr, session, method, pat
   }
 
   if (isFile && method === 'DELETE') {
-    const name = url.searchParams.get('name') || '';
-    const folder = await resolveEntityFolder({
+    const packed = await ensureEntityFolders({
       store, kind: entity.canon, entityId: entity.entityId, entityName: entity.name, create: false,
     });
-    send(req, res, 200, await deleteEntityFile(folder.abs, name));
+    const folderRel = url.searchParams.get('folder') || packed.primary.relativePath;
+    const filePath = url.searchParams.get('path') || url.searchParams.get('name') || '';
+    if (!packed.folders.some((f) => f.relativePath === folderRel)) throw new AppError(400, '沒有這個文件資料夾');
+    const abs = resolveLinkedFile(packed.root, folderRel, filePath);
+    if (!abs) throw new AppError(400, '檔名不正確');
+    const {unlink} = await import('node:fs/promises');
+    try {
+      const st = await stat(abs);
+      if (!st.isFile()) throw new AppError(400, '只能刪除檔案');
+    } catch (e) {
+      if (e instanceof AppError) throw e;
+      throw new AppError(404, '找不到這個檔案');
+    }
+    await unlink(abs);
+    send(req, res, 200, {ok: true, name: filePath.split('/').pop(), path: filePath, folder: folderRel});
     return true;
   }
 

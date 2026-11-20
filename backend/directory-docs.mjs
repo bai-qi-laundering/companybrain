@@ -204,7 +204,7 @@ export async function resolveEntityFolder({store, kind, entityId, entityName, cr
     relative = defaultRelativePath(canon, id, entityName);
     if (!isValidStoredPath(canon, id, relative)) throw new AppError(500, '無法建立文件資料夾路徑');
     if (create && typeof store.saveDirectoryFolder === 'function') {
-      await store.saveDirectoryFolder(canon, id, relative);
+      await store.saveDirectoryFolder(canon, id, relative, {role: 'primary', source: 'system'});
     }
   }
   const abs = safeJoinRoot(root, relative);
@@ -281,4 +281,122 @@ export async function deleteEntityFile(folderAbs, filename) {
   }
   await unlink(abs);
   return {ok: true, name: path.basename(abs)};
+}
+
+
+const PII_EMPLOYEE_FOLDERS = new Set([
+  '員工身分證(在職)',
+  '員工身分證、駕照(離職)',
+  '員工駕照',
+  '存簿匯款資料',
+  '履歷表',
+  'ID資料',
+]);
+
+export function isProtectedRelativePath(relativePath) {
+  const parts = String(relativePath || '').replace(/\\/g, '/').split('/').filter(Boolean);
+  return parts[0] === '員工' && PII_EMPLOYEE_FOLDERS.has(parts[1] || '');
+}
+
+export function isAllowedLinkPath(relativePath) {
+  const rel = String(relativePath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!rel || rel.startsWith('/') || rel.split('/').includes('..')) return false;
+  const parts = rel.split('/').filter(Boolean);
+  if (!parts.length || parts.length > 8) return false;
+  if (parts.join('/') !== rel.replace(/\/+$/, '')) return false;
+  if (isProtectedRelativePath(rel)) return false;
+  return true;
+}
+
+export async function listFolderEntries(folderAbs, {depth = 1, prefix = ''} = {}) {
+  const out = [];
+  let entries;
+  try { entries = await readdir(folderAbs, {withFileTypes: true}); }
+  catch (e) {
+    if (e && e.code === 'ENOENT') return out;
+    throw e;
+  }
+  for (const ent of entries) {
+    if (ent.name === '@eaDir' || ent.name === '@SynoResource' || ent.name === '@SynoEAStream') continue;
+    const rel = prefix ? prefix + '/' + ent.name : ent.name;
+    const abs = path.join(folderAbs, ent.name);
+    if (ent.isDirectory()) {
+      out.push({type: 'dir', name: ent.name, path: rel});
+      if (depth > 0) out.push(...await listFolderEntries(abs, {depth: depth - 1, prefix: rel}));
+      continue;
+    }
+    if (!ent.isFile() || isIgnoredDocFile(ent.name)) continue;
+    const st = await stat(abs);
+    if (!st.isFile()) continue;
+    out.push({
+      type: 'file',
+      name: ent.name,
+      path: rel,
+      size: st.size,
+      mtime: Math.trunc(st.mtimeMs),
+      mime: extMime(ent.name),
+    });
+  }
+  return out;
+}
+
+export async function ensureEntityFolders({store, kind, entityId, entityName, create}) {
+  const primary = await resolveEntityFolder({store, kind, entityId, entityName, create});
+  const rows = typeof store.directoryFolders === 'function' ? await store.directoryFolders(canonicalKind(kind), assertEntityId(entityId)) : [];
+  const folders = [];
+  const seen = new Set();
+  const add = (row) => {
+    const rel = row.relativePath || row.relative_path;
+    if (!rel || seen.has(rel)) return;
+    if (isProtectedRelativePath(rel)) return;
+    if (!isValidStoredPath(kind, entityId, rel) && !isAllowedLinkPath(rel)) return;
+    const abs = safeJoinRoot(primary.root, rel);
+    if (!abs) return;
+    seen.add(rel);
+    folders.push({
+      role: row.role || (rel === primary.relativePath ? 'primary' : 'linked'),
+      relativePath: rel,
+      displayPath: path.posix.join(primary.root.replaceAll('\\', '/'), rel),
+      abs,
+      source: row.source || '',
+    });
+  };
+  add({relativePath: primary.relativePath, role: 'primary', source: 'system'});
+  for (const row of rows) add(row);
+  folders.sort((a, b) => (a.role === 'primary' ? 0 : 1) - (b.role === 'primary' ? 0 : 1) || a.relativePath.localeCompare(b.relativePath, 'zh-Hant'));
+  return {root: primary.root, primary, folders};
+}
+
+export async function listAllEntityDocuments(folders, {folder, subpath, depth = 1} = {}) {
+  const wanted = folder ? folders.filter((f) => f.relativePath === folder) : folders;
+  if (folder && !wanted.length) throw new AppError(400, '沒有這個文件資料夾');
+  const files = [];
+  const dirs = [];
+  for (const f of wanted) {
+    const relSub = String(subpath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    if (relSub.split('/').includes('..')) throw new AppError(400, '路徑不正確');
+    const abs = relSub ? safeJoinRoot(f.abs, relSub) : f.abs;
+    if (!abs) throw new AppError(400, '路徑不正確');
+    const entries = await listFolderEntries(abs, {depth, prefix: relSub});
+    for (const e of entries) {
+      const item = {...e, folder: f.relativePath, role: f.role};
+      if (e.type === 'dir') dirs.push(item);
+      else files.push(item);
+    }
+  }
+  files.sort((a, b) => b.mtime - a.mtime || a.path.localeCompare(b.path, 'zh-Hant'));
+  dirs.sort((a, b) => a.path.localeCompare(b.path, 'zh-Hant'));
+  return {files, dirs};
+}
+
+export function resolveLinkedFile(root, folderRel, filePath) {
+  if (!isAllowedLinkPath(folderRel) && !folderRel) return null;
+  if (isProtectedRelativePath(folderRel) || isProtectedRelativePath(folderRel + '/' + filePath)) return null;
+  const folderAbs = safeJoinRoot(root, folderRel);
+  if (!folderAbs) return null;
+  const rel = String(filePath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!rel || rel.split('/').includes('..')) return null;
+  const base = rel.split('/').pop();
+  if (!base || isIgnoredDocFile(base) || base === '@eaDir') return null;
+  return safeJoinRoot(folderAbs, rel);
 }

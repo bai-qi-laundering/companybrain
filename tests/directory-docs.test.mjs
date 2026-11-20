@@ -216,3 +216,63 @@ test('vendor, client and employee folders: upload, NAS-dropped files, download, 
     await stop(ctx);
   }
 });
+
+test('old folders can be linked without moving files; PII folders stay blocked; apply-exact is idempotent', async () => {
+  const ctx = await start();
+  try {
+    const state = await (await ctx.api('/api/state')).json();
+    const clientId = 'ffffffff-0000-4111-8222-333333333333';
+    const next = {
+      ...state,
+      organizations: [
+        ...state.organizations,
+        {id: clientId, name: 'H2O', kind: '飯店', mark: 'H', en: 'HOTEL', contact: '窗口', role: '窗口', manager: '—', contract: '—', memo: '', prices: [], aliases: ['H2O']},
+        {id: 'indigo-id', name: '英迪格', kind: '飯店', mark: 'I', en: 'HOTEL', contact: '窗口', role: '窗口', manager: '—', contract: '—', memo: '', prices: [], aliases: []},
+      ],
+    };
+    assert.equal((await ctx.api('/api/state', 'PUT', next)).status, 200);
+
+    const old = path.join(ctx.share, '合約書、報價單', 'H2O');
+    await mkdir(path.join(old, '舊合約'), {recursive: true});
+    await writeFile(path.join(old, '合約.pdf'), 'old-contract');
+    await writeFile(path.join(old, '舊合約', '附約.pdf'), 'old-annex');
+    await mkdir(path.join(ctx.share, '合約書、報價單', 'INDIGO'), {recursive: true});
+    await writeFile(path.join(ctx.share, '合約書、報價單', 'INDIGO', '報價.xlsx'), 'indigo-quote');
+
+    // Manual link
+    const linked = await ctx.api(`/api/directory/clients/${clientId}/folders`, 'POST', {relativePath: '合約書、報價單/H2O'});
+    assert.equal(linked.status, 200, await linked.text());
+    const listed = await (await ctx.api(`/api/directory/clients/${clientId}/documents`)).json();
+    assert.ok(listed.folders.some((f) => f.role === 'primary'));
+    assert.ok(listed.folders.some((f) => f.relativePath === '合約書、報價單/H2O' && f.role === 'linked'));
+    const names = listed.files.map((f) => f.path);
+    assert.ok(names.includes('合約.pdf'));
+    assert.ok(names.includes('舊合約/附約.pdf'));
+    assert.ok(listed.dirs.some((d) => d.path === '舊合約'));
+
+    const downloaded = await ctx.api(`/api/directory/clients/${clientId}/documents/file?folder=${encodeURIComponent('合約書、報價單/H2O')}&path=${encodeURIComponent('舊合約/附約.pdf')}`);
+    assert.equal(downloaded.status, 200);
+    assert.equal(await downloaded.text(), 'old-annex');
+    // Original file still in the old folder — nothing was moved
+    assert.ok(existsSync(path.join(old, '舊合約', '附約.pdf')));
+
+    // PII folder cannot be linked
+    const piiRel = '員工/員工身分證(在職)';
+    await mkdir(path.join(ctx.share, '員工', '員工身分證(在職)'), {recursive: true});
+    const pii = await ctx.api(`/api/directory/clients/${clientId}/folders`, 'POST', {relativePath: piiRel});
+    assert.equal(pii.status, 400);
+
+    // Scan + apply exact (INDIGO synonym)
+    const scan = await (await ctx.api('/api/directory/links/scan')).json();
+    assert.ok(scan.exact.some((r) => r.path === '合約書、報價單/INDIGO'));
+    const applied = await (await ctx.api('/api/directory/links/apply-exact', 'POST', {})).json();
+    assert.ok(applied.added >= 1);
+    const again = await (await ctx.api('/api/directory/links/apply-exact', 'POST', {})).json();
+    assert.equal(again.added, 0);
+    const indigo = await (await ctx.api('/api/directory/clients/indigo-id/documents')).json();
+    assert.ok(indigo.folders.some((f) => f.relativePath === '合約書、報價單/INDIGO'));
+    assert.ok(indigo.files.some((f) => f.name === '報價.xlsx' || f.path === '報價.xlsx'));
+  } finally {
+    await stop(ctx);
+  }
+});
