@@ -13,6 +13,15 @@ services:
       TABLET_BIND: 0.0.0.0
       TABLET_PORT: "8790"
       TABLET_PATH_PREFIX: ${TABLET_PATH_PREFIX:-}
+      DETECT_INTERVAL_SECONDS: ${DETECT_INTERVAL_SECONDS:-1.5}
+      THOROUGH_INTERVAL_SECONDS: ${THOROUGH_INTERVAL_SECONDS:-1.0}
+      FRAME_WATCHDOG_SECONDS: ${FRAME_WATCHDOG_SECONDS:-8}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8790/api/status', timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     volumes:
       - ./data:/data
     ports:
