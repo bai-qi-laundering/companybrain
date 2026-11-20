@@ -3,9 +3,14 @@
 #   docker compose --env-file settings.env -f compose.yaml -f compose.autodeploy.yaml -f compose.directory-docs.yaml up -d
 # NAS_DIRECTORY_ROOT must be a real path and must not duplicate any of the five HR PII volume binds
 # (otherwise Compose fails with "volumes array items must be unique").
+# group_add 101 is Synology administrators, already allowed by the share ACL. Without it the
+# container (HR_UID:users) cannot traverse the mounted root, and the parent mount would block
+# access to the five HR binds.
 services:
   app:
     environment:
       NAS_DIRECTORY_ROOT: ${NAS_DIRECTORY_ROOT}
+    group_add:
+      - "101"
     volumes:
       - ${NAS_DIRECTORY_ROOT}:${NAS_DIRECTORY_ROOT}

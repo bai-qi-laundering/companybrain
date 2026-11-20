@@ -58,8 +58,15 @@ CREATE TABLE IF NOT EXISTS cb_directory_folders (
   )`);
   try { await this.pool.query("ALTER TABLE cb_directory_folders ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'primary'"); } catch {}
   try { await this.pool.query("ALTER TABLE cb_directory_folders ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'system'"); } catch {}
-  try { await this.pool.query('ALTER TABLE cb_directory_folders DROP CONSTRAINT IF EXISTS cb_directory_folders_pkey'); } catch {}
-  try { await this.pool.query('ALTER TABLE cb_directory_folders ADD PRIMARY KEY (kind, entity_id, relative_path)'); } catch {}
+  await this.pool.query(`DO $$ BEGIN
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_constraint
+      WHERE conrelid = 'cb_directory_folders'::regclass
+        AND conname = 'cb_directory_folders_pkey'
+    ) THEN
+      ALTER TABLE cb_directory_folders ADD PRIMARY KEY (kind, entity_id, relative_path);
+    END IF;
+  END $$`);
   await this.pool.query("CREATE UNIQUE INDEX IF NOT EXISTS cb_directory_folders_one_primary ON cb_directory_folders (kind, entity_id) WHERE role = 'primary'");
  }
  async directoryFolders(kind,entityId){await this.ensureDirectoryFolders();const r=await this.pool.query('SELECT kind, entity_id, relative_path, role, source, created_at FROM cb_directory_folders WHERE kind=$1 AND entity_id=$2 ORDER BY CASE WHEN role=\'primary\' THEN 0 ELSE 1 END, relative_path',[kind,entityId]);return r.rows;}
