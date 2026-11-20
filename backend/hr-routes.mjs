@@ -9,6 +9,7 @@ import {newId, DOC_TYPES} from './hr-store.mjs';
 import {folderConfig, saveUpload, scanFolders, fileId, savedPath, UPLOAD_LIMIT, MIMES, enrichDocuments, resolveDocFile} from './hr-docs.mjs';
 import {runAfterUpload, batchScanBank, geminiReady} from './hr-ocr.mjs';
 import {hasPiiKey} from './hr-crypto.mjs';
+import {createSheetSync} from './hr-sheet-sync.mjs';
 import {importStatus, loadSheetValues, parseSheetRows, compareSalaryRows, normalizeColumns, SETUP_INSTRUCTIONS} from './hr-salary-import.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -168,6 +169,30 @@ export async function handleHr(req, res, {hr, session, method, path: p, config =
     return true;
   }
 
+  if (pathname === '/api/hr/sheet-sync' || pathname.startsWith('/api/hr/sheet-sync/')) {
+    if (!hr.sheetSync) hr.sheetSync = createSheetSync({hr});
+    const sync = hr.sheetSync;
+    if (method === 'GET' && pathname === '/api/hr/sheet-sync') {
+      send(res, 200, await sync.status());
+      return true;
+    }
+    let lm;
+    if (method === 'GET' && (lm = pathname.match(/^\/api\/hr\/sheet-sync\/logs\/(\d+)$/))) {
+      const hit = (await sync.logs(100)).find((l) => l.id === Number(lm[1]));
+      if (!hit) throw new AppError(404, '找不到這次同步紀錄');
+      send(res, 200, hit);
+      return true;
+    }
+    if (method === 'POST' && pathname === '/api/hr/sheet-sync/run') {
+      const body = JSON.parse(await readRaw(req, 10_000) || '{}');
+      try {
+        send(res, 200, await sync.run({trigger: body.dryRun ? 'preview' : 'manual', actor, dryRun: Boolean(body.dryRun)}));
+      } catch (e) {
+        throw new AppError(e.status || 502, e.instructions || e.message || '同步失敗');
+      }
+      return true;
+    }
+  }
   if (method === 'GET' && pathname === '/api/hr/salaries/import/status') {
     const sheet = await hr.getSalaryImport();
     send(res, 200, {...sheet, ...(await importStatus())});

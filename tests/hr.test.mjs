@@ -746,3 +746,24 @@ test('purge keeps only 待報到 candidates, leaves employees, and blocks migrat
     await rm(ctx.docRoot, {recursive: true, force: true});
   }
 });
+
+test('試算表同步 routes need login, report setup when unconfigured, and never leak the key', async () => {
+  const prevB64 = process.env.GOOGLE_SA_JSON_B64, prevJson = process.env.GOOGLE_SA_JSON, prevFx = process.env.HR_SALARY_SHEET_FIXTURE;
+  delete process.env.GOOGLE_SA_JSON_B64; delete process.env.GOOGLE_SA_JSON; delete process.env.HR_SALARY_SHEET_FIXTURE;
+  const ctx = await start();
+  try {
+    const anon = await fetch(ctx.url + '/api/hr/sheet-sync');
+    assert.equal(anon.status, 401);
+    const st = await (await ctx.api('/api/hr/sheet-sync')).json();
+    assert.equal(st.configured, false);
+    assert.match(st.instructions, /GOOGLE_SA_JSON_B64/);
+    const run = await ctx.api('/api/hr/sheet-sync/run', 'POST', {});
+    assert.equal(run.status, 400);
+    assert.match((await run.json()).error, /服務帳戶/);
+  } finally {
+    ctx.server.close();
+    if (prevB64 !== undefined) process.env.GOOGLE_SA_JSON_B64 = prevB64;
+    if (prevJson !== undefined) process.env.GOOGLE_SA_JSON = prevJson;
+    if (prevFx !== undefined) process.env.HR_SALARY_SHEET_FIXTURE = prevFx;
+  }
+});
