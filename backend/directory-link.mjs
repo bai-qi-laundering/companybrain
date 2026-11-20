@@ -11,6 +11,29 @@ export const GENERIC_SUFFIXES = [
   '資料', '名片', '相關', '舊合約', '舊資料',
 ];
 
+// User-confirmed folder links (2026-11-20). Paths are relative to the 百麒 root.
+// Each targets[] entry is one directory record, tried by name then alias; missing names are reported, never invented.
+export const CONFIRMED_FOLDER_LINKS = [
+  {path: '客戶&廠商/客戶對話紀錄截圖、染色、破損照/良一、西', targets: [['良一'], ['良西']]},
+  {path: '客戶&廠商/客戶對話紀錄截圖、染色、破損照/良站', targets: [['良站前']]},
+  {path: '合約書、報價單/秝芯合約書', targets: [['秝芯旅店駁二館', '秝二']]},
+  {path: '合約書、報價單/秝芯合約書/秝芯(駁二)名片', targets: [['秝芯旅店駁二館', '秝二']]},
+  {path: '員工/勞工局資料/勞工局罰款(吳育賢、陳紅幸)', targets: [['陳紅幸']]},
+  {path: '員工/請假紀錄/玉菁', targets: [['張玉菁']]},
+  {name: '捷絲旅', targets: [['捷絲旅中正館', '捷中正'], ['捷絲旅站前館', '捷站前']]},
+  {path: '合約書、報價單/@其他客戶報價/承億文旅、酒店', targets: [['承億酒店', '承億']]},
+];
+
+export function confirmedRuleFor(folder) {
+  const rel = folder.relativePath || folder;
+  const name = folder.name || String(rel).split('/').pop();
+  for (const rule of CONFIRMED_FOLDER_LINKS) {
+    if (rule.path && rel === rule.path) return rule;
+    if (rule.name && name === rule.name) return rule;
+  }
+  return null;
+}
+
 const SKIP_TOP = new Set([
   '0年分類帳(空)', '0年支出明細(空)',
   '公告', '表格', '面試', '工作SOP', '保險資料', 'Apollo人資系統',
@@ -134,6 +157,27 @@ function lookupExact(byNorm, name) {
   const key = normalizeName(name);
   if (!key) return [];
   return uniqueHits(byNorm.get(key) || []);
+}
+
+export function resolveConfirmedTargets(targets, index) {
+  const hits = [];
+  const missing = [];
+  for (const names of targets || []) {
+    let found = null;
+    for (const name of names) {
+      const matches = lookupExact(index.byNorm, name);
+      if (matches.length === 1) { found = matches[0]; break; }
+      if (matches.length > 1) { found = {ambiguous: true, name, matches}; break; }
+    }
+    if (found && found.id) {
+      if (!hits.some((h) => h.type === found.type && h.id === found.id)) hits.push(found);
+    } else if (found && found.ambiguous) {
+      missing.push(names[0] + '（名錄中不唯一）');
+    } else {
+      missing.push(names[0]);
+    }
+  }
+  return {hits, missing};
 }
 
 function hasGenericSuffix(folderName, label) {
@@ -323,8 +367,33 @@ export function matchCandidateFolders(candidates, {organizations = [], employees
   }
 
   const autoLinks = []; // {kind, entityId, name, relativePath, confidence, reason}
+  const confirmed = [];
+  const missing = [];
 
   for (const folder of candidates.folders) {
+    const rule = confirmedRuleFor(folder);
+    if (rule) {
+      const resolved = resolveConfirmedTargets(rule.targets, index);
+      for (const name of resolved.missing) {
+        if (!missing.some((m) => m.path === folder.relativePath && m.name === name)) {
+          missing.push({path: folder.relativePath, name});
+        }
+      }
+      const hits = resolved.hits;
+      confirmed.push({folder, confidence: 'confirmed', reason: 'user-confirmed', hits, missing: resolved.missing});
+      for (const hit of hits) {
+        autoLinks.push({
+          kind: hit.kind,
+          entityId: hit.id,
+          name: hit.name,
+          type: hit.type,
+          relativePath: folder.relativePath,
+          confidence: 'confirmed',
+          reason: 'user-confirmed',
+        });
+      }
+      continue;
+    }
     const row = classify(folder);
     const parentRow = folder.parent ? classified.get(folder.parent) || classify(byPath.get(folder.parent) || {relativePath: folder.parent, name: folder.parent.split('/').pop(), parent: ''}) : null;
 
@@ -386,11 +455,12 @@ export function matchCandidateFolders(candidates, {organizations = [], employees
     seen.add(key);
     links.push(link);
   }
-  const collapsed = links.filter((l) => !links.some((o) =>
+  // Collapse descendant exact links, but keep user-confirmed child folders (e.g. 秝芯(駁二)名片).
+  const collapsed = links.filter((l) => l.confidence === 'confirmed' || !links.some((o) =>
     o !== l && o.kind === l.kind && o.entityId === l.entityId && l.relativePath.startsWith(o.relativePath + '/')
   ));
 
-  return {exact, fuzzy, ambiguous, unmatched, mixed, links: collapsed, index};
+  return {exact, fuzzy, ambiguous, unmatched, mixed, confirmed, missing, links: collapsed, index};
 }
 
 export function summarizeMatch(result, {filesAt} = {}) {
@@ -406,12 +476,16 @@ export function summarizeMatch(result, {filesAt} = {}) {
     counts: {
       exactFolders: result.exact.length,
       exactLinks: result.links.length,
+      confirmed: (result.confirmed || []).length,
+      missing: (result.missing || []).length,
       fuzzy: result.fuzzy.length,
       ambiguous: result.ambiguous.length,
       mixed: result.mixed.length,
       unmatched: result.unmatched.length,
     },
     exact: rows(result.exact),
+    confirmed: rows(result.confirmed || []),
+    missing: result.missing || [],
     fuzzy: rows(result.fuzzy),
     ambiguous: rows(result.ambiguous),
     mixed: rows(result.mixed),
@@ -427,19 +501,25 @@ export async function scanDirectoryLinks({root, organizations, employees}) {
   return {...matched, root: base, filesAt: candidates.filesAt, summary: summarizeMatch(matched, {filesAt: candidates.filesAt})};
 }
 
-export async function applyExactDirectoryLinks({store, organizations, employees, root, links}) {
-  const computed = links || (await scanDirectoryLinks({root, organizations, employees})).links;
+export async function applyExactDirectoryLinks({store, organizations, employees, root, links, missing}) {
+  let reportMissing = missing || [];
+  let computed = links;
+  if (!computed) {
+    const scanned = await scanDirectoryLinks({root, organizations, employees});
+    computed = scanned.links;
+    reportMissing = scanned.missing || [];
+  }
   let added = 0, skipped = 0;
   for (const link of computed) {
     if (isProtectedEmployeePath(link.relativePath)) { skipped += 1; continue; }
     if (!safeJoinRoot(root || directoryRoot(), link.relativePath)) { skipped += 1; continue; }
     const before = await store.directoryFolders(link.kind, link.entityId);
     const existed = before.some((r) => r.relative_path === link.relativePath || r.relativePath === link.relativePath);
-    await store.saveDirectoryFolder(link.kind, link.entityId, link.relativePath, {role: 'linked', source: 'auto'});
+    await store.saveDirectoryFolder(link.kind, link.entityId, link.relativePath, {role: 'linked', source: link.confidence === 'confirmed' ? 'confirmed' : 'auto'});
     const after = await store.directoryFolders(link.kind, link.entityId);
     const now = after.some((r) => r.relative_path === link.relativePath || r.relativePath === link.relativePath);
     if (!existed && now) added += 1;
     else skipped += 1;
   }
-  return {ok: true, added, skipped, total: computed.length};
+  return {ok: true, added, skipped, total: computed.length, missing: reportMissing};
 }
