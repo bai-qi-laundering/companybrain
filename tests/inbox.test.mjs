@@ -12,7 +12,7 @@ import {openPglite} from '../scripts/pglite-pool.mjs';
 import {InboxStore, routeOf, suggestEmployee, mergeContact, cleanContact, detectSalary, encryptBlob, decryptBlob, INBOX_TYPES} from '../backend/inbox.mjs';
 import {createResignationSheet, locateDeparture} from '../backend/inbox-resign.mjs';
 import {orgDirectoryKind, CLIENT_KINDS} from '../backend/directory-docs.mjs';
-import {syncLinkedFolderKinds} from '../backend/directory-migrate.mjs';
+import {syncLinkedFolderKinds, applyOrgKindFixes, ORG_KIND_FIXES} from '../backend/directory-migrate.mjs';
 
 // 測試絕不碰正式試算表：清掉服務帳戶、關閉寫入；離職單測試只用注入的假試算表。
 delete process.env.GOOGLE_SA_JSON; delete process.env.GOOGLE_SA_JSON_B64; delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
@@ -367,5 +367,33 @@ test('restaurant folder links move from 廠商 to 客人 without touching files;
     assert.deepEqual((await store.directoryFolders('vendors', REST)).map((r) => r.role), ['primary'], 'primary rows are left alone');
     assert.equal((await store.directoryFolders('vendors', VENDOR)).length, 1);
     assert.equal((await syncLinkedFolderKinds(store)).length, 0, 'second run changes nothing');
+  } finally { await db.close(); }
+});
+
+test('高廬 kind fix: 飯店 → 餐廳 once, by exact id and name, only if still 飯店', async () => {
+  const {db, pool} = openPglite();
+  try {
+    const store = new Store(pool);
+    await store.init('admin1', 'abcdefghijklmnop');
+    const st = await store.read();
+    const base = {mark: 'x', en: 'X', contact: '—', role: '—', manager: '—', contract: '—', memo: '', prices: []};
+    const G = ORG_KIND_FIXES[0].id;
+    const OTHER = 'aaaaaaaa-bbbb-4ccc-8ddd-000000000099';
+    await store.save(st.revision, {...st, organizations: [...st.organizations, {...base, id: G, name: '高廬', kind: '飯店'}, {...base, id: OTHER, name: '高廬', kind: '飯店'}]}, 'admin1');
+    await store.saveDirectoryFolder('clients', G, '合約書、報價單/餐廳/高廬', {role: 'linked', source: 'auto'});
+    const logs = [];
+    const changed = await applyOrgKindFixes(store, {log: (m) => logs.push(m)});
+    assert.deepEqual(changed, [{id: G, name: '高廬', from: '飯店', to: '餐廳'}]);
+    assert.match(logs[0], /高廬 飯店→餐廳（未搬動任何檔案）/);
+    const after = await store.read();
+    assert.equal(after.organizations.find((o) => o.id === G).kind, '餐廳');
+    assert.equal(after.organizations.find((o) => o.id === OTHER).kind, '飯店', 'same name but different id is untouched');
+    assert.equal(orgDirectoryKind(after.organizations.find((o) => o.id === G)), 'clients', 'still a customer');
+    assert.equal((await syncLinkedFolderKinds(store)).length, 0, 'folder links stay under 客人');
+    assert.deepEqual((await applyOrgKindFixes(store)), [], 'second run changes nothing');
+    // 已被手動改成別的種類就不動
+    const cur = await store.read();
+    await store.save(cur.revision, {...cur, organizations: cur.organizations.map((o) => o.id === G ? {...o, kind: '飯店'} : o)}, 'admin1');
+    assert.equal((await applyOrgKindFixes(store, {fixes: [{...ORG_KIND_FIXES[0], from: '其他'}]})).length, 0);
   } finally { await db.close(); }
 });

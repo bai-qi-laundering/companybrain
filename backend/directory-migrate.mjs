@@ -23,3 +23,23 @@ export async function syncLinkedFolderKinds(store, {log = () => {}} = {}) {
   if (moved.length) log(`名錄連結資料夾種類已對齊：${moved.length} 筆（${[...new Set(moved.map((m) => m.from + '→' + m.to))].join('、')}），未搬動任何檔案`);
   return moved;
 }
+
+// 老闆確認過的名錄種類修正（只在目前還是舊種類時才改；不搬任何檔案）。
+export const ORG_KIND_FIXES = [
+  {id: 'c80cd55e-30a0-40d9-802e-1588a167b73b', name: '高廬', from: '飯店', to: '餐廳'},
+];
+
+export async function applyOrgKindFixes(store, {fixes = ORG_KIND_FIXES, log = () => {}, actor = 'system-migration'} = {}) {
+  const state = await store.read();
+  const changed = [];
+  const organizations = (state.organizations || []).map((o) => {
+    const fix = fixes.find((f) => f.id === o.id && f.name === o.name && o.kind === f.from);
+    if (!fix) return o;
+    changed.push({id: o.id, name: o.name, from: fix.from, to: fix.to});
+    return {...o, kind: fix.to};
+  });
+  if (!changed.length) return [];
+  await store.save(state.revision, {...state, organizations}, actor);
+  log(`名錄種類已更新：${changed.map((c) => `${c.name} ${c.from}→${c.to}`).join('、')}（未搬動任何檔案）`);
+  return changed;
+}
