@@ -49,15 +49,30 @@ class DecodeQrTests(unittest.TestCase):
         self.assertEqual(cl.decode_qr(det, blank()), 'H2O客衣')
         self.assertEqual(det.calls, [1280])
 
-    def test_falls_back_to_mid_width_when_1280_empty(self):
-        roi, _ = cl._table_roi(blank())
+    def test_falls_back_to_native_roi_when_1280_empty(self):
+        frame = blank()
+        roi, _ = cl._table_roi(frame)
+        det = FakeDetector({
+            1280: ('', None),
+            roi.shape[1]: ('日航制服', pts_for(roi.shape[1], roi.shape[0])),
+        })
+        self.assertEqual(cl.decode_qr(det, frame), '日航制服')
+        self.assertEqual(det.calls[0], 1280)
+        self.assertIn(roi.shape[1], det.calls)
+        self.assertGreater(roi.shape[1], cl.DETECT_FAST_WIDTH)
+
+    def test_falls_back_to_mid_width_when_1280_and_native_empty(self):
+        frame = blank()
+        roi, _ = cl._table_roi(frame)
         mid, _ = cl._resize_to_width(roi, cl.DETECT_MID_WIDTH)
         det = FakeDetector({
             1280: ('', None),
+            roi.shape[1]: ('', None),
             mid.shape[1]: ('日航制服', pts_for(mid.shape[1], mid.shape[0])),
         })
-        self.assertEqual(cl.decode_qr(det, blank()), '日航制服')
+        self.assertEqual(cl.decode_qr(det, frame), '日航制服')
         self.assertEqual(det.calls[0], 1280)
+        self.assertIn(roi.shape[1], det.calls)
         self.assertIn(mid.shape[1], det.calls)
 
     def test_native_crop_when_1280_finds_quad_only(self):
@@ -109,6 +124,84 @@ class DecodeQrTests(unittest.TestCase):
         self.assertEqual(cl.decode_qr(det, blank(), thorough=False), '')
         self.assertEqual(det.calls, [1280])
         self.assertEqual(cl.decode_qr(det, blank(), thorough=True), '日航制服')
+
+
+def _qr_image(payload, box_size=20, border=4):
+    import qrcode
+    from qrcode.constants import ERROR_CORRECT_M
+    qr = qrcode.QRCode(error_correction=ERROR_CORRECT_M, border=border, box_size=box_size)
+    qr.add_data(payload)
+    qr.make(fit=True)
+    import cv2
+    pil = qr.make_image(fill_color='black', back_color='white').convert('RGB')
+    return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+
+
+# 15 cm printed symbols measured ~294 px on a 2560-wide camera frame.
+PX_PER_CM = 294 / 15.0
+
+
+def _paste_qr(frame, qr, side_px, origin, angle=0):
+    """Paste a QR symbol at a known pixel size, optionally rotated in-plane."""
+    import cv2
+    side_px = int(side_px)
+    symbol = cv2.resize(qr, (side_px, side_px), interpolation=cv2.INTER_AREA)
+    if angle:
+        pad = side_px
+        canvas = np.full((side_px + 2 * pad, side_px + 2 * pad, 3), 255, dtype=np.uint8)
+        canvas[pad:pad + side_px, pad:pad + side_px] = symbol
+        ch, cw = canvas.shape[:2]
+        matrix = cv2.getRotationMatrix2D((cw / 2, ch / 2), angle, 1.0)
+        symbol = cv2.warpAffine(canvas, matrix, (cw, ch), borderValue=(255, 255, 255))
+    sh, sw = symbol.shape[:2]
+    x0, y0 = origin
+    frame[y0:y0 + sh, x0:x0 + sw] = symbol
+    return frame
+
+
+class RealQrSizeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import cv2
+        cls.cv2 = cv2
+        cls.detector = cv2.QRCodeDetector()
+        cls.payloads = ('日航制服', '富野制服', 'H2O客衣', '客衣')
+
+    def _frame_with(self, payload, cm, angle=0):
+        bg = blank(2560, 1440)
+        bg[:] = (40, 44, 48)
+        qr = _qr_image(payload)
+        # Place on the table, clear of the OSD margins.
+        return _paste_qr(bg, qr, round(cm * PX_PER_CM), (1100, 800), angle=angle)
+
+    def _old_1280(self, frame):
+        small, _ = cl._resize_to_width(frame, cl.DETECT_FAST_WIDTH)
+        code, _ = cl._decode_one(self.detector, small)
+        return code
+
+    def test_5cm_reads_via_native_roi(self):
+        for payload in self.payloads:
+            with self.subTest(payload=payload):
+                frame = self._frame_with(payload, 5, angle=15)
+                self.assertEqual(cl.decode_qr(self.detector, frame, thorough=True), payload)
+
+    def test_8cm_reads_with_thorough_native_or_fast_path(self):
+        for payload in self.payloads:
+            with self.subTest(payload=payload):
+                frame = self._frame_with(payload, 8, angle=15)
+                self.assertEqual(cl.decode_qr(self.detector, frame, thorough=True), payload)
+
+    def test_5cm_native_path_is_needed_when_1280_is_too_small(self):
+        frame = self._frame_with('日航制服', 5, angle=0)
+        self.assertEqual(self._old_1280(frame), '')
+        self.assertEqual(cl.decode_qr(self.detector, frame, thorough=True), '日航制服')
+
+    def test_saved_photo_stays_full_resolution_after_detect(self):
+        frame = self._frame_with('日航制服', 8, angle=15)
+        self.assertEqual(cl.decode_qr(self.detector, frame, thorough=True), '日航制服')
+        data = cl.encode_photo(frame)
+        decoded = self.cv2.imdecode(np.frombuffer(data, dtype=np.uint8), self.cv2.IMREAD_COLOR)
+        self.assertEqual(tuple(decoded.shape[:2]), (1440, 2560))
 
 
 class LoadStateTests(unittest.TestCase):
