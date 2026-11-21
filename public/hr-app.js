@@ -677,6 +677,27 @@
     }).catch(() => { root.innerHTML = ''; });
   }
 
+  const pendingNew = (id) => (state.pendingNewcomers || []).find((n) => n.employeeId === id);
+  function newcomerList(list) {
+    if (!list || !list.length) return '';
+    return `<div class="import-warning" data-newcomers><strong>待確認（試算表新增）${list.length} 位</strong>：打卡算薪水試算表上新增、到職日在上線日之後的員工，百麒大腦已自動建檔。請確認是本人；不是真的新員工就按「略過」（會移除這筆自動建立的資料，之後不再自動建立）。
+      <table class="hr-table" style="margin-top:6px"><tbody>${list.map((n) => `<tr><td>${esc(n.employeeId)} ${esc(n.name)}</td><td>${esc(n.department)} ${esc(n.payType)}${n.job ? '／' + esc(n.job) : ''}</td><td>到職 ${esc(n.arrivalDate)}</td><td class="muted">員工資料第 ${esc(n.sheetRow)} 列${n.inPayTab ? '' : '（薪資設定還沒有這列）'}</td><td><button class="hr-btn" type="button" data-nc-confirm="${esc(n.employeeId)}">確認</button> <button class="hr-btn ghost" type="button" data-nc-dismiss="${esc(n.employeeId)}">略過</button></td></tr>`).join('')}</tbody></table></div>`;
+  }
+  function bindNewcomers(scope, after) {
+    $$('[data-nc-confirm],[data-nc-dismiss]', scope).forEach((b) => b.onclick = async () => {
+      const id = b.dataset.ncConfirm || b.dataset.ncDismiss;
+      const dismiss = Boolean(b.dataset.ncDismiss);
+      if (dismiss && !window.confirm('略過 ' + id + '？會移除這筆自動建立的員工資料，之後同步不再自動建立（試算表不會被改動）。')) return;
+      b.disabled = true;
+      try {
+        if (demo) state.pendingNewcomers = (state.pendingNewcomers || []).filter((n) => n.employeeId !== id);
+        else await write('/api/hr/sheet-sync/newcomers/' + encodeURIComponent(id) + '/' + (dismiss ? 'dismiss' : 'confirm'), 'POST', {});
+        toast(dismiss ? '已略過 ' + id : '已確認 ' + id);
+        if (!demo) await refresh();
+        after(dismiss ? id : '');
+      } catch (e) { toast(e.message || '操作失敗'); b.disabled = false; }
+    });
+  }
   function paintStaff(root) {
     if (route.page === 'profile' && route.id) return paintProfile(root, route.id);
     const list = state.employees.filter((e) => match(e, ['id', 'name', 'department', 'job', 'phone']) && (!jobFilter.staff || String(e.job || '').trim() === jobFilter.staff)).sort((a, b) => a.id.localeCompare(b.id));
@@ -687,6 +708,7 @@
         <div class="hr-card"><div class="k">證件即將到期（60天）</div><div class="n">${exp.length}</div></div>
         <div class="hr-card"><div class="k">資料未齊</div><div class="n">${state.employees.filter((e) => missingPaper(e).length).length}</div></div>
       </div>
+      ${newcomerList(state.pendingNewcomers)}
       ${exp.length ? `<p class="muted">效期提醒：${exp.map((d) => esc((state.employees.find((e) => e.id === d.employeeId) || {}).name || d.filename) + ' ' + DOC[d.category] + ' ' + d.expiresOn).join('、')}</p>` : ''}
       <div class="hr-toolbar">
         <button class="hr-btn" data-act="add-emp">＋ 新增員工</button>
@@ -700,7 +722,8 @@
         <span class="muted">點列即可開啟單頁檔案；欄位可直接改。</span>
       </div>
       <table class="hr-table"><thead><tr><th>編號</th><th>姓名</th><th>部門</th><th>職稱</th><th>電話</th><th>到職</th><th>狀態</th></tr></thead>
-      <tbody>${list.map((e) => `<tr data-open="${esc(e.id)}"><td>${esc(e.id)}</td><td>${esc(e.name)}</td><td>${esc(e.department)}</td><td>${esc(e.job)}</td><td>${esc(e.phone)}</td><td>${esc(e.arrivalDate)}</td><td>${active(e) ? '<span class="pill ok">在職</span>' : '<span class="pill">離職</span>'}${missingPaper(e).length ? ' <span class="pill warn">未齊</span>' : ''}${pendingOcr(e.id).length ? ' <span class="pill warn">待確認辨識</span>' : ''}</td></tr>`).join('') || '<tr><td colspan="7">沒有符合的員工。</td></tr>'}</tbody></table>`;
+      <tbody>${list.map((e) => `<tr data-open="${esc(e.id)}"><td>${esc(e.id)}</td><td>${esc(e.name)}</td><td>${esc(e.department)}</td><td>${esc(e.job)}</td><td>${esc(e.phone)}</td><td>${esc(e.arrivalDate)}</td><td>${active(e) ? '<span class="pill ok">在職</span>' : '<span class="pill">離職</span>'}${missingPaper(e).length ? ' <span class="pill warn">未齊</span>' : ''}${pendingOcr(e.id).length ? ' <span class="pill warn">待確認辨識</span>' : ''}${pendingNew(e.id) ? ' <span class="pill warn">待確認（試算表新增）</span>' : ''}</td></tr>`).join('') || '<tr><td colspan="7">沒有符合的員工。</td></tr>'}</tbody></table>`;
+    bindNewcomers(root, () => paintStaff(root));
     $$('[data-open]', root).forEach((tr) => tr.onclick = () => { const id = tr.dataset.open; route = {page: 'profile', id}; refresh({view: 'profile', id}).then(() => paintProfile(root, id)); });
     $('[data-act="add-emp"]', root).onclick = () => openEmpForm(root);
     $('[data-act="scan"]', root).onclick = () => doScan(root);
@@ -838,6 +861,7 @@
     root.innerHTML = `
       <div class="hr-toolbar"><button class="hr-btn ghost" data-act="back">← 返回員工名錄</button><span class="muted">${esc(e.id)}</span></div>
       ${sheetRowBanner(state.sheetRow && state.sheetRow.employeeId === id ? state.sheetRow : null)}
+      ${pendingNew(id) ? newcomerList([pendingNew(id)]) : ''}
       <div class="profile">
         <div class="profile-main">
           <section class="hr-card">
@@ -921,6 +945,7 @@
         </div>
       </div>`;
     $('[data-act="back"]', root).onclick = () => { route = {page: 'list'}; paintStaff(root); };
+    bindNewcomers(root, (gone) => { if (gone) { route = {page: 'list'}; paintStaff(root); } else paintProfile(root, id); });
     { const rb = $('[data-act="sheet-retry"]', root); if (rb) rb.onclick = async () => {
       rb.disabled = true;
       try { const r = await write('/api/hr/employees/' + encodeURIComponent(id) + '/sheet-write/retry', 'POST', {}); toast(r && r.label ? r.label : '已處理'); await refresh({view: 'profile', id}); paintProfile(root, id); }
@@ -1248,7 +1273,9 @@
       const chRows = changes.map((c) => `<tr><td>${esc(c.employeeId)} ${esc(c.name || '')}</td><td>${esc(SYNC_FIELD[c.field] || c.field)}</td><td>${esc(c.from || '空白')} → <strong>${esc(c.to)}</strong></td></tr>`).join('') || '<tr><td colspan="3" class="muted">沒有要更新的員工欄位。</td></tr>';
       const salRows = sal.map((w) => `<tr><td>${esc(w.month)}</td><td>${esc(w.employeeId)} ${esc(w.name || '')}</td><td class="num">${w.from == null ? '' : money(w.from) + ' → '}<strong>${money(w.netPay)}</strong></td></tr>`).join('') || '<tr><td colspan="3" class="muted">沒有要寫入的薪資。</td></tr>';
       const flagRows = flags.map((f) => `<tr><td>${esc(f.employeeId || '')} ${esc(f.name || '')}${f.row ? ' <span class="muted">（第 ' + esc(f.row) + ' 列）</span>' : ''}</td><td>${esc(labels[f.type] || f.type)}</td><td>${esc([f.field ? (SYNC_FIELD[f.field] || f.field) : '', f.raw ? '表上：' + f.raw : '', f.current ? '百麒大腦：' + f.current : '', f.suggestedId ? '試算表上可能是 ' + f.suggestedId : '', f.month || ''].filter(Boolean).join('　'))}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">沒有需要注意的項目。</td></tr>';
-      return `<p>${r.dryRun ? '預覽（尚未寫入）' : '已同步'}：員工欄位 ${r.dryRun ? changes.length : (r.employeeApplied || 0)} 項、薪資 ${r.dryRun ? sal.length : (r.salaryApplied || 0)} 筆、需注意 ${flags.length} 項。</p>
+      const ncList = r.dryRun ? (r.newcomersPlanned || []) : (r.newcomersCreated || []);
+      const ncRows = ncList.map((n) => `<tr><td>${esc(n.employeeId)} ${esc(n.name)}</td><td>${esc(n.department)}</td><td>到職 ${esc(n.arrivalDate)}（第 ${esc(n.row)} 列）</td></tr>`).join('');
+      return `${ncRows ? `<h3>${r.dryRun ? '將自動建立' : '已自動建立'}（試算表新增，待確認）</h3><div class="import-table-wrap"><table class="hr-table"><tbody>${ncRows}</tbody></table></div>` : ''}<p>${r.dryRun ? '預覽（尚未寫入）' : '已同步'}：員工欄位 ${r.dryRun ? changes.length : (r.employeeApplied || 0)} 項、薪資 ${r.dryRun ? sal.length : (r.salaryApplied || 0)} 筆、需注意 ${flags.length} 項。</p>
         ${r.salaryError ? `<p class="import-warning">${esc(r.salaryError)}</p>` : ''}
         <h3>員工欄位</h3><div class="import-table-wrap"><table class="hr-table"><thead><tr><th>員工</th><th>欄位</th><th>變更</th></tr></thead><tbody>${chRows}</tbody></table></div>
         <h3>每月實發金額</h3><div class="import-table-wrap"><table class="hr-table salary-table"><thead><tr><th>月份</th><th>員工</th><th>實發金額</th></tr></thead><tbody>${salRows}</tbody></table></div>
@@ -1263,6 +1290,8 @@
       shell(`<p class="muted">試算表 → 百麒大腦：「員工資料」的實際最後在職日、職稱以試算表為準；到職日只補空白。薪資不再同步。百麒大腦 → 試算表：只針對在百麒大腦「報到並轉為員工」新增的人，補空白欄與存簿後的匯款類型，不改舊資料。${st.intervalMinutes ? '每 ' + esc(st.intervalMinutes) + ' 分鐘自動同步一次。' : '自動同步已關閉。'}</p>
         <p>上次成功：${esc(fmtTaipei(st.lastSuccess && st.lastSuccess.finishedAt))}</p>
         <div class="hr-toolbar"><button class="hr-btn" type="button" data-run>立即同步</button><button class="hr-btn ghost" type="button" data-preview>預覽（不寫入）</button><button class="hr-btn ghost" type="button" data-cancel>關閉</button></div>
+        <p class="muted">試算表直接新增的員工（例如外籍員工）：到職日在上線日${st.goLive ? '（' + esc(st.goLive) + '）' : '（尚未設定，暫不自動建立）'}之後、百麒大腦還沒有這個編號的人，同步時會自動建檔並標「待確認（試算表新增）」；同名者不建立、列在需注意。百麒大腦不會回寫這些列。永久略過：${esc((st.ignoreIds || []).join('、'))}。</p>
+        ${newcomerList(st.pendingNewcomers)}
         <div data-result>${result ? paintResult(result) : ''}</div>
         <h3>同步紀錄</h3><div class="import-table-wrap"><table class="hr-table"><thead><tr><th>時間</th><th>方式</th><th>結果</th><th>內容</th></tr></thead><tbody>${logs}</tbody></table></div>`);
       const go = async (dryRun) => {
@@ -1274,6 +1303,7 @@
           if (!dryRun) { await refresh(); toast('試算表同步完成'); }
         } catch (e) { $('[data-result]', host).innerHTML = `<pre class="setup-help">${esc(e.message || '同步失敗')}</pre>`; }
       };
+      bindNewcomers(host, async () => { st = await write('/api/hr/sheet-sync', 'GET'); paint(result); });
       $('[data-run]', host).onclick = () => go(false);
       $('[data-preview]', host).onclick = () => go(true);
     };

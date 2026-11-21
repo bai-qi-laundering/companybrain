@@ -2,10 +2,12 @@
 // The sheet is the source of truth for 實際最後在職日 (離職日), 職稱 and 員工編號; 到職日 only fills blanks.
 // Monthly 實領薪資 is NOT synced any more (owner uploads pay himself); planSalarySync is kept only for the
 // manual 「匯入本月薪資」 preview code and tests.
+// Sheet-only new hires on/after HR_SHEET_GO_LIVE are auto-created as 「待確認（試算表新增）」 (hr-sheet-newcomers.mjs).
 // Nothing is ever written back to the sheet. Bad cells are flagged in the sync log, never fatal.
 import {baiqiSalaryId, baiqiSalaryColumnKey, parseSheetRows, importStatus, fixturePath, parseCsv} from './hr-salary-import.mjs';
 import {fetchSheetTabs} from './google-sa.mjs';
 import {readFile} from 'node:fs/promises';
+import {createNewcomers, goLiveDate, PAY_TAB} from './hr-sheet-newcomers.mjs';
 
 export const EMPLOYEE_TAB = '員工資料';
 const EMP_HEADERS = {
@@ -31,6 +33,10 @@ export const FLAG_LABELS = {
   'salary-paid-changed': '已匯款的月份金額在試算表變了（未改動，請人工確認）',
   'salary-duplicate': '同一人同月份出現多列（取最後一列）',
   'name-mismatch': '同一個編號兩邊姓名不同（整列未同步，請先核對編號）',
+  'sheet-new-name-match': '試算表新員工與百麒大腦現有員工同名（未自動建立，請確認是否同一人）',
+  'sheet-new-candidate-match': '試算表新員工與應徵者同名（未自動建立，請從應徵者頁轉員工或確認）',
+  'sheet-new-no-name': '試算表新員工沒有姓名（未自動建立）',
+  'sheet-new-failed': '試算表新員工自動建立失敗',
 };
 
 export function normName(v) {
@@ -200,7 +206,7 @@ async function loadTabs({spreadsheetId, fetchImpl}) {
     // Test/demo: HR_EMPLOYEE_SHEET_FIXTURE is the 員工資料 CSV.
     return {[EMPLOYEE_TAB]: empFixture ? parseCsv(await readFile(empFixture, 'utf8')) : []};
   }
-  return fetchSheetTabs({spreadsheetId, tabs: [EMPLOYEE_TAB], fetchImpl});
+  return fetchSheetTabs({spreadsheetId, tabs: [EMPLOYEE_TAB, PAY_TAB], fetchImpl});
 }
 
 export const SYNC_SCHEMA = `
@@ -217,7 +223,8 @@ CREATE TABLE IF NOT EXISTS hr_sheet_sync_log (
 );
 `;
 
-export function createSheetSync({hr, fetchImpl, loadValues, statusImpl = importStatus} = {}) {
+export function createSheetSync({hr, fetchImpl, loadValues, statusImpl = importStatus, env = process.env} = {}) {
+  const newcomers = hr.sheetNewcomers || (hr.sheetNewcomers = createNewcomers({hr, env}));
   let running = null;
   let timer = null;
   let ensured = false;
@@ -281,18 +288,24 @@ export function createSheetSync({hr, fetchImpl, loadValues, statusImpl = importS
       const tabs = loadValues ? await loadValues({spreadsheetId: cfg.spreadsheetId}) : await loadTabs({spreadsheetId: cfg.spreadsheetId, fetchImpl});
       const employees = (await pool.query('SELECT id, payload FROM hr_employees')).rows.map((r) => ({id: r.id, ...r.payload}));
       const empValues = tabs[EMPLOYEE_TAB] || [];
-      const empPlan = empValues.length ? planEmployeeSync({sheetRows: parseEmployeeTab(empValues).rows, employees}) : {changes: [], flags: []};
+      const sheetRows = empValues.length ? parseEmployeeTab(empValues).rows : [];
+      const empPlan = empValues.length ? planEmployeeSync({sheetRows, employees}) : {changes: [], flags: []};
       const salPlan = {writes: [], flags: [], months: []};
       const salaryError = '';
       const salaryApplied = 0;
       let employeeApplied = 0;
       if (!dryRun) employeeApplied = await applyEmployeeChanges(empPlan.changes, 'sheet-sync:' + actor);
+      const nc = sheetRows.length ? await newcomers.run({sheetRows, empValues, payValues: tabs[PAY_TAB] || [], dryRun, actor: 'sheet-sync:' + actor})
+        : {created: [], planned: [], flags: [], skipped: {}};
+      const handled = new Set(nc.planned.map((x) => x.employeeId));
+      empPlan.flags = empPlan.flags.filter((f) => !(f.type === 'sheet-only' && handled.has(String(f.employeeId).toUpperCase())));
       const summary = {
+        newcomersCreated: nc.created, newcomersPlanned: nc.planned, newcomersSkipped: nc.skipped,
         employeeRows: empValues.length ? empValues.length - 1 : 0,
         employeeChanges: empPlan.changes,
         salaryWrites: salPlan.writes.map(({notes, ...w}) => w),
         salaryMonths: salPlan.months,
-        flags: [...empPlan.flags, ...salPlan.flags],
+        flags: [...empPlan.flags, ...nc.flags, ...salPlan.flags],
         employeeApplied, salaryApplied, salaryError,
       };
       await pool.query('UPDATE hr_sheet_sync_log SET finished_at=now(), ok=true, summary=$1::jsonb WHERE id=$2', [JSON.stringify(summary), logId]);
@@ -340,6 +353,9 @@ export function createSheetSync({hr, fetchImpl, loadValues, statusImpl = importS
       lastSuccess: recent.find((l) => l.ok && !l.dryRun) || null,
       logs: recent.map(({summary, ...l}) => ({...l, counts: countsOf(summary)})),
       flagLabels: FLAG_LABELS,
+      goLive: goLiveDate(env),
+      pendingNewcomers: await newcomers.pending(),
+      ignoreIds: await newcomers.ignoreIds(),
     };
   }
 
@@ -350,6 +366,7 @@ export function createSheetSync({hr, fetchImpl, loadValues, statusImpl = importS
         const s = await statusImpl();
         if (!s.configured) return;
         const r = await run({trigger: 'schedule', actor: 'system'});
+        if (r.newcomersCreated?.length) logger.log('HR sheet sync created ' + r.newcomersCreated.length + ' sheet-only employees (pending review)');
         if (r.employeeApplied || r.salaryApplied) logger.log('HR sheet sync applied ' + r.employeeApplied + ' employee fields, ' + r.salaryApplied + ' salary rows');
       } catch (e) {
         if (e.status !== 409) logger.error('HR sheet sync failed:', String(e.message || e.name).slice(0, 200));
@@ -373,5 +390,6 @@ export function countsOf(summary = {}) {
     flags: (summary.flags || []).length,
     employeeApplied: summary.employeeApplied || 0,
     salaryApplied: summary.salaryApplied || 0,
+    newcomersCreated: (summary.newcomersCreated || []).length,
   };
 }

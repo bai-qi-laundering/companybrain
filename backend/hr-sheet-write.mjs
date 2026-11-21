@@ -268,12 +268,23 @@ export function createSheetWriter({hr, fetchImpl, loadTabs, append, update, stat
     return Array.isArray(r.rows[0]?.value) ? r.rows[0].value : [];
   }
 
-  /** IDs on the sheet for numbering: live read when possible, otherwise the last seen list. */
-  async function idsForNumbering() {
+  /**
+   * IDs on the sheet for numbering. strict (轉員工): must read the live sheet or throw — no fallback, because the
+   * office adds people (e.g. foreign workers) straight into the sheet. Non-strict: last seen list on failure.
+   */
+  async function idsForNumbering({strict = false} = {}) {
+    if (strict && !writeEnabled(env)) return knownIds(); // HR_SHEET_WRITE=off (dev/tests): sheet is out of the loop
     if (writeEnabled(env) && (await statusImpl()).configured) {
-      try { await readTabs(); } catch { /* fall back to remembered ids */ }
-    }
+      try { await readTabs(); } catch (e) {
+        if (strict) throw sheetUnreadable(e);
+      }
+    } else if (strict) throw sheetUnreadable(new Error('尚未設定 Google 服務帳戶'));
     return knownIds();
+  }
+  function sheetUnreadable(e) {
+    const err = new Error('讀不到打卡算薪水試算表，暫時不能轉員工（避免員工編號和試算表重複）。請稍後再試或檢查服務帳戶權限。（' + String(e.message || e).slice(0, 120) + '）');
+    err.status = 503;
+    return err;
   }
 
   async function log(employeeId, action, {tab = '', cell = '', value = '', ok = true, error = ''} = {}) {

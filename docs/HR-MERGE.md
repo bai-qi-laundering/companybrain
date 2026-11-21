@@ -250,3 +250,14 @@ sudo docker update --restart=unless-stopped baiqi-hr
 - **權限**：服務帳戶 `companybrain-sheet@hotel-inventory-3a1ad.iam.gserviceaccount.com` 需在試算表共用為「編輯者」；scope 改為 `spreadsheets`（讀寫）。關閉寫入：`HR_SHEET_WRITE=off`。
 - **GAS**：不修改試算表的 Apps Script 與「部門預設值」分頁。注意 API 寫入不會觸發 installable onEdit，所以「員工資料→自動建薪資設定列」與「選職稱→帶預設值」不會被觸發；companybrain 自己寫兩列並帶入預設值，所以不需要它們。
 - **測試**：測試一律清掉 `GOOGLE_SA_JSON*` 並設 `HR_SHEET_WRITE=off`（npm test 腳本＋各測試檔開頭），避免碰到正式試算表。
+
+## 試算表直接新增的員工（例如外籍員工）→ companybrain 自動建檔
+
+- 在每輪「試算表同步」（排程與手動）中執行，模組 `backend/hr-sheet-newcomers.mjs`。
+- **條件**：只看「員工資料」（試算表的 GAS 會從員工資料建立薪資設定列；薪資設定只用來補空白的計薪型態／職稱）。需有員工編號、姓名、且到職日 ≥ `HR_SHEET_GO_LIVE`（部署時在 settings.env 設定，yyyy-mm-dd；空白＝不自動建立）。
+- **不建立**：companybrain 已有這個編號（O/0 視為相同）、永久略過名單（`hr_settings.sheetNewIgnoreIds`，預設 B777、F144、O004、W132、F153）、試算表編號重複、companybrain 自己寫入的列、上線日以前或沒有到職日的列。
+- **同名**：與現有員工或未轉員工的應徵者同名 → 不建立，列在同步「需注意」請人工連結。
+- **建立內容**：編號、姓名、部門、計薪型態（員工資料，空白時用薪資設定）、職稱（員工資料，空白時用薪資設定）、到職日、實際最後在職日、LINE ID；備註註明來源列。記錄於 `hr_sheet_newcomers`（status pending/confirmed/dismissed），稽核 `試算表新增員工`。
+- **待確認**：員工列表、員工頁與試算表同步視窗都會顯示「待確認（試算表新增）」，可「確認」或「略過」。略過會刪除這筆自動建立的資料（若已有文件、存簿、薪資等資料則拒絕）並加入永久略過名單，之後不再自動建立。
+- **不回寫**：這些列不在 `hr_sheet_rows`，companybrain 不會補欄或改匯款類型；試算表 → companybrain 的離職日／職稱／到職日同步照常。
+- **轉員工的編號**：轉員工時一定要即時讀到試算表（員工資料＋薪資設定）才給號；讀不到就擋下並提示「讀不到打卡算薪水試算表，暫時不能轉員工」，不使用舊的編號清單。（`HR_SHEET_WRITE=off` 僅供開發／測試。）
