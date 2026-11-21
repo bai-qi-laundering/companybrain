@@ -46,9 +46,9 @@ export const SETUP_INSTRUCTIONS = [
   '尚未設定 Google 服務帳戶，所以現在不能從「打卡算薪水」試算表匯入薪資。請在 NAS 上完成以下步驟（只要讀取、不會寫回試算表）：',
   '1. 在 Google Cloud 建立一個服務帳戶，並下載 JSON 金鑰。',
   '2. 把 JSON 放到 NAS（例如 /volume1/docker/companybrain/google-sa.json），不要提交到 Git。',
-  '3. 在 settings.env 新增 GOOGLE_SA_JSON=/volume1/docker/companybrain/google-sa.json（也可以把整份 JSON 貼在等號後面）。',
+  '3. 在 settings.env 新增 GOOGLE_SA_JSON_B64=（JSON 檔做 base64 單行：base64 -w0 google-sa.json）。也可用 GOOGLE_SA_JSON 貼整份 JSON；填檔案路徑時要確定容器看得到。',
   '4. 開啟試算表，按「共用」，把 JSON 裡的 client_email 加成「檢視者」。',
-  '5. 重啟 companybrain 後再按「匯入本月薪資」。',
+  '5. 重啟 companybrain 後按「試算表同步」→「立即同步」（之後每小時自動同步離職日、職稱、到職日與每月實領薪資），或按「匯入本月薪資」手動匯入。',
   '預設讀取分頁「薪資計算明細」，以「員工編號」對應員工、「計算月份」對應月份、「實領薪資」對應實發金額。只帶入彙總列（計算月份為 yyyy/mm，員工編號不是打卡列或「—」）；右側隱藏的輔助欄會略過。欄位名稱可在匯入畫面調整並存成預設。',
 ].join('\n');
 

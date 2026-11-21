@@ -8,6 +8,10 @@ const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 let cached = {token: '', exp: 0, email: ''};
 
 export function saJsonSource() {
+  const b64 = String(process.env.GOOGLE_SA_JSON_B64 || '').trim();
+  if (b64) {
+    try { return Buffer.from(b64, 'base64').toString('utf8').trim(); } catch { return ''; }
+  }
   return String(process.env.GOOGLE_SA_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS || '').trim();
 }
 
@@ -83,4 +87,20 @@ export async function fetchSheetValues({spreadsheetId, sheetTab, fetchImpl = fet
   if (!res.ok) throw new Error('讀取試算表失敗（' + res.status + '）');
   const data = await res.json();
   return data.values || [];
+}
+
+/** Read several tabs in one call (values:batchGet). Returns {tabTitle: rows[][]}. */
+export async function fetchSheetTabs({spreadsheetId, tabs = [], fetchImpl = fetch, token}) {
+  const access = token || await getAccessToken({fetchImpl});
+  if (!access) throw new Error('尚未設定服務帳戶');
+  const qs = tabs.map((t) => 'ranges=' + encodeURIComponent("'" + String(t || '').replaceAll("'", '') + "'!A1:ZZ")).join('&');
+  const url = 'https://sheets.googleapis.com/v4/spreadsheets/' + encodeURIComponent(spreadsheetId) + '/values:batchGet?' + qs + '&valueRenderOption=FORMATTED_VALUE&majorDimension=ROWS';
+  const res = await fetchImpl(url, {headers: {Authorization: 'Bearer ' + access}, signal: AbortSignal.timeout(30000)});
+  if (res.status === 403) throw new Error('沒有權限讀取試算表，請確認已把服務帳戶加成檢視者。');
+  if (res.status === 404 || res.status === 400) throw new Error('找不到試算表或分頁名稱不正確。');
+  if (!res.ok) throw new Error('讀取試算表失敗（' + res.status + '）');
+  const data = await res.json();
+  const out = {};
+  tabs.forEach((t, i) => { out[t] = data.valueRanges?.[i]?.values || []; });
+  return out;
 }

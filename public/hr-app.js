@@ -508,6 +508,12 @@
       state.salaries = (state.salaries || []).filter((s) => s.id !== m[1]);
       saveDemo(); return {ok: true};
     }
+    if (path === '/api/hr/sheet-sync' && method === 'GET') {
+      return {configured: true, source: 'demo', intervalMinutes: 60, logs: [], last: null, lastSuccess: null, flagLabels: {}};
+    }
+    if (path === '/api/hr/sheet-sync/run' && method === 'POST') {
+      return {ok: true, dryRun: Boolean(body && body.dryRun), employeeChanges: [], salaryWrites: [], flags: [], employeeApplied: 0, salaryApplied: 0};
+    }
     if (path === '/api/hr/salaries/import/preview' && method === 'POST') {
       return demoSalaryPreview(body);
     }
@@ -685,6 +691,7 @@
         <button class="hr-btn ghost" data-act="ocr-bank">批次辨識既有存摺與身分證</button>
         <button class="hr-btn ghost" data-act="leave-excel">匯入特休 Excel</button>
         <button class="hr-btn ghost" data-act="salary-import">匯入本月薪資</button>
+        <button class="hr-btn ghost" data-act="sheet-sync">試算表同步</button>
         <span class="spacer"></span>
         ${jobFilterSelect(jobFilter.staff, 'staff-job')}
         <span class="muted">點列即可開啟單頁檔案；欄位可直接改。</span>
@@ -697,6 +704,7 @@
     $('[data-act="ocr-bank"]', root).onclick = () => doBatchBank(root);
     $('[data-act="leave-excel"]', root).onclick = () => openExcel(root, 'leave');
     $('[data-act="salary-import"]', root).onclick = () => openSalaryImport(root);
+    { const b = $('[data-act="sheet-sync"]', root); if (b) b.onclick = () => openSheetSync(root); }
     const jobSel = $('[data-job-filter]', root);
     if (jobSel) jobSel.onchange = () => { jobFilter.staff = jobSel.value; paintStaff(root); };
   }
@@ -1200,6 +1208,60 @@
     const activeEmployeeCount = (state.employees || []).filter((e) => (!e.arrivalDate || e.arrivalDate <= today) && (!e.departureDate || e.departureDate >= today)).length;
     const warnings = rows.length < activeEmployeeCount ? ['本月彙總列有 ' + rows.length + ' 筆，少於目前在職員工 ' + activeEmployeeCount + ' 人。試算表可能只算了部分部門或個別員工（每次計算會整表覆寫）。確認後只會更新對得到的人，其他人的薪資不會被清空。'] : [];
     return {month, months: [month], columns: {month: '計算月份', employeeId: '員工編號', name: '員工姓名', amount: '實領薪資'}, headers: ['計算月份', '員工編號', '員工姓名', '實領薪資'], rows, counts, skipped: 2, configured: true, summaryCount: rows.length, activeEmployeeCount, warnings};
+  }
+  function fmtTaipei(ts) {
+    if (!ts) return '—';
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return String(ts);
+    return d.toLocaleString('zh-TW', {timeZone: 'Asia/Taipei', hour12: false}) + '（台北）';
+  }
+  const SYNC_FIELD = {departureDate: '最後在職日', arrivalDate: '到職日', job: '職稱'};
+  const SYNC_TRIGGER = {schedule: '自動', manual: '手動', preview: '預覽'};
+  async function openSheetSync(root) {
+    if (!$('#hr-dialogs', root)) root.insertAdjacentHTML('beforeend', '<div id="hr-dialogs"></div>');
+    const host = $('#hr-dialogs', root);
+    const close = () => { host.innerHTML = ''; };
+    const shell = (inner) => { host.innerHTML = `<dialog class="hr-dlg wide" open><h2>試算表同步</h2><div class="dlg-body">${inner}</div></dialog>`; const c = $('[data-cancel]', host); if (c) c.onclick = close; };
+    shell('<p class="muted">讀取中…</p>');
+    let st;
+    try { st = await write('/api/hr/sheet-sync', 'GET'); }
+    catch (e) { shell(`<pre class="setup-help">${esc(e.message || '讀取失敗')}</pre><div class="hr-toolbar"><button class="hr-btn ghost" type="button" data-cancel>關閉</button></div>`); return; }
+    const labels = st.flagLabels || {};
+    const paintResult = (r) => {
+      const changes = r.employeeChanges || [], sal = r.salaryWrites || [], flags = r.flags || [];
+      const chRows = changes.map((c) => `<tr><td>${esc(c.employeeId)} ${esc(c.name || '')}</td><td>${esc(SYNC_FIELD[c.field] || c.field)}</td><td>${esc(c.from || '空白')} → <strong>${esc(c.to)}</strong></td></tr>`).join('') || '<tr><td colspan="3" class="muted">沒有要更新的員工欄位。</td></tr>';
+      const salRows = sal.map((w) => `<tr><td>${esc(w.month)}</td><td>${esc(w.employeeId)} ${esc(w.name || '')}</td><td class="num">${w.from == null ? '' : money(w.from) + ' → '}<strong>${money(w.netPay)}</strong></td></tr>`).join('') || '<tr><td colspan="3" class="muted">沒有要寫入的薪資。</td></tr>';
+      const flagRows = flags.map((f) => `<tr><td>${esc(f.employeeId || '')} ${esc(f.name || '')}${f.row ? ' <span class="muted">（第 ' + esc(f.row) + ' 列）</span>' : ''}</td><td>${esc(labels[f.type] || f.type)}</td><td>${esc([f.field ? (SYNC_FIELD[f.field] || f.field) : '', f.raw ? '表上：' + f.raw : '', f.current ? '百麒大腦：' + f.current : '', f.suggestedId ? '試算表上可能是 ' + f.suggestedId : '', f.month || ''].filter(Boolean).join('　'))}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">沒有需要注意的項目。</td></tr>';
+      return `<p>${r.dryRun ? '預覽（尚未寫入）' : '已同步'}：員工欄位 ${r.dryRun ? changes.length : (r.employeeApplied || 0)} 項、薪資 ${r.dryRun ? sal.length : (r.salaryApplied || 0)} 筆、需注意 ${flags.length} 項。</p>
+        ${r.salaryError ? `<p class="import-warning">${esc(r.salaryError)}</p>` : ''}
+        <h3>員工欄位</h3><div class="import-table-wrap"><table class="hr-table"><thead><tr><th>員工</th><th>欄位</th><th>變更</th></tr></thead><tbody>${chRows}</tbody></table></div>
+        <h3>每月實發金額</h3><div class="import-table-wrap"><table class="hr-table salary-table"><thead><tr><th>月份</th><th>員工</th><th>實發金額</th></tr></thead><tbody>${salRows}</tbody></table></div>
+        <h3>需注意（不會自動改）</h3><div class="import-table-wrap"><table class="hr-table"><thead><tr><th>員工</th><th>狀況</th><th>內容</th></tr></thead><tbody>${flagRows}</tbody></table></div>`;
+    };
+    const paint = (result) => {
+      if (!st.configured) {
+        shell(`<pre class="setup-help">${esc(st.instructions || '尚未設定 Google 服務帳戶。')}</pre><div class="hr-toolbar" style="margin-top:12px"><button class="hr-btn ghost" type="button" data-cancel>關閉</button></div>`);
+        return;
+      }
+      const logs = (st.logs || []).map((l) => `<tr><td>${esc(fmtTaipei(l.startedAt))}</td><td>${esc(SYNC_TRIGGER[l.trigger] || l.trigger)}</td><td>${l.ok ? '<span class="pill ok">成功</span>' : '<span class="pill warn">失敗</span>'}</td><td>${l.ok ? `員工 ${l.counts.employeeApplied}、薪資 ${l.counts.salaryApplied}、需注意 ${l.counts.flags}` : esc(l.error || '')}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">還沒有同步紀錄。</td></tr>';
+      shell(`<p class="muted">單向同步：打卡算薪水試算表 → 百麒大腦。「員工資料」的實際最後在職日、職稱以試算表為準；到職日只補空白；「薪資計算明細」的實領薪資寫進每月實發金額（已匯的月份不會被改）。不會寫回試算表。${st.intervalMinutes ? '每 ' + esc(st.intervalMinutes) + ' 分鐘自動同步一次。' : '自動同步已關閉。'}</p>
+        <p>上次成功：${esc(fmtTaipei(st.lastSuccess && st.lastSuccess.finishedAt))}</p>
+        <div class="hr-toolbar"><button class="hr-btn" type="button" data-run>立即同步</button><button class="hr-btn ghost" type="button" data-preview>預覽（不寫入）</button><button class="hr-btn ghost" type="button" data-cancel>關閉</button></div>
+        <div data-result>${result ? paintResult(result) : ''}</div>
+        <h3>同步紀錄</h3><div class="import-table-wrap"><table class="hr-table"><thead><tr><th>時間</th><th>方式</th><th>結果</th><th>內容</th></tr></thead><tbody>${logs}</tbody></table></div>`);
+      const go = async (dryRun) => {
+        $('[data-result]', host).innerHTML = '<p class="muted">同步中…</p>';
+        try {
+          const r = await write('/api/hr/sheet-sync/run', 'POST', {dryRun});
+          st = await write('/api/hr/sheet-sync', 'GET');
+          paint(r);
+          if (!dryRun) { await refresh(); toast('試算表同步完成'); }
+        } catch (e) { $('[data-result]', host).innerHTML = `<pre class="setup-help">${esc(e.message || '同步失敗')}</pre>`; }
+      };
+      $('[data-run]', host).onclick = () => go(false);
+      $('[data-preview]', host).onclick = () => go(true);
+    };
+    paint(null);
   }
   async function openSalaryImport(root) {
     if (!$('#hr-dialogs', root)) root.insertAdjacentHTML('beforeend', '<div id="hr-dialogs"></div>');
