@@ -60,7 +60,9 @@ test('helpers: literal text, column letters, header mapping with 部門/計薪�
     {id: 'F154', name: '新人', department: '摺疊', payType: '', job: '', remittance: '現金'});
   assert.deepEqual(row.slice(0, 7), ['F154', '新人', '摺疊', '', '', '現金', '']);
   const d = desiredValues({id: 'W133', name: 'x', department: '洗滓', employmentType: '兼職', arrivalDate: '2026-11-21'}, {hasBank: false});
-  assert.equal(d.department, '兼職', 'part-timers use the 兼職／兼職 profile'); assert.equal(d.job, '兼職'); assert.equal(d.payType, '兼職');
+  assert.equal(d.department, '洗滌', 'part-timers keep the real 部門'); assert.equal(d.job, '洗滌人員', 'sheet convention: the department default 職稱'); assert.equal(d.payType, '兼職');
+  assert.equal(desiredValues({department: '摺疊', payType: '兼職', job: '兼職'}).job, '現場作業員');
+  assert.equal(desiredValues({department: '撐開', payType: '兼職', job: '作業員'}).job, '作業員');
   assert.equal(desiredValues({department: '洗滓', payType: '正職'}).department, '洗滌');
   assert.equal(desiredValues({department: '行政', payType: '正職'}).department, '辦公室');
   assert.deepEqual(defaultsFor(DEFAULTS, '兼職', '兼職'), {'薪資底薪 / 時薪額': '196', '加班前2小時費率': '1.34', '加班後2小時費率': '1.67', '每日扣除休息': '0.5'});
@@ -108,8 +110,8 @@ test('convert writes both rows immediately with blanks; later data fills only bl
   // second writeNew is a no-op
   await writer.writeNew(id, 't');
   assert.equal(sheet.calls.filter((c) => c.op === 'append').length, 2);
-  // Later companybrain fills 職稱 and 到職日; a person typed a different 計薪型態 in 薪資設定 → kept.
-  sheet.tabs[PAY_TAB].at(-1)[3] = '兼職';
+  // Later companybrain fills 職稱 and 到職日; a person typed a different 計薪型態 in 員工資料 → kept.
+  sheet.tabs[EMP_TAB].at(-1)[4] = '兼職';
   await hr.upsertEmployee(id, {job: '現場作業員', arrivalDate: '2026-11-24', payType: '正職'}, 't');
   // 到職日 + 職稱×2 + 9 pay cells from 部門預設值 摺疊／現場作業員 (預借薪資 has no default; 本月應上班天數 is blank).
   sheet.tabs[PAY_TAB].at(-1)[13] = '1500'; // a person already typed 伙食津貼 → kept
@@ -126,7 +128,7 @@ test('convert writes both rows immediately with blanks; later data fills only bl
   assert.equal(sheet.tabs[EMP_TAB].at(-1)[5], '2026/11/24');
   assert.equal(sheet.tabs[EMP_TAB].at(-1)[12], '現場作業員');
   assert.equal(sheet.tabs[PAY_TAB].at(-1)[4], '現場作業員');
-  assert.equal(sheet.tabs[PAY_TAB].at(-1)[3], '兼職', 'non-blank edited cell never overwritten');
+  assert.equal(sheet.tabs[EMP_TAB].at(-1)[4], '兼職', 'non-blank edited cell never overwritten');
   // Passbook confirmed → 匯款類型 現金 → 匯款 via the bank hook.
   await hr.upsertEmployeePii(id, {bankCode: '812', bankBranch: 'x', accountName: '新人甲', accountLast4: '1234', accountEnc: 'v1:fake'}, 'bank');
   await new Promise((r) => setTimeout(r, 50));
@@ -200,20 +202,27 @@ test('planFill refuses ambiguous rows', () => {
   assert.match(p.error, /2 列/);
 });
 
-test('兼職 convert: 編號 from the work area, sheet gets 部門 兼職／職稱 兼職 and the 時薪 profile from 部門預設值', async () => {
+test('兼職 convert: real 部門＋usual 職稱 like existing part-timers, pay from 部門預設值 兼職／兼職', async () => {
   const {hr, sheet, writer} = await setup(baseSheet());
   await hr.upsertCandidate('C-6', {name: '兼職丁', department: '撐開', job: '打雜', status: '待報到'}, 't', {create: true});
   const conv = await hr.convert('C-6', {department: '撐開', payType: '兼職', employmentType: '兼職'}, 't', {extraIds: await writer.idsForNumbering()});
   assert.ok(conv.employee.id.startsWith('H'));
-  assert.equal(conv.employee.job, '兼職');
+  assert.equal(conv.employee.job, '現場作業員');
   assert.equal(conv.employee.department, '撐開');
   const r = await writer.writeNew(conv.employee.id, 't');
   assert.equal(r.status, 'written'); assert.equal(r.error, '');
   const emp = sheet.tabs[EMP_TAB].at(-1), pay = sheet.tabs[PAY_TAB].at(-1);
-  assert.deepEqual([emp[3], emp[4], emp[12]], ['兼職', '兼職', '兼職']);
-  assert.deepEqual(pay.slice(2, 12), ['兼職', '兼職', '兼職', '現金', '196', '1.34', '1.67', '', '', '0.5']);
+  assert.deepEqual([emp[3], emp[4], emp[12]], ['撐開', '兼職', '現場作業員']);
+  assert.deepEqual(pay.slice(2, 16), ['撐開', '兼職', '現場作業員', '現金', '196', '1.34', '1.67', '', '', '0.5', '', '', '', ''], 'no 勞健保/津貼/激勵 from the 正職 profile');
   const append = sheet.calls.find((c) => c.op === 'append' && c.tab === PAY_TAB);
   assert.equal(append.row[6], '196', 'pay numbers are not quoted as text');
+  // A part-timer converted without a 職稱 and later filled still gets the 兼職 rate, not the department's 正職 pay.
+  await hr.upsertCandidate('C-9', {name: '兼職庚', department: '洗滌', status: '待報到'}, 't', {create: true});
+  const c9 = await hr.convert('C-9', {department: '洗滌', payType: '兼職', job: ''}, 't', {extraIds: await writer.idsForNumbering()});
+  assert.equal(c9.employee.id[0], 'W');
+  assert.equal(c9.employee.job, '洗滌人員');
+  await writer.writeNew(c9.employee.id, 't');
+  assert.deepEqual(sheet.tabs[PAY_TAB].at(-1).slice(2, 7), ['洗滌', '兼職', '洗滌人員', '現金', '196']);
 });
 
 test('no 部門預設值 match → identity only + note; convert rejects 部門＋職稱 pairs not in 部門預設值', async () => {

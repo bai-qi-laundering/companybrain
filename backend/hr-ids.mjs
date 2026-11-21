@@ -50,17 +50,21 @@ export function jobsForDepartment(department, extra = []) {
 }
 
 /**
- * 部門預設值 also has 兼職／兼職 (時薪, not split by department). On 轉員工 a part-timer keeps the work area as
- * 部門 in companybrain (it decides the 編號 letter) but is written to the sheet as 部門 兼職、職稱 兼職.
+ * 部門預設值 also has 兼職／兼職 (時薪, not split by department): every part-timer's pay comes from that row.
+ * Part-timers are still written with their real 部門 and, like existing sheet rows, the department's first
+ * 職稱 (摺疊/撐開 現場作業員, 洗滌 洗滌人員, 辦公室 行政) unless another 部門預設值 title is chosen.
  */
 export const PART_TIME_PROFILE = ['兼職', '兼職'];
+export function partTimeJobFor(department) {
+  const d = normalizeDepartment(department) === '行政' ? '辦公室' : normalizeDepartment(department);
+  return (DEPARTMENT_JOBS[d] || [])[0] || '';
+}
 
 /**
  * 轉員工 must use a 部門＋職稱 pair from 部門預設值 so reselecting in the sheet applies the same pay.
  * Blank 職稱 is allowed (written blank, filled later). Returns an error message or ''.
  */
-export function convertProfileError({department, job, payType}) {
-  if (payType === '兼職') return '';
+export function convertProfileError({department, job}) {
   const d = normalizeDepartment(department) === '行政' ? '辦公室' : normalizeDepartment(department);
   const j = String(job || '').trim();
   if (d && !STANDARD_DEPARTMENTS.includes(d)) return '部門必須是試算表「部門預設值」的部門：' + STANDARD_DEPARTMENTS.join('、');

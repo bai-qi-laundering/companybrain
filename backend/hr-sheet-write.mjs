@@ -10,6 +10,7 @@
 import {baiqiSalaryId, baiqiSalaryColumnKey, importStatus} from './hr-salary-import.mjs';
 import {fetchSheetTabs, appendSheetRow, updateSheetCell} from './google-sa.mjs';
 import {normName} from './hr-sheet-sync.mjs';
+import {partTimeJobFor, PART_TIME_PROFILE} from './hr-ids.mjs';
 
 export const EMP_TAB = '員工資料';
 export const PAY_TAB = '薪資設定';
@@ -62,16 +63,18 @@ export function cellDate(v) {
 /** Values companybrain wants in the sheet for this employee (sheet wording). */
 export function desiredValues(emp, {hasBank = false} = {}) {
   const payType = ['正職', '兼職'].includes(emp.payType) ? emp.payType : (['兼職', '時薪'].includes(emp.employmentType) ? '兼職' : (emp.employmentType === '正職' ? '正職' : ''));
-  const dept = String(emp.department || '').trim();
-  const partTime = payType === '兼職';
+  const raw = String(emp.department || '').trim();
+  const dept = raw === '洗滓' ? '洗滌' : raw === '行政' ? '辦公室' : raw;
+  const job = String(emp.job || '').trim();
   return {
     id: String(emp.id || '').trim(),
     name: String(emp.name || '').trim(),
-    // 部門預設值 profile names: part-timers are 兼職/兼職; 洗滓 typo → 洗滌; 行政 → 辦公室.
-    department: partTime ? '兼職' : (dept === '洗滓' ? '洗滌' : dept === '行政' ? '辦公室' : dept),
+    // Real 部門 for everyone (洗滓 typo → 洗滌; 行政 → 辦公室). Part-timers keep the sheet's convention of the
+    // department's default 職稱 (摺疊/撐開 現場作業員, 洗滌 洗滌人員, 辦公室 行政); their pay uses 部門預設值 兼職／兼職.
+    department: dept,
     payType,
     arrivalDate: cellDate(emp.arrivalDate),
-    job: partTime ? '兼職' : String(emp.job || '').trim(),
+    job: payType === '兼職' && (!job || job === '兼職') ? partTimeJobFor(dept) : job,
     remittance: hasBank ? '匯款' : '現金',
   };
 }
@@ -97,6 +100,11 @@ export function defaultsFor(values, department, job) {
   const out = {};
   head.forEach((h, i) => { if (i === di || i === ji || !h) return; const v = String(hit[i] ?? '').trim(); if (v) out[h] = v; });
   return out;
+}
+
+/** Which 部門預設值 row prices this person: 兼職／兼職 for every part-timer (時薪, not split by 部門). */
+export function payProfileFor({department, job, payType}) {
+  return payType === '兼職' ? PART_TIME_PROFILE : [department, job];
 }
 
 /** Map pay-default headers to 薪資設定 column indexes (header text compared like the payroll importer). */
@@ -173,7 +181,7 @@ export function planFill({tab, values, owned, desired, defaultsValues}) {
   if (tab === PAY_TAB && defaultsValues) {
     // Use what the row will say after this fill; a person's 部門/職稱 edit wins.
     const eff = (field) => { const w = writes.find((x) => x.field === field); return w ? w.value : String(r[idx[field]] ?? '').trim(); };
-    const dept = eff('department'), job = eff('job');
+    const [dept, job] = payProfileFor({department: eff('department'), job: eff('job'), payType: eff('payType')});
     const defs = defaultsFor(defaultsValues, dept, job);
     if (!defs) payNote = dept && job ? '部門預設值沒有「' + dept + '／' + job + '」，薪資欄未自動帶入' : '部門或職稱未填，薪資欄未自動帶入';
     else {
@@ -329,14 +337,15 @@ export function createSheetWriter({hr, fetchImpl, loadTabs, append, update, stat
             : {id: want.id, name: want.name, department: want.department, payType: want.payType, job: want.job, remittance: want.remittance});
           let payWritten = null;
           if (tab === PAY_TAB) {
-            const defs = defaultsFor(tabs[DEFAULTS_TAB], want.department, want.job);
+            const [pd, pj] = payProfileFor(want);
+            const defs = defaultsFor(tabs[DEFAULTS_TAB], pd, pj);
             if (defs) {
               payWritten = {};
               for (const {header, i, value} of payColumns(values[0], defs)) {
                 while (line.length <= i) line.push('');
                 if (line[i] === '') { line[i] = toCell('pay:' + header, value); payWritten[header] = value; }
               }
-            } else payNote = want.department && want.job ? '部門預設值沒有「' + want.department + '／' + want.job + '」，薪資欄未自動帶入' : '部門或職稱未填，薪資欄未自動帶入';
+            } else payNote = pd && pj ? '部門預設值沒有「' + pd + '／' + pj + '」，薪資欄未自動帶入' : '部門或職稱未填，薪資欄未自動帶入';
           }
           const range = await doAppend({spreadsheetId: sid, tab, row: line});
           const rowNo = Number(String(range).match(/![A-Z]+(\d+)/)?.[1] || 0) || null;

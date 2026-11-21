@@ -4,7 +4,7 @@ import {encryptSecret, decryptSecret, hasPiiKey, last4} from './hr-crypto.mjs';
 import {maskTaiwanId, isValidTaiwanId, normalizeTaiwanId} from './hr-twid.mjs';
 import {DEFAULT_SALARY_IMPORT} from './hr-salary-import.mjs';
 import {yearsForEmployee, decorateYear, defaultSettlement, SETTLEMENTS, DEFAULT_BASIS, endingSoon} from './hr-leave.mjs';
-import {DEFAULT_DEPT_PREFIXES, nextPrefixedId, prefixForDepartment, isUsableEmployeeId, PAY_TYPES, PAYMENT_METHODS, jobTitleOptions, STANDARD_JOBS, STANDARD_DEPARTMENTS, DEPARTMENT_JOBS, convertProfileError} from './hr-ids.mjs';
+import {DEFAULT_DEPT_PREFIXES, nextPrefixedId, prefixForDepartment, isUsableEmployeeId, PAY_TYPES, PAYMENT_METHODS, jobTitleOptions, STANDARD_JOBS, STANDARD_DEPARTMENTS, DEPARTMENT_JOBS, convertProfileError, partTimeJobFor} from './hr-ids.mjs';
 import {KEEP_RECRUITMENT_STATUS, isKeptRecruitmentStatus} from './hr-purge.mjs';
 
 export const DOC_TYPES = {identity: '身分證', bank: '存摺', license: '駕照', resume: '履歷表'};
@@ -636,8 +636,9 @@ export class HrStore {
     const convPayType = body.payType || (body.employmentType === '兼職' || body.employmentType === '時薪' ? '兼職' : '正職');
     const convDept = body.department || cand.department;
     // An applicant's free-text 職稱 is only carried over when it is a 部門預設值 title; otherwise left blank.
-    const convJob = convPayType === '兼職' ? '兼職'
-      : (body.job !== undefined ? String(body.job || '').trim() : (convertProfileError({department: convDept, job: cand.job, payType: convPayType}) ? '' : String(cand.job || '').trim()));
+    let convJob = body.job !== undefined ? String(body.job || '').trim() : (convertProfileError({department: convDept, job: cand.job}) ? '' : String(cand.job || '').trim());
+    // Part-timers: real 部門, the department's usual 職稱 (sheet convention); pay comes from 部門預設值 兼職／兼職.
+    if (convPayType === '兼職' && (!convJob || convJob === '兼職')) convJob = partTimeJobFor(convDept);
     {
       const err = convertProfileError({department: convDept, job: convJob, payType: convPayType});
       if (err) throw new AppError(400, err);

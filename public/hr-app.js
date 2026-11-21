@@ -1664,15 +1664,14 @@
     const startJob = (DEPARTMENT_JOBS[startDept] || []).includes(String(c.job || '').trim()) ? String(c.job).trim() : '';
     const jobOpts = (d, v) => ['<option value="">（未定，之後補）</option>', ...(DEPARTMENT_JOBS[d] || []).map((j) => `<option ${j === v ? 'selected' : ''}>${esc(j)}</option>`)].join('');
     dlg(root, '報到並轉為員工',
-      `<p class="muted">員工編號依打卡計薪規則自動給「部門字首＋流水號」（物流 D、摺疊 F、撐開 H、洗滌 W、辦公室 O），會避開試算表上已用過的編號。預覽：<strong data-id-preview>${esc(preview || '請選擇字首')}</strong>（以送出時為準）。轉為員工後會立刻在打卡算薪水試算表「員工資料」與「薪資設定」各新增一列；部門＋職稱只能選試算表「部門預設值」裡的組合，薪資欄（底薪／時薪、加班費率、勞健保、津貼…）會照「部門預設值」當下的數字帶入空白欄。兼職一律寫成 部門 兼職、職稱 兼職。沒填的欄位留空，之後補上會自動帶入空白欄；匯款類型先填現金，存簿確認後改匯款。</p>`
+      `<p class="muted">員工編號依打卡計薪規則自動給「部門字首＋流水號」（物流 D、摺疊 F、撐開 H、洗滌 W、辦公室 O），會避開試算表上已用過的編號。預覽：<strong data-id-preview>${esc(preview || '請選擇字首')}</strong>（以送出時為準）。轉為員工後會立刻在打卡算薪水試算表「員工資料」與「薪資設定」各新增一列；部門＋職稱只能選試算表「部門預設值」裡的組合，薪資欄（底薪／時薪、加班費率、勞健保、津貼…）會照「部門預設值」當下的數字帶入空白欄。兼職照實寫部門（例如 摺疊）與職稱（同既有兼職，例如 現場作業員），計薪型態 兼職，薪資欄帶「部門預設值」的 兼職／兼職（時薪）。沒填的欄位留空，之後補上會自動帶入空白欄；匯款類型先填現金，存簿確認後改匯款。</p>`
       + `<div class="field"><span>部門（工作區域）</span><select name="department">${['', ...STANDARD_DEPARTMENTS].map((d) => `<option value="${esc(d)}" ${d === startDept ? 'selected' : ''}>${esc(d || '（請選擇）')}</option>`).join('')}</select></div>`
       + `<div class="field"><span>編號字首</span><select name="prefix">${choices.map((p) => `<option>${p}</option>`).join('')}</select></div>`
       + sel('payType', '計薪型態', PAY_TYPES, '正職')
-      + `<div class="field"><span>職稱</span><select name="job" data-conv-job>${jobOpts(startDept, startJob)}</select><small class="muted" data-conv-pt hidden>兼職：試算表寫 部門 兼職、職稱 兼職（時薪依部門預設值）</small></div>`
+      + `<div class="field"><span>職稱</span><select name="job" data-conv-job>${jobOpts(startDept, startJob)}</select><small class="muted" data-conv-pt hidden>兼職：照實寫部門與職稱，薪資欄帶「部門預設值」的 兼職／兼職（時薪）</small></div>`
       + sel('employmentType', '雇用型態', TYPES, '正職') + sel('paymentMethod', '匯款類型', PAY_METHODS, '現金') + field('lineId', 'LINE ID', '') + field('arrivalDate', '到職日', c.availableDate || today(), 'date') + field('phone', '電話', c.phone),
       async (f) => {
         const body = Object.fromEntries(['department', 'job', 'employmentType', 'payType', 'paymentMethod', 'lineId', 'arrivalDate', 'phone', 'prefix'].map((k) => [k, f.elements[k].value]));
-        if (body.payType === '兼職') body.job = '兼職';
         if (!body.department) throw new Error('請選擇部門（工作區域），用來決定員工編號字首');
         const r = await write('/api/hr/candidates/' + id + '/convert', 'POST', body);
         const sr = r.sheetRow;
@@ -1688,8 +1687,7 @@
       const syncConv = () => {
         const d = cf.elements.department.value, pt = cf.elements.payType.value === '兼職';
         const cur = cf.elements.job.value;
-        cf.elements.job.innerHTML = pt ? '<option>兼職</option>' : jobOpts(d, cur);
-        cf.elements.job.disabled = pt;
+        cf.elements.job.innerHTML = jobOpts(d, cur || (pt ? (DEPARTMENT_JOBS[d] || [])[0] : ''));
         cf.querySelector('[data-conv-pt]').hidden = !pt;
         if (pt) cf.elements.employmentType.value = '兼職';
         const pc = prefixChoicesFor(d);
