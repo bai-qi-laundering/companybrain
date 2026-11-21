@@ -497,29 +497,48 @@ export function validateManualEntry(b) {
  * 依使用者原本的「年度損益表」格式：21 個支出科目 × 12 個月，含總支出、收入、淨利（預設含稅）。
  * 收入 = 百麒系統後台已寄出對帳單（revenue）＋ 手動「其他收入」（對帳單以外）。銷項發票不計，避免重複。
  * 薪資 = 人資 hr_salaries 當月實發合計 ＋ 手動「薪資」調整（例如預支、年終）。文件不會產生薪資項目。
+ * 有匯入原 Excel（source='excel-import'）的月份：整個月只用 Excel 的數字，系統資料不計入（避免重複），並註記。
  */
 export function buildPnl({year, entries, payroll = {}, revenue = {}, basis = 'total'}) {
   const months = Array.from({length: 12}, (_, i) => `${year}-${String(i + 1).padStart(2, '0')}`);
   const amount = (e) => Number(basis === 'net' ? (e.net ?? (e.total - (e.tax || 0))) : e.total) || 0;
   const cell = () => Object.fromEntries(months.map((m) => [m, 0]));
   const rows = Object.fromEntries(ALL_CATEGORIES.map((c) => [c, cell()]));
+  const excelMonths = new Set(entries.filter((e) => e.source === 'excel-import').map((e) => e.month));
+  const excelRevenue = cell(), ignored = cell();
   for (const e of entries) {
-    if (!rows[e.category] || !(e.month in rows[e.category])) continue;
+    if (!(e.month in excelRevenue)) continue;
+    if (e.source === 'excel-import') {
+      if (e.category === '收入') excelRevenue[e.month] += Number(e.total) || 0;
+      else if (rows[e.category]) rows[e.category][e.month] += Number(e.total) || 0; // Excel 只有含稅數字
+      continue;
+    }
+    if (excelMonths.has(e.month)) { ignored[e.month] += 1; continue; }
+    if (!rows[e.category]) continue;
     if (e.category === '薪資' && e.source !== 'manual') continue;
     rows[e.category][e.month] += amount(e);
   }
   const notes = {};
   for (const m of months) {
     const pay = payroll[m];
+    if (excelMonths.has(m)) continue;
     if (pay?.total) {
       rows['薪資'][m] += pay.total;
       notes[`薪資|${m}`] = `人資實發 ${pay.people} 人` + (pay.expected ? `／當月在職約 ${pay.expected} 人` : '') + (pay.expected && pay.people < pay.expected ? '（可能不完整）' : '');
     }
   }
   const round = (v) => Math.round(v * 100) / 100;
-  const revenueRow = Object.fromEntries(months.map((m) => [m, round(basis === 'net' ? (revenue[m]?.net || 0) : (revenue[m]?.total || 0))]));
+  const revenueRow = Object.fromEntries(months.map((m) => [m, excelMonths.has(m) ? round(excelRevenue[m]) : round(basis === 'net' ? (revenue[m]?.net || 0) : (revenue[m]?.total || 0))]));
   for (const m of months) {
     const r = revenue[m];
+    if (excelMonths.has(m)) {
+      const bits = ['這個月依原 Excel 損益表（含稅）'];
+      if (r?.total) bits.push(`系統對帳單 ${Number(r.total).toLocaleString()} 元未採用`);
+      if (payroll[m]?.total) bits.push(`人資薪資 ${Number(payroll[m].total).toLocaleString()} 元未採用`);
+      if (ignored[m]) bits.push(`系統另有 ${ignored[m]} 筆文件／手動項目未計入`);
+      notes[`收入|${m}`] = bits.join('，');
+      continue;
+    }
     if (!r) continue;
     const bits = [`對帳單 ${r.cases.length} 家`];
     if (r.unsent?.length) bits.push(`${r.unsent.length} 家還沒寄出未計入`);
@@ -538,7 +557,7 @@ export function buildPnl({year, entries, payroll = {}, revenue = {}, basis = 'to
       share: Object.fromEntries(months.map((m) => [m, income[m] ? round(rows[c][m] / income[m] * 10000) / 10000 : null]))})),
     expenseTotal, expenseYear: sum(expenseTotal),
     revenue: revenueRow, revenueYear: sum(revenueRow), otherIncome, otherIncomeYear: sum(otherIncome),
-    income, incomeYear: sum(income), profit, profitYear: sum(profit), notes,
+    income, incomeYear: sum(income), profit, profitYear: sum(profit), notes, excelMonths: [...excelMonths].sort(),
     revenueStatus: Object.fromEntries(months.filter((m) => revenue[m]).map((m) => [m, {fetchedAt: revenue[m].fetchedAt, error: revenue[m].error, cases: revenue[m].cases.length}])),
   };
 }

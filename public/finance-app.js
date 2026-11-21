@@ -199,12 +199,21 @@
   }
 
   function revenueLine(p) {
+    const xl = (p.excelMonths || []).length ? `${p.excelMonths.map((m) => Number(m.slice(5))).join('、')} 月依原 Excel；` : '';
     const st = Object.entries(p.revenueStatus || {});
-    if (!st.length) return '營收還沒讀取過，請按「更新營收」';
+    if (!st.length) return xl + '營收還沒讀取過，請按「更新營收」';
     const errs = st.filter(([, v]) => v.error);
     const last = st.map(([, v]) => v.fetchedAt).filter(Boolean).sort().pop();
-    return (last ? '營收更新於 ' + new Date(last).toLocaleString('zh-TW', {timeZone: 'Asia/Taipei', hour12: false}) : '') + (errs.length ? `；${errs.length} 個月更新失敗：${errs[0][1].error}` : '');
+    return xl + (last ? '營收更新於 ' + new Date(last).toLocaleString('zh-TW', {timeZone: 'Asia/Taipei', hour12: false}) : '') + (errs.length ? `；${errs.length} 個月更新失敗：${errs[0][1].error}` : '');
   }
+
+  function xlTable(r) {
+    return `<p class="fin-muted">${esc(r.path)}（${esc(r.year)} 年）${r.dryRun ? '預覽' : '已匯入'}：${r.importMonths.length} 個月、${r.totals.entries} 筆；收入 ${money(r.totals.revenue)}、支出 ${money(r.totals.expense)}（薪資 ${money(r.totals.salary)}）</p>
+      <div class="fin-scroll"><table class="fin-table"><thead><tr><th>月份</th><th>收入</th><th>總支出</th><th>薪資</th><th>淨利</th><th>結果</th></tr></thead><tbody>
+      ${r.months.map((m) => `<tr><td>${esc(m.month)}</td><td>${money(m.revenue || 0)}</td><td>${money(m.expenseTotal || 0)}</td><td>${money(m.salary || 0)}</td><td>${money(m.profit || 0)}</td><td style="text-align:left">${m.status === 'import' ? '匯入' : '略過：' + esc(m.reason)}${m.diffs?.length ? `<br><span class="fin-muted">明細與彙總不同（用彙總）：${esc(m.diffs.map((d) => d.category).join('、'))}</span>` : ''}</td></tr>`).join('')}
+      </tbody></table></div>${(r.warnings || []).map((w) => `<p class="fin-muted">注意：${esc(w)}</p>`).join('')}`;
+  }
+  let xlPath = '115年支出明細/月份_自動損益表.xlsx', xlUntil = '', xlPreview = null;
 
   async function paintSettings(root, body) {
     const st = await api('/api/finance/settings');
@@ -217,8 +226,24 @@
       </tbody></table></div><div class="fin-row"><button type="button" class="fin-btn" id="fin-co-add">新增公司</button><button class="fin-btn pri">儲存</button></div></form>
       <h2 style="font-size:17px;margin:20px 0 6px">營收來源</h2>
       <p class="fin-muted">唯讀讀取百麒系統後台 Firestore（專案 ${esc(st.revenueSource.project)}）的 statement_cases，只取已寄出的版本；不會寄送、改動或開票。<br>
-      服務帳戶：${esc(st.revenueSource.serviceAccount || '尚未設定')}；需要的權限：${esc(st.revenueSource.role)}。</p>`;
+      服務帳戶：${esc(st.revenueSource.serviceAccount || '尚未設定')}；需要的權限：${esc(st.revenueSource.role)}。</p>
+      <h2 style="font-size:17px;margin:20px 0 6px">匯入原本的損益表 Excel</h2>
+      <p class="fin-muted">只讀取 NAS 上的原檔，不會修改。只匯入已結帳（收入不是 0）的過去月份；匯入的月份以 Excel 為準，系統的對帳單、薪資、文件不再重複計入。可以重複匯入，會覆蓋上次匯入的同月份。</p>
+      <form id="fin-xl" class="fin-row"><input name="path" value="${esc(xlPath)}" style="width:340px" placeholder="NAS 路徑"><input name="until" value="${esc(xlUntil)}" placeholder="最後月份（選填，YYYY-MM）" style="width:190px">
+        <button class="fin-btn" data-mode="preview">預覽</button><button type="button" class="fin-btn pri" id="fin-xl-go" ${xlPreview?.importMonths?.length ? '' : 'disabled'}>確認匯入</button></form>
+      <div id="fin-xl-out">${xlPreview ? xlTable(xlPreview) : ''}</div>`;
       $$('#fin-co input', body).forEach((inp) => inp.oninput = () => { rows[Number(inp.dataset.i)][inp.dataset.k] = inp.value; });
+      const xlForm = $('#fin-xl', body);
+      const xlRun = async (dryRun) => {
+        xlPath = xlForm.path.value.trim(); xlUntil = xlForm.until.value.trim();
+        try {
+          const r = await api('/api/finance/import-excel', 'POST', {path: xlPath, until: xlUntil || undefined, dryRun});
+          xlPreview = r; if (!dryRun) ctx.notify?.(`已匯入 ${r.importMonths.length} 個月（${r.inserted} 筆）`);
+        } catch (err) { ctx.notify?.(err.message); }
+        draw();
+      };
+      xlForm.onsubmit = (e) => { e.preventDefault(); xlRun(true); };
+      $('#fin-xl-go', body).onclick = () => { if (confirm(`匯入 ${xlPreview.importMonths.join('、')}？這些月份會以 Excel 為準。`)) xlRun(false); };
       $('#fin-co-add', body).onclick = () => { rows.push({name: '', taxId: '', aliases: ''}); draw(); };
       $$('[data-rm]', body).forEach((btn) => btn.onclick = () => { rows.splice(Number(btn.dataset.rm), 1); draw(); });
       $('#fin-co', body).onsubmit = async (e) => {
@@ -255,8 +280,8 @@
         <input name="description" placeholder="摘要" style="width:180px"><input name="total" type="number" step="0.01" placeholder="含稅金額" required style="width:120px">
         <button class="fin-btn pri">新增</button></form>
       <div class="fin-scroll"><table class="fin-table fin-left"><thead><tr><th>月份</th><th>科目</th><th>對象</th><th>摘要</th><th>含稅</th><th>來源</th><th></th></tr></thead><tbody>
-      ${entries.map((e) => `<tr><td>${esc(e.month)}</td><td>${esc(e.category)}</td><td>${esc(e.counterparty || '')}</td><td>${esc(e.description || '')}</td><td style="text-align:right">${money(e.total)}</td><td>${e.source === 'manual' ? '手動' : esc(e.docType || '文件')}</td>
-        <td>${e.source === 'manual' ? `<button class="fin-btn warn" data-del="${e.id}">刪除</button>` : `<a class="fin-btn" href="/api/finance/documents/${e.docId}/file" target="_blank" rel="noopener">原檔</a>`}</td></tr>`).join('') || `<tr><td colspan="7">${esc(entryMonth)} 沒有項目。</td></tr>`}
+      ${entries.map((e) => `<tr><td>${esc(e.month)}</td><td>${esc(e.category)}</td><td>${esc(e.counterparty || '')}</td><td>${esc(e.description || '')}</td><td style="text-align:right">${money(e.total)}</td><td>${e.source === 'manual' ? '手動' : e.source === 'excel-import' ? '原 Excel' : esc(e.docType || '文件')}</td>
+        <td>${e.source === 'excel-import' ? '' : e.source === 'manual' ? `<button class="fin-btn warn" data-del="${e.id}">刪除</button>` : `<a class="fin-btn" href="/api/finance/documents/${e.docId}/file" target="_blank" rel="noopener">原檔</a>`}</td></tr>`).join('') || `<tr><td colspan="7">${esc(entryMonth)} 沒有項目。</td></tr>`}
       </tbody></table></div>`;
     $('#fin-rev', body).onclick = async (ev) => {
       ev.target.disabled = true; $('#fin-rev-msg', body).textContent = '讀取對帳單中…';

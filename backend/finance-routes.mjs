@@ -13,6 +13,7 @@ import {
 import {orgDirectoryKind} from './directory-docs.mjs';
 import {fetchStatementMonth, FIRESTORE_PROJECT} from './finance-revenue.mjs';
 import {serviceAccountStatus} from './google-sa.mjs';
+import {parsePnlWorkbook, planExcelImport, applyExcelImport, yearFromPath, fileSha256, DEFAULT_EXCEL_PATH} from './finance-import.mjs';
 
 const send = (req, res, status, body) => sendJson(res, status, body, req);
 
@@ -81,7 +82,7 @@ function editedFields(body, current, organizations, companies = []) {
   return f;
 }
 
-export async function handleFinance(req, res, {store, session, method, path: p, config, classify, fetchRevenue = fetchStatementMonth}) {
+export async function handleFinance(req, res, {store, session, method, path: p, config, classify, fetchRevenue = fetchStatementMonth, parseExcel = parsePnlWorkbook}) {
   const fin = store.finance || (store.finance = new FinanceStore(store.pool));
   if (!store.financeReady) { await fin.ensure(); store.financeReady = true; }
   const url = new URL(req.url, 'http://localhost');
@@ -210,6 +211,21 @@ export async function handleFinance(req, res, {store, session, method, path: p, 
   if (p === '/api/finance/settings' && method === 'PUT') {
     const body = await readJson(req);
     return send(req, res, 200, {companies: await fin.saveCompanies(body.companies, actor)}), true;
+  }
+  // 匯入原本的「月份_自動損益表.xlsx」：只讀 NAS 上的原檔；dryRun 只回預覽，不寫入。
+  if (p === '/api/finance/import-excel' && method === 'POST') {
+    const body = await readJson(req);
+    const rel = String(body.path || DEFAULT_EXCEL_PATH).trim().replace(/^\/+/, '');
+    if (!/\.xls[xm]$/i.test(rel)) throw new AppError(400, '只能匯入 .xlsx 損益表');
+    const abs = safeJoinRoot(financeRoot(), rel);
+    if (!abs) throw new AppError(400, '路徑不正確');
+    try { if (!(await stat(abs)).isFile()) throw new Error(); } catch { throw new AppError(404, '在 NAS 找不到這個檔案：' + rel); }
+    const year = String(body.year || yearFromPath(rel) || '');
+    const plan = planExcelImport(await parseExcel(abs), {year, until: body.until ? normalizeMonth(body.until) || String(body.until) : null});
+    const preview = {path: rel, year: plan.year, until: plan.until, months: plan.months, warnings: plan.warnings, importMonths: plan.importMonths, totals: plan.totals};
+    if (body.dryRun !== false) return send(req, res, 200, {dryRun: true, ...preview}), true;
+    const result = await applyExcelImport(fin.pool, plan, {file: rel, sha: await fileSha256(abs), actor});
+    return send(req, res, 200, {dryRun: false, ...preview, ...result}), true;
   }
   // 營收只在這裡（按「更新營收」）或每日排程讀 Firestore；看損益表只讀快取。
   if (p === '/api/finance/revenue/refresh' && method === 'POST') {

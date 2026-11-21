@@ -27,12 +27,22 @@
 ## 集團公司
 - 百麒國際、百富、日聖、百銘、百麒洗衣，在「財務 → 設定」維護統編與別名（存在 `fin_settings`，不用改 env）。每份文件會標示屬於哪家公司（進項看買方、銷項看賣方）；進項買方統編不是任何一家時會詢問。
 
+## 匯入原本的損益表 Excel（歷史月份）
+- 來源：NAS 上的 `百麒/115年支出明細/月份_自動損益表.xlsx`（路徑可改；只能是 NAS 根目錄內的 .xlsx）。**只讀**：openpyxl read_only＋只讀快取值，不寫入、不改原檔。
+- 讀「年度損益表」工作表每月每科目的數字（含稅，就是老闆在 Excel 看到的數字），寫成 `fin_entries`（`source='excel-import'`，一個月一個科目一筆，另加一筆「收入」）。各月工作表的明細只用來交叉檢查，有差異時以彙總為準並列在預覽裡。
+- 薪資：Excel 只有每月總額（沒有每人明細），所以匯入成「薪資」科目總額。每人明細仍以人資 `hr_salaries` 為準（只有系統上線後的月份）。
+- 只匯入「已結帳」的過去月份：Excel 該月收入 > 0、早於本月，並可指定「最後月份」（until）。還在記帳中（收入 0）或本月／未來月份會略過。
+- **優先順序（避免重複）**：有匯入的月份整個月以 Excel 為準，系統的對帳單營收、人資薪資、上傳文件、手動項目都不計入（損益表滑鼠移到收入的 * 會看到未採用的金額）。之後的月份才用系統資料。如果 Excel 的 11 月記完了也想用 Excel，重新匯入並把最後月份設成 2026-11。
+- 可重複執行：重新匯入時，同一個交易裡先刪掉那些月份舊的 `excel-import` 再寫入，不會重複；每次匯入的檔案 SHA-256、月份、合計記在 `fin_settings` 的 `excelImport:<年>`。
+- 未稅基準：Excel 只有含稅數字，匯入的月份在未稅模式下仍顯示含稅。
+- 預覽（dry-run）：「財務 → 設定 → 匯入原本的損益表 Excel → 預覽」，或在有檔案副本的電腦上執行 `node scripts/finance-excel-preview.mjs <檔案.xlsx> [--until 2026-10]`（只讀檔案，不連資料庫）。API：`POST /api/finance/import-excel {path, until, dryRun}`，dryRun 預設為 true。
+
 ## 資料表
 `fin_documents`（文件與辨識結果）、`fin_entries`（損益項目；文件產生或手動）、`fin_rules`（確認後學到的對象／統編／科目）、`fin_settings`（集團公司）、`fin_revenue_months`（對帳單營收快取）。
 
 ## 部署注意
 - NAS 自動部署器只複製 `FILES` 清單內的檔案，且不會更新自己。這個 PR 已把 finance 檔案加入清單，但 NAS 上那份 `scripts/nas-auto-deploy.py` 要手動更新一次；否則合併後自動部署會因 Dockerfile 找不到 finance 檔案而建置失敗並回滾（舊版照常運作）。
-- 新檔案 `finance-revenue.mjs`、修改的 `google-sa.mjs`、`hr-sheet-sync.mjs` 要手動複製一次（`hr-*` 不在自動部署清單）。
+- 新檔案 `finance-revenue.mjs`、`finance-import.mjs`、`finance-excel/pnl_import.py`、修改的 `google-sa.mjs`、`hr-sheet-sync.mjs` 要手動複製一次（`hr-*` 不在自動部署清單）。
 - `HR_SHEET_SYNC_MINUTES` 預設改為 10，NAS compose.yaml 需同步。
 - 新環境變數（選填）：`FINANCE_FIRESTORE_PROJECT`（預設 hotel-inventory-3a1ad）、`FINANCE_COMPANY_TAX_IDS`（逗號分隔，預設 96842769）、`FINANCE_AUTO_CONFIDENCE`。compose.yaml 已加，NAS 的 compose.yaml 需手動同步。
 - 需要 `NAS_DIRECTORY_ROOT` 已掛載（compose.directory-docs.yaml）。
