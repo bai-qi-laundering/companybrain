@@ -8,6 +8,8 @@ import {createSheetSync, syncIntervalMinutes} from './hr-sheet-sync.mjs';
 import {createSheetWriter} from './hr-sheet-write.mjs';
 import {FinanceStore} from './finance.mjs';
 import {startRevenueRefresh} from './finance-revenue.mjs';
+import {startInboxPurge} from './inbox.mjs';
+import {syncLinkedFolderKinds} from './directory-migrate.mjs';
 const env=process.env;
 if(!env.ADMIN_PASSWORD||env.ADMIN_PASSWORD.startsWith('CHANGE_ME')||env.ADMIN_PASSWORD.length<16)throw new Error('ADMIN_PASSWORD must be changed to at least 16 characters');
 if(!env.PGPASSWORD||env.PGPASSWORD.startsWith('CHANGE_ME')||env.PGPASSWORD.length<24)throw new Error('DB_PASSWORD must be changed to at least 24 characters');
@@ -19,7 +21,8 @@ hr.sheetSync=createSheetSync({hr});await hr.sheetSync.ensure();hr.sheetSync.star
 hr.sheetWriter=createSheetWriter({hr});await hr.sheetWriter.ensure();hr.onBankSaved=(id)=>hr.sheetWriter.fillOwned({employeeId:id,actor:'bank-saved'});hr.sheetWriter.start({intervalMinutes:syncIntervalMinutes()});
 const config={origin,secure,key:env.GEMINI_API_KEY||'',model:env.GEMINI_MODEL||'gemini-3.1-flash-lite',lineSecret:env.LINE_CHANNEL_SECRET||'',lineToken:env.LINE_CHANNEL_ACCESS_TOKEN||'',lineAllowedUsers:env.LINE_ALLOWED_USER_IDS||'',garmentAdminUserIds:env.GARMENT_ADMIN_LINE_USER_IDS||'',garmentNotifyToken:env.GARMENT_NOTIFY_TOKEN||'',cameraApiKey:env.CAMERA_API_KEY||'',cameraLinkKey:env.CAMERA_LINK_KEY||'',cameraAdminUserIds:env.CAMERA_ADMIN_LINE_USER_IDS||'',lineAccess:env.LINE_ACCESS_MODE||'friends',lineReminders:env.LINE_REMINDERS_ENABLED!=='false',linePushFallback:env.LINE_PUSH_FALLBACK!=='false',reminderHour:Number(env.LINE_REMINDER_HOUR||8)};
 if(!Number.isInteger(config.reminderHour)||config.reminderHour<0||config.reminderHour>23)throw new Error('LINE_REMINDER_HOUR must be 0..23');
-{const fin=new FinanceStore(store.pool);await fin.ensure();store.finance=fin;store.financeReady=true;startRevenueRefresh({fin});}
+{const fin=new FinanceStore(store.pool);await fin.ensure();store.finance=fin;store.financeReady=true;startRevenueRefresh({fin});startInboxPurge({pool:store.pool});}
+try{await syncLinkedFolderKinds(store,{log:console.log});}catch(err){console.error('Directory kind sync failed:',err.name);}
 const line=createLineService({store,config});await line.init();line.start();setInterval(()=>void line.db.purgeCameraPhotos().catch(err=>console.error('Camera photo cleanup failed:',err.name)),3600000).unref();
 const htmlPath=fileURLToPath(new URL('./public/index.html',import.meta.url));
 const publicDir=fileURLToPath(new URL('./public',import.meta.url));

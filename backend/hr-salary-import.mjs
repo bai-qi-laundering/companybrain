@@ -302,3 +302,28 @@ export async function importStatus() {
     instructions: configured ? '' : SETUP_INSTRUCTIONS,
   };
 }
+
+/**
+ * 寫入一個月份的實領薪資（HR「匯入本月薪資」與收件匣的薪資檔共用）。
+ * protectPaid：已匯款（remittance=已匯）的紀錄金額不同時不覆蓋，列入 protected。
+ */
+export async function applySalaryImport({hr, rows, month, actor, protectPaid = false}) {
+  const state = await hr.state();
+  const empIds = new Set(state.employees.map((e) => e.id));
+  const existing = state.salaries.filter((s) => s.month === month);
+  let saved = 0, skipped = 0;
+  const written = [], protectedRows = [];
+  for (const r of rows) {
+    const status = r.status || (empIds.has(r.employeeId) ? (existing.find((s) => s.employeeId === r.employeeId) ? 'changed' : 'new') : 'unmatched');
+    if (status === 'unmatched' || status === 'same' || status === 'ambiguous') { skipped += 1; continue; }
+    if (!empIds.has(r.employeeId)) { skipped += 1; continue; }
+    const cur = existing.find((s) => s.employeeId === r.employeeId);
+    if (protectPaid && cur && cur.remittance === '已匯' && Number(cur.netPay) !== Number(r.netPay)) { protectedRows.push({employeeId: r.employeeId, month}); skipped += 1; continue; }
+    const notes = cur?.notes || '由薪資計算明細匯入';
+    const remittance = cur?.remittance || '未匯';
+    if (cur) written.push(await hr.upsertSalary({id: cur.id, employeeId: r.employeeId, month, netPay: r.netPay, notes, remittance}, actor));
+    else written.push(await hr.upsertSalary({employeeId: r.employeeId, month, netPay: r.netPay, notes, remittance}, actor));
+    saved += 1;
+  }
+  return {saved, skipped, rows: written, protected: protectedRows};
+}

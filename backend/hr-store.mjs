@@ -822,6 +822,17 @@ export class HrStore {
     if (!r.rowCount) throw new AppError(404, '找不到特休來源紀錄');
     await this.audit(this.pool, actor, '配對特休Excel員工', employeeId, id);
   }
+  /** 收件匣的離職單確認後寫入離職日（實際最後在職日）。 */
+  async setDepartureDate(employeeId, date, actor, source = '收件匣離職單') {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) throw new AppError(400, '離職日格式不正確');
+    const emp = await this.getEmployee(employeeId);
+    if (emp.arrivalDate && date < emp.arrivalDate) throw new AppError(400, '離職日早於到職日');
+    const {id: _id, revision: _rev, ...payload} = emp;
+    const next = {...pickEmp(payload, payload), departureDate: date, departureDateSource: {type: source, at: nowIso()}};
+    await this.pool.query('UPDATE hr_employees SET payload=$1, revision=revision+1, updated_at=now() WHERE id=$2', [next, employeeId]);
+    await this.audit(this.pool, actor, '由' + source + '設定離職日', employeeId, (emp.departureDate || '（空白）') + ' → ' + date);
+    return {employeeId, departureDate: date, previous: emp.departureDate || ''};
+  }
   async applyLeaveArrival(id, actor) {
     const row = await this.pool.query('SELECT * FROM hr_leave_import_rows WHERE id=$1', [id]);
     if (!row.rowCount) throw new AppError(404, '找不到特休來源紀錄');

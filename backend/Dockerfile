@@ -11,7 +11,7 @@ COPY scripts/migrate-hr.mjs ./migrate-hr.mjs
 COPY scripts/hr-batch-ocr.mjs ./hr-batch-ocr.mjs
 COPY scripts/purge-recruitment.mjs ./purge-recruitment.mjs
 COPY index.html ./public/index.html
-COPY public/hr-app.js public/hr.css public/finance-app.js ./public/
+COPY public/hr-app.js public/hr.css public/finance-app.js public/inbox-app.js ./public/
 USER node
 EXPOSE 8788
 CMD ["node", "server.mjs"]
