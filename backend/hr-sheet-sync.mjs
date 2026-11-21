@@ -187,10 +187,11 @@ export function planSalarySync({values = [], employees = [], salaries = [], colu
 }
 
 export function syncIntervalMinutes(env = process.env) {
+  // 「薪資計算明細」每按一次算薪水就整頁覆蓋，所以預設 10 分鐘抓一次快照；已抓到的月份永遠保留在 hr_salaries。
   const raw = String(env.HR_SHEET_SYNC_MINUTES ?? '').trim();
-  if (raw === '') return 60;
+  if (raw === '') return 10;
   const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? Math.min(Math.floor(n), 24 * 60) : 60;
+  return Number.isFinite(n) && n >= 0 ? Math.min(Math.floor(n), 24 * 60) : 10;
 }
 
 async function loadTabs({spreadsheetId, salaryTab, fetchImpl}) {

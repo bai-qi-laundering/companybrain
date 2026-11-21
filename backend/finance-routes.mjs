@@ -11,6 +11,8 @@ import {
   normalizeDate, normalizeMonth, cleanInvoiceNumber, ALL_CATEGORIES,
 } from './finance.mjs';
 import {orgDirectoryKind} from './directory-docs.mjs';
+import {fetchStatementMonth, FIRESTORE_PROJECT} from './finance-revenue.mjs';
+import {serviceAccountStatus} from './google-sa.mjs';
 
 const send = (req, res, status, body) => sendJson(res, status, body, req);
 
@@ -30,7 +32,7 @@ async function readJson(req) {
 }
 
 /** 老闆手動修改後的欄位，重新整理並驗證。 */
-function editedFields(body, current, organizations) {
+function editedFields(body, current, organizations, companies = []) {
   const f = {...current};
   if (body.docType !== undefined) {
     if (!DOC_TYPES.includes(body.docType)) throw new AppError(400, '文件類型不正確');
@@ -64,9 +66,13 @@ function editedFields(body, current, organizations) {
     f.category = body.category || null;
   }
   if (body.description !== undefined) f.description = String(body.description || '').slice(0, 300);
+  if (body.company !== undefined) {
+    if (body.company && !companies.some((c) => c.name === body.company)) throw new AppError(400, '公司不在集團公司清單');
+    f.company = body.company || null;
+  }
   if (body.countInPnl !== undefined) f.countInPnl = Boolean(body.countInPnl);
-  if (f.docType === '銷項發票' && f.countInPnl) f.category = '收入';
-  if (['報價單', '合約', '其他'].includes(f.docType)) { f.countInPnl = false; f.category = null; }
+  if (['報價單', '合約', '其他', '銷項發票'].includes(f.docType)) { f.countInPnl = false; f.category = null; }
+  if (f.category === '薪資') f.countInPnl = false;
   if (f.countInPnl) {
     if (f.total === null || f.total === undefined) throw new AppError(400, '要計入損益請填總金額');
     if (!f.month) throw new AppError(400, '要計入損益請填月份');
@@ -75,7 +81,7 @@ function editedFields(body, current, organizations) {
   return f;
 }
 
-export async function handleFinance(req, res, {store, session, method, path: p, config, classify}) {
+export async function handleFinance(req, res, {store, session, method, path: p, config, classify, fetchRevenue = fetchStatementMonth}) {
   const fin = store.finance || (store.finance = new FinanceStore(store.pool));
   if (!store.financeReady) { await fin.ensure(); store.financeReady = true; }
   const url = new URL(req.url, 'http://localhost');
@@ -87,6 +93,7 @@ export async function handleFinance(req, res, {store, session, method, path: p, 
       docTypes: DOC_TYPES, expenseCategories: EXPENSE_CATEGORIES, incomeCategories: INCOME_CATEGORIES, autoConfidence: AUTO_CONFIDENCE,
       organizations: (state.organizations || []).filter((o) => o.kind !== '內部').map((o) => ({id: o.id, name: o.name, kind: o.kind, folder: orgDirectoryKind(o)})),
       counts: await fin.counts(),
+      companies: await fin.companies(),
       aiReady: Boolean(classify || (config.key && config.key !== 'PASTE_YOUR_KEY_HERE')),
     }), true;
   }
@@ -112,7 +119,7 @@ export async function handleFinance(req, res, {store, session, method, path: p, 
       const saved = await saveToInbox({buf: part.body, originalName: part.filename});
       const doc = {id: crypto.randomUUID(), sha256: hash, status: 'processing', originalName: part.filename, storedPath: saved.storedPath, mime: financeMime(part.filename), size: saved.size, createdBy: actor};
       await fin.insert(doc);
-      results.push(publicDoc(await processDocument({store, fin, id: doc.id, absPath: saved.abs, organizations, config, classify, actor})));
+      results.push(publicDoc(await processDocument({store, fin, id: doc.id, absPath: saved.abs, organizations, config, classify, actor, companies: await fin.companies()})));
     }
     return send(req, res, 200, {documents: results, counts: await fin.counts()}), true;
   }
@@ -140,7 +147,7 @@ export async function handleFinance(req, res, {store, session, method, path: p, 
       if (!['needs_review', 'error'].includes(doc.status)) throw new AppError(409, '這份文件已處理過；要修改請先按「重新確認」');
       const body = await readJson(req);
       const state = await store.read();
-      const fields = editedFields(body, doc.fields || {}, state.organizations || []);
+      const fields = editedFields(body, doc.fields || {}, state.organizations || [], await fin.companies());
       const storedPath = await fileDocument({store, doc, fields, organizations: state.organizations || []});
       await fin.update(doc.id, {status: 'filed', fields, stored_path: storedPath, questions: [], filed_at: new Date().toISOString(), error: null});
       await fin.replaceEntry(doc, fields, actor);
@@ -163,7 +170,7 @@ export async function handleFinance(req, res, {store, session, method, path: p, 
       if (doc.status !== 'error' && doc.status !== 'needs_review') throw new AppError(409, '只有待確認或辨識失敗的文件可以重新辨識');
       const abs = safeJoinRoot(financeRoot(), doc.stored_path);
       const state = await store.read();
-      const row = await processDocument({store, fin, id: doc.id, absPath: abs, organizations: state.organizations || [], config, classify, actor, allowAuto: false});
+      const row = await processDocument({store, fin, id: doc.id, absPath: abs, organizations: state.organizations || [], config, classify, actor, allowAuto: false, companies: await fin.companies()});
       return send(req, res, 200, {document: publicDoc(row), counts: await fin.counts()}), true;
     }
   }
@@ -186,7 +193,7 @@ export async function handleFinance(req, res, {store, session, method, path: p, 
   if ((p === '/api/finance/pnl' || p === '/api/finance/pnl.csv') && method === 'GET') {
     const year = /^\d{4}$/.test(url.searchParams.get('year') || '') ? url.searchParams.get('year') : new Date().getFullYear().toString();
     const basis = url.searchParams.get('basis') === 'net' ? 'net' : 'total';
-    const pnl = buildPnl({year, basis, entries: (await fin.entries({year})).map((e) => ({...e, total: Number(e.total), net: e.net === null ? null : Number(e.net), tax: e.tax === null ? null : Number(e.tax)})), payroll: url.searchParams.get('payroll') === 'off' ? {} : await fin.payrollByMonth(year)});
+    const pnl = buildPnl({year, basis, revenue: await fin.revenueMonths(year), entries: (await fin.entries({year})).map((e) => ({...e, total: Number(e.total), net: e.net === null ? null : Number(e.net), tax: e.tax === null ? null : Number(e.tax)})), payroll: url.searchParams.get('payroll') === 'off' ? {} : await fin.payrollByMonth(year)});
     if (p.endsWith('.csv')) {
       const body = Buffer.from(pnlCsv(pnl), 'utf8');
       const name = `損益表_${year}${basis === 'net' ? '_未稅' : ''}.csv`;
@@ -196,28 +203,53 @@ export async function handleFinance(req, res, {store, session, method, path: p, 
     }
     return send(req, res, 200, pnl), true;
   }
+  if (p === '/api/finance/settings' && method === 'GET') {
+    const sa = await serviceAccountStatus();
+    return send(req, res, 200, {companies: await fin.companies(), revenueSource: {project: FIRESTORE_PROJECT, serviceAccount: sa.configured ? sa.clientEmail : '', role: 'Cloud Datastore 檢視者（roles/datastore.viewer）'}}), true;
+  }
+  if (p === '/api/finance/settings' && method === 'PUT') {
+    const body = await readJson(req);
+    return send(req, res, 200, {companies: await fin.saveCompanies(body.companies, actor)}), true;
+  }
+  // 營收只在這裡（按「更新營收」）或每日排程讀 Firestore；看損益表只讀快取。
+  if (p === '/api/finance/revenue/refresh' && method === 'POST') {
+    const body = await readJson(req);
+    let months = [];
+    if (body.month) { const m = normalizeMonth(body.month); if (!m) throw new AppError(400, '月份格式不正確'); months = [m]; }
+    else if (/^\d{4}$/.test(String(body.year || ''))) {
+      const now = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit'}).format(new Date());
+      months = Array.from({length: 12}, (_, i) => `${body.year}-${String(i + 1).padStart(2, '0')}`).filter((m) => m <= now);
+    } else throw new AppError(400, '請指定月份或年度');
+    const results = [];
+    for (const m of months) {
+      const r = await fin.refreshRevenue(m, fetchRevenue);
+      results.push(r.error ? {month: m, error: r.error} : {month: m, total: r.total, cases: r.cases.length, reads: r.reads});
+      if (r.error && ['no-sa', 'forbidden'].includes(r.code)) break;
+    }
+    return send(req, res, 200, {results, reads: results.reduce((s, r) => s + (r.reads || 0), 0)}), true;
+  }
   return false;
 }
 
 /** 辨識一份已存進收件匣的文件；有把握就自動歸檔，否則留在「待確認」。 */
-export async function processDocument({store, fin, id, absPath, organizations, config, classify, actor, allowAuto = true}) {
+export async function processDocument({store, fin, id, absPath, organizations, config, classify, actor, allowAuto = true, companies}) {
   const doc = await fin.get(id);
   let raw;
   try {
     raw = classify
       ? await classify({absPath, filename: doc.original_name, organizations})
-      : await classifyWithGemini({absPath, filename: doc.original_name, organizations, rules: await fin.rules(), config});
+      : await classifyWithGemini({absPath, filename: doc.original_name, organizations, rules: await fin.rules(), companies, config});
   } catch (e) {
     await fin.update(id, {status: 'error', error: e?.status ? e.message : '辨識失敗，請稍後按「重新辨識」或手動填寫', questions: ['AI 沒辦法辨識這份文件，請手動填寫或稍後重新辨識']});
     return fin.get(id);
   }
   const rules = await fin.rules();
-  let review = reviewFields(raw, {organizations, rules});
+  let review = reviewFields(raw, {organizations, rules, companies});
   const duplicates = {
     invoice: await fin.duplicateInvoice(review.fields.invoiceNumber, id),
     overlap: await fin.overlap(review.fields, id),
   };
-  if (duplicates.invoice || duplicates.overlap) review = reviewFields(raw, {organizations, rules, duplicates});
+  if (duplicates.invoice || duplicates.overlap) review = reviewFields(raw, {organizations, rules, duplicates, companies});
   if (allowAuto && !review.needsReview) {
     try {
       const storedPath = await fileDocument({store, doc, fields: review.fields, organizations});

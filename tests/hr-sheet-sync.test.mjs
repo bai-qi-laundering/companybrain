@@ -93,11 +93,11 @@ test('salary plan: summary rows only, paid months are never overwritten', () => 
   assert.ok(plan.flags.find((f) => f.type === 'salary-unmatched' && f.employeeId === 'Z001'));
 });
 
-test('sync interval env: default hourly, 0 disables', () => {
-  assert.equal(syncIntervalMinutes({}), 60);
+test('sync interval env: default every 10 minutes, 0 disables', () => {
+  assert.equal(syncIntervalMinutes({}), 10);
   assert.equal(syncIntervalMinutes({HR_SHEET_SYNC_MINUTES: '0'}), 0);
   assert.equal(syncIntervalMinutes({HR_SHEET_SYNC_MINUTES: '15'}), 15);
-  assert.equal(syncIntervalMinutes({HR_SHEET_SYNC_MINUTES: 'x'}), 60);
+  assert.equal(syncIntervalMinutes({HR_SHEET_SYNC_MINUTES: 'x'}), 10);
 });
 
 test('runSync writes employees + ledger, logs each run, and a second run is a no-op', async () => {
@@ -179,4 +179,30 @@ test('GOOGLE_SA_JSON_B64 is decoded and preferred over GOOGLE_SA_JSON', async ()
     if (prev.b === undefined) delete process.env.GOOGLE_SA_JSON_B64; else process.env.GOOGLE_SA_JSON_B64 = prev.b;
     if (prev.j === undefined) delete process.env.GOOGLE_SA_JSON; else process.env.GOOGLE_SA_JSON = prev.j;
   }
+});
+
+test('薪資計算明細 is overwritten on each 算薪水; every month/person snapshot seen is kept, 已匯 never overwritten', async () => {
+  const {pool} = openPglite();
+  const hr = new HrStore(pool);
+  await hr.ensure();
+  await hr.upsertEmployee('D001', {name: '甲', department: '物流'}, 'admin1', {create: true});
+  await hr.upsertEmployee('F011', {name: '乙', department: '摺疊'}, 'admin1', {create: true});
+  const emp = [EMP_HEAD, ['D001', '甲', '', '物流', '正職'], ['F011', '乙', '', '摺疊', '兼職']];
+  let tab;
+  const sync = createSheetSync({hr, loadValues: async () => ({'員工資料': emp, '薪資計算明細': tab}), statusImpl: async () => ({configured: true})});
+  // 第一次只算了甲 9 月
+  tab = [SAL_HEAD, ['2026/09', '2026/09/30', 'D001', '甲', '物流', '', '匯款', '正職', '40000']];
+  await sync.run({actor: 't'});
+  // 接著算了乙 10 月（分頁被整頁覆蓋，甲 9 月已不在分頁上）
+  tab = [SAL_HEAD, ['2026/10', '2026/10/31', 'F011', '乙', '摺疊', '', '現金', '兼職', '5000']];
+  await sync.run({actor: 't'});
+  // 甲 9 月標記已匯後，分頁又出現不同金額 → 不覆蓋
+  const sep = (await hr.state()).salaries.find((s) => s.employeeId === 'D001' && s.month === '2026-09');
+  await pool.query("UPDATE hr_salaries SET status='已匯' WHERE id=$1", [sep.id]);
+  tab = [SAL_HEAD, ['2026/09', '2026/09/30', 'D001', '甲', '物流', '', '匯款', '正職', '41000']];
+  const r = await sync.run({actor: 't'});
+  assert.ok(r.flags.find((f) => f.type === 'salary-paid-changed'));
+  const all = (await hr.state()).salaries;
+  assert.equal(all.find((s) => s.employeeId === 'D001' && s.month === '2026-09').netPay, 40000);
+  assert.equal(all.find((s) => s.employeeId === 'F011' && s.month === '2026-10').netPay, 5000);
 });

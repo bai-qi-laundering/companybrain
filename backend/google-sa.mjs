@@ -5,7 +5,8 @@ import {createPrivateKey, createSign} from 'node:crypto';
 const SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets.readonly';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 
-let cached = {token: '', exp: 0, email: ''};
+export const DATASTORE_READ_SCOPE = 'https://www.googleapis.com/auth/datastore';
+const tokenCache = new Map();
 
 export function saJsonSource() {
   const b64 = String(process.env.GOOGLE_SA_JSON_B64 || '').trim();
@@ -52,14 +53,16 @@ export function signJwt(payload, privateKeyPem) {
   return header + '.' + body + '.' + sig;
 }
 
-export async function getAccessToken({fetchImpl = fetch, sa} = {}) {
+export async function getAccessToken({fetchImpl = fetch, sa, scope = SHEETS_SCOPE} = {}) {
   const creds = sa || await loadServiceAccount();
   if (!creds) return null;
   const now = Math.floor(Date.now() / 1000);
-  if (cached.token && cached.email === creds.client_email && cached.exp > now + 60) return cached.token;
+  const cacheKey = creds.client_email + '|' + scope;
+  const cached = tokenCache.get(cacheKey);
+  if (cached && cached.exp > now + 60) return cached.token;
   const jwt = signJwt({
     iss: creds.client_email,
-    scope: SHEETS_SCOPE,
+    scope,
     aud: TOKEN_URL,
     iat: now,
     exp: now + 3600,
@@ -72,8 +75,8 @@ export async function getAccessToken({fetchImpl = fetch, sa} = {}) {
   });
   if (!res.ok) throw new Error('Google 授權失敗（' + res.status + '）');
   const data = await res.json();
-  cached = {token: data.access_token, exp: now + Number(data.expires_in || 3600), email: creds.client_email};
-  return cached.token;
+  tokenCache.set(cacheKey, {token: data.access_token, exp: now + Number(data.expires_in || 3600)});
+  return data.access_token;
 }
 
 export async function fetchSheetValues({spreadsheetId, sheetTab, fetchImpl = fetch, token}) {

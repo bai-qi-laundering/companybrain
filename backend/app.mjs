@@ -12,7 +12,7 @@ import {extractDraft} from './gemini.mjs';
 import {understand,answerQuestion} from './assistant.mjs';
 import {cameraDestination,signedCameraImageUrl} from './camera-routing.mjs';
 const escapeHtml=text=>String(text).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-export function createHandler({store,config,htmlPath,line,ai=extractDraft,queryAI=understand,answerAI=answerQuestion,hr=null,publicDir=null,extract=null,classifyFinance=null}){
+export function createHandler({store,config,htmlPath,line,ai=extractDraft,queryAI=understand,answerAI=answerQuestion,hr=null,publicDir=null,extract=null,classifyFinance=null,financeRevenue=null}){
  const limits=new Map(),dummyHash=hashPassword(token());
  function limit(key,max){const now=Date.now();if(limits.size>10000)for(const [k,v] of limits)if(now-v.since>60000)limits.delete(k);let v=limits.get(key);if(!v||now-v.since>60000){v={since:now,n:0};limits.set(key,v)}if(++v.n>max)throw new AppError(429,'操作太頻繁，請一分鐘後重試');}
  async function body(req,maxBytes=3*1024*1024){let size=0,parts=[];for await(const p of req){size+=p.length;if(size>maxBytes)throw new AppError(413,'資料太大，請分批處理');parts.push(p)}try{return JSON.parse(Buffer.concat(parts).toString('utf8'))}catch{throw new AppError(400,'請提供有效的 JSON')}}
@@ -112,7 +112,7 @@ export function createHandler({store,config,htmlPath,line,ai=extractDraft,queryA
  if(req.method==='PUT'&&path==='/api/state'){const b=await body(req);if(!Number.isSafeInteger(b.revision)||b.revision<0)throw new AppError(400,'版本不正確');const state=validateState({organizations:b.organizations,records:b.records,tasks:b.tasks});return send(200,await store.save(b.revision,state,session.username));}
  if(req.method==='POST'&&path==='/api/ai/draft'){limit('ai:'+session.username,10);const b=await body(req),text=requireText(b.text,'輸入文字',8000),state=await store.read();const draft=await ai({text,organizations:state.organizations,records:state.records,tasks:state.tasks,key:config.key,model:config.model});return send(200,{draft,sourceText:text})}
  if(path.startsWith('/api/directory/')){if(await handleDirectory(req,res,{store,hr,session,method:req.method,path}))return;throw new AppError(404,'找不到這項功能')}
- if(path.startsWith('/api/finance/')){if(await handleFinance(req,res,{store,session,method:req.method,path,config,classify:classifyFinance}))return;throw new AppError(404,'找不到這項功能')}
+ if(path.startsWith('/api/finance/')){if(await handleFinance(req,res,{store,session,method:req.method,path,config,classify:classifyFinance,...(financeRevenue?{fetchRevenue:financeRevenue}:{})}))return;throw new AppError(404,'找不到這項功能')}
  if(path.startsWith('/api/hr')){if(await handleHr(req,res,{hr,session,method:req.method,path,config,extract}))return;throw new AppError(404,'找不到這項功能')}
  throw new AppError(404,'找不到這項功能');
  }catch(e){if(!res.headersSent)send(e.status||500,{error:e.status?e.message:'服務暫時無法處理，請查看 NAS 容器狀態'});else res.end();if(!e.status)console.error('companybrain request failed:',e.code||e.name);}

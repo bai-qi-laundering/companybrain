@@ -11,10 +11,28 @@
 6. 歸檔位置：`廠商|客戶/<編號_名稱>/<發票收據|對帳單貨款|報價單|合約|其他文件>/<年>/<日期_類型_發票號_金額>.<ext>`；沒有對象就放 `財務收件匣/<YYYY-MM>/<類型>/`。
 7. 計入損益的文件與手動項目寫入 `fin_entries`，損益表依 NAS 原本「月份_自動損益表.xlsx」的科目與順序產生，可下載 CSV。
 
+## 收入：只看已寄出的對帳單（不重複計算）
+- 收入（對帳單）＝ hotellinen_service Firestore `statement_cases` 中，每家客戶當月（依 `endDate` 月份）**最新一個已寄出版本**的 `afterRebate + tax`（含稅；未稅基準用 `afterRebate`）。規則與系統後台「應收帳款」一致：客戶鍵含「+」的合併單略過（良西+良一 除外）。
+- 只讀取（runQuery），不寄送、不改對帳單、不開發票。
+- 銷項發票只歸檔、不計入；手動項目只剩「其他收入」（對帳單以外，例如廢品出售），畫面上有提醒避免重複。
+- 權限：沿用 `GOOGLE_SA_JSON_B64` 服務帳戶（companybrain-sheet@hotel-inventory-3a1ad），需在 Google Cloud 專案 hotel-inventory-3a1ad 給它 **Cloud Datastore 檢視者（roles/datastore.viewer）**。不用新金鑰或新環境變數。
+- 讀取量：一個月份查詢 ≈ 當月對帳單數（約 55–60 次讀取）。結果存 `fin_revenue_months` 快取；每天自動更新上月＋本月一次（約 120 次／天，約 3,600 次／月，遠低於每天 5 萬次免費額度）；其餘月份只在按「更新營收」時讀（全年約 660 次）。
+- 對帳單由不同集團公司開立，但損益表收入為合併數。
+
+## 薪資
+- 損益表「薪資」＝ `hr_salaries` 當月實發合計（由薪資試算表同步）＋手動調整；被辨識為薪資的文件只歸檔不計入。
+- 同步每 10 分鐘讀一次「薪資計算明細」，看到的每個月份／員工都存成快照，已匯的月份不會被覆蓋。
+- 限制：試算表每次「算薪水」會整頁覆寫，只保留當次篩選的人；兩次同步之間被覆寫的結果、companybrain 沒有的員工、PR #18 之前的月份都不會有資料。損益表會顯示「已入帳人數／約在職人數」提醒。過去月份可從原本的 Excel 匯入，或請 GAS 另外寫一張歷史表（需另外決定）。
+
+## 集團公司
+- 百麒國際、百富、日聖、百銘、百麒洗衣，在「財務 → 設定」維護統編與別名（存在 `fin_settings`，不用改 env）。每份文件會標示屬於哪家公司（進項看買方、銷項看賣方）；進項買方統編不是任何一家時會詢問。
+
 ## 資料表
-`fin_documents`（文件與辨識結果）、`fin_entries`（損益項目；文件產生或手動）、`fin_rules`（確認後學到的對象／統編／科目）。
+`fin_documents`（文件與辨識結果）、`fin_entries`（損益項目；文件產生或手動）、`fin_rules`（確認後學到的對象／統編／科目）、`fin_settings`（集團公司）、`fin_revenue_months`（對帳單營收快取）。
 
 ## 部署注意
 - NAS 自動部署器只複製 `FILES` 清單內的檔案，且不會更新自己。這個 PR 已把 finance 檔案加入清單，但 NAS 上那份 `scripts/nas-auto-deploy.py` 要手動更新一次；否則合併後自動部署會因 Dockerfile 找不到 finance 檔案而建置失敗並回滾（舊版照常運作）。
-- 新環境變數（選填）：`FINANCE_COMPANY_TAX_IDS`（逗號分隔，預設 96842769）、`FINANCE_AUTO_CONFIDENCE`。compose.yaml 已加，NAS 的 compose.yaml 需手動同步。
+- 新檔案 `finance-revenue.mjs`、修改的 `google-sa.mjs`、`hr-sheet-sync.mjs` 要手動複製一次（`hr-*` 不在自動部署清單）。
+- `HR_SHEET_SYNC_MINUTES` 預設改為 10，NAS compose.yaml 需同步。
+- 新環境變數（選填）：`FINANCE_FIRESTORE_PROJECT`（預設 hotel-inventory-3a1ad）、`FINANCE_COMPANY_TAX_IDS`（逗號分隔，預設 96842769）、`FINANCE_AUTO_CONFIDENCE`。compose.yaml 已加，NAS 的 compose.yaml 需手動同步。
 - 需要 `NAS_DIRECTORY_ROOT` 已掛載（compose.directory-docs.yaml）。
