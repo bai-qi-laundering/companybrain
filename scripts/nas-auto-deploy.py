@@ -21,7 +21,8 @@ FILES = ("backend/garment-notify.mjs", "backend/app.mjs", "backend/assistant.mjs
          "backend/domain.mjs", "backend/gemini.mjs", "backend/line.mjs", "backend/camera-routing.mjs",
          "backend/organizations.mjs", "backend/security.mjs",
          "backend/server.mjs", "backend/store.mjs", "backend/tasks.mjs", "backend/directory-docs.mjs", "backend/directory-routes.mjs", "backend/directory-link.mjs",
-         "public/hr-app.js",
+         "backend/finance.mjs", "backend/finance-routes.mjs", "backend/finance-excel/sheet_text.py",
+         "public/hr-app.js", "public/finance-app.js",
          "backend/package.json", "backend/package-lock.json",
          "backend/Dockerfile", "index.html")
 OVERRIDE = ROOT / "compose.autodeploy.yaml"
