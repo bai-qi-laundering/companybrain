@@ -22,7 +22,9 @@ FILES = ("backend/garment-notify.mjs", "backend/app.mjs", "backend/assistant.mjs
          "backend/organizations.mjs", "backend/security.mjs",
          "backend/server.mjs", "backend/store.mjs", "backend/tasks.mjs", "backend/directory-docs.mjs", "backend/directory-routes.mjs", "backend/directory-link.mjs",
          "backend/finance.mjs", "backend/finance-routes.mjs", "backend/finance-revenue.mjs", "backend/finance-import.mjs", "backend/google-sa.mjs", "backend/finance-excel/sheet_text.py", "backend/finance-excel/pnl_import.py",
-         "public/hr-app.js", "public/finance-app.js",
+         "backend/inbox.mjs", "backend/inbox-routes.mjs", "backend/inbox-resign.mjs", "backend/directory-migrate.mjs", "backend/finance-excel/sheet_values.py",
+         "backend/hr-store.mjs", "backend/hr-routes.mjs", "backend/hr-salary-import.mjs",
+         "public/hr-app.js", "public/finance-app.js", "public/inbox-app.js",
          "backend/package.json", "backend/package-lock.json",
          "backend/Dockerfile", "index.html")
 OVERRIDE = ROOT / "compose.autodeploy.yaml"

@@ -67,9 +67,11 @@ export function canonicalKind(kind) {
   return '';
 }
 
+/** 名錄裡屬於「客人」的種類（飯店、餐廳都是我們的客人）；其他種類歸「廠商」。 */
+export const CLIENT_KINDS = ['飯店', '餐廳'];
+export function isClientKind(kind) { return CLIENT_KINDS.includes(String(kind || '').trim()); }
 export function orgDirectoryKind(org) {
-  const kind = org?.kind || '其他';
-  return kind === '飯店' ? 'clients' : 'vendors';
+  return isClientKind(org?.kind) ? 'clients' : 'vendors';
 }
 
 export function assertEntityId(id) {

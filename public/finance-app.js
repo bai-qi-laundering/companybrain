@@ -1,4 +1,4 @@
-/* 財務收件匣：上傳 → AI 分類歸檔 → 不確定就跳出詢問 → 月損益表 */
+/* 財務：已歸檔的財務文件、月損益表、設定（上傳與待確認在「收件匣」：inbox-app.js） */
 (function () {
   'use strict';
   const $ = (s, r = document) => r.querySelector(s);
@@ -7,8 +7,8 @@
   const money = (v) => (v === null || v === undefined || v === '' ? '' : Number(v).toLocaleString('zh-TW', {maximumFractionDigits: 2}));
   const thisYear = () => new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Taipei', year: 'numeric'}).format(new Date());
   const thisMonth = () => new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit'}).format(new Date());
-  let ctx = {}, meta = null, tab = 'inbox', year = thisYear(), basis = 'total', filedMonth = '', entryMonth = thisMonth();
-  let pending = [], filed = [];
+  let ctx = {}, meta = null, tab = 'filed', year = thisYear(), basis = 'total', filedMonth = '', entryMonth = thisMonth();
+  let filed = [];
 
   const CSS = `
   .fin-tabs{display:flex;gap:8px;margin:4px 0 18px;flex-wrap:wrap}.fin-tabs button{border:1px solid var(--line);border-radius:999px;padding:7px 15px;background:#fff}
@@ -34,157 +34,35 @@
     const st = document.createElement('style'); st.id = 'fin-style'; st.textContent = CSS; document.head.appendChild(st);
   }
   const api = (p, m, b) => ctx.api(p, m, b);
-  async function upload(file) {
-    const fd = new FormData(); fd.append('file', file);
-    const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 180000);
-    try {
-      const r = await fetch('/api/finance/inbox', {method: 'POST', credentials: 'same-origin', headers: ctx.csrf ? {'X-CSRF-Token': ctx.csrf} : {}, body: fd, signal: controller.signal});
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(data.error || '上傳失敗');
-      return data;
-    } finally { clearTimeout(timer); }
-  }
-  const orgOptions = (sel) => {
-    const groups = {clients: '客人', vendors: '廠商'};
-    return '<option value="">（不在名錄／放財務收件匣）</option>' + Object.entries(groups).map(([k, label]) =>
-      `<optgroup label="${label}">${(meta?.organizations || []).filter((o) => o.folder === k).map((o) => `<option value="${esc(o.id)}"${o.id === sel ? ' selected' : ''}>${esc(o.name)}</option>`).join('')}</optgroup>`).join('');
-  };
   const catOptions = (sel) => '<option value="">（不計入／未選）</option>' + [...(meta?.expenseCategories || []), ...(meta?.incomeCategories || [])].map((c) => `<option${c === sel ? ' selected' : ''}>${esc(c)}</option>`).join('');
-  const companyOptions = (sel) => '<option value="">（未判斷）</option>' + (meta?.companies || []).map((c) => `<option${c.name === sel ? ' selected' : ''}>${esc(c.name)}</option>`).join('');
-  const typeOptions = (sel) => (meta?.docTypes || []).map((t) => `<option${t === sel ? ' selected' : ''}>${esc(t)}</option>`).join('');
-  const isImage = (d) => /^image\//.test(d.mime) && !/heic/.test(d.mime);
   const fileUrl = (d) => '/api/finance/documents/' + d.id + '/file';
-  const summary = (f) => [f.company ? '【' + f.company + '】' : '', f.docType, f.orgName || f.counterpartyName, f.invoiceNumber, f.month, f.total !== null && f.total !== undefined ? money(f.total) + ' 元' : '', f.category].filter(Boolean).map(esc).join(' · ');
 
   async function loadMeta() { meta = await api('/api/finance/meta'); }
-  async function loadPending() {
-    const [a, b] = await Promise.all([api('/api/finance/documents?status=needs_review'), api('/api/finance/documents?status=error')]);
-    pending = [...a.documents, ...b.documents]; meta.counts = b.counts;
-  }
 
   function shell(root) {
     const n = (meta?.counts?.needs_review || 0) + (meta?.counts?.error || 0);
-    root.innerHTML = `<div class="fin-tabs">
-      <button data-tab="inbox" class="${tab === 'inbox' ? 'on' : ''}">上傳／待確認${n ? `<span class="fin-badge">${n}</span>` : ''}</button>
+    root.innerHTML = `<p class="fin-muted" style="margin:0 0 10px">上傳文件請到 <a href="#" id="fin-go-inbox">收件匣（${n} 份待確認）</a></p>
+      <div class="fin-tabs">
       <button data-tab="filed" class="${tab === 'filed' ? 'on' : ''}">已歸檔</button>
       <button data-tab="pnl" class="${tab === 'pnl' ? 'on' : ''}">損益表</button>
-      <button data-tab="settings" class="${tab === 'settings' ? 'on' : ''}">設定</button></div><div id="fin-body"></div>
-      <dialog class="fin-dialog" id="fin-dialog"></dialog>`;
+      <button data-tab="settings" class="${tab === 'settings' ? 'on' : ''}">設定</button></div><div id="fin-body"></div>`;
     $$('[data-tab]', root).forEach((b) => b.onclick = () => { tab = b.dataset.tab; paint(root); });
+    $('#fin-go-inbox', root).onclick = (e) => { e.preventDefault(); ctx.openInbox?.(); };
   }
 
   async function paint(root) {
     try {
-      if (!meta) await loadMeta();
-      if (tab === 'inbox') await loadPending();
+      await loadMeta();
       shell(root);
       const body = $('#fin-body', root);
-      if (tab === 'inbox') paintInbox(root, body);
-      else if (tab === 'filed') await paintFiled(root, body);
+      if (tab === 'filed') await paintFiled(root, body);
       else if (tab === 'settings') await paintSettings(root, body);
       else await paintPnl(root, body);
     } catch (e) { root.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
   }
 
-  function paintInbox(root, body) {
-    body.innerHTML = `<div class="fin-drop" id="fin-drop" tabindex="0" role="button"><b>把發票照片、貨款明細、報價單拖到這裡，或點一下選檔案</b>
-      <span class="fin-muted">支援照片、PDF、Excel（xlsx/xls）、CSV，每個 20MB 內。系統會自動辨識、分類、歸到對象資料夾；不確定的會跳出來問你。${meta.aiReady ? '' : '<br><b style="color:#a33">尚未設定 Gemini，檔案會先收進待確認，請手動填寫。</b>'}</span>
-      <input type="file" id="fin-file" multiple hidden accept="image/*,.pdf,.xlsx,.xlsm,.xls,.csv"></div>
-      <div class="fin-progress" id="fin-progress"></div>
-      <h2 style="font-size:17px;margin:18px 0 4px">待確認（${pending.length}）</h2>
-      ${pending.length ? '' : '<p class="fin-muted">目前沒有需要確認的文件。</p>'}
-      ${pending.map((d) => `<div class="fin-card"><div><h3>${esc(d.originalName)}</h3><div class="fin-muted">${summary(d.fields) || (d.status === 'error' ? '辨識失敗' : '')}</div>
-        ${(d.questions || []).map((q) => `<div class="fin-q">${esc(q)}</div>`).join('')}</div>
-        <button class="fin-btn pri" data-review="${d.id}">確認</button></div>`).join('')}`;
-    const drop = $('#fin-drop', body), input = $('#fin-file', body);
-    drop.onclick = () => input.click();
-    drop.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } };
-    drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
-    drop.ondragleave = () => drop.classList.remove('over');
-    drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); handleFiles(root, Array.from(e.dataTransfer.files || [])); };
-    input.onchange = () => handleFiles(root, Array.from(input.files || []));
-    $$('[data-review]', body).forEach((b) => b.onclick = () => openReview(root, b.dataset.review));
-  }
-
-  async function handleFiles(root, files) {
-    if (!files.length) return;
-    const box = $('#fin-progress', root);
-    const lines = files.map((f) => { const div = document.createElement('div'); div.textContent = `⏳ ${f.name}：上傳與辨識中…`; box.appendChild(div); return div; });
-    let auto = 0, ask = 0, dup = 0, fail = 0;
-    for (let i = 0; i < files.length; i++) {
-      try {
-        const res = await upload(files[i]);
-        const d = res.documents[0];
-        if (d.duplicate) { dup++; lines[i].textContent = `↺ ${files[i].name}：這個檔案之前上傳過（${d.status === 'filed' ? '已歸檔' : '待確認'}），不重複處理`; }
-        else if (d.status === 'filed') { auto++; lines[i].textContent = `✓ ${files[i].name}：已自動歸檔 — ${d.fields.docType}・${d.fields.orgName || d.fields.counterpartyName || ''}・${money(d.fields.total)} 元 → ${d.storedPath}`; }
-        else { ask++; lines[i].textContent = `？ ${files[i].name}：需要你確認`; }
-      } catch (e) { fail++; lines[i].textContent = `✗ ${files[i].name}：${e.message}`; }
-    }
-    ctx.notify?.(`完成：${auto} 份自動歸檔、${ask} 份待確認${dup ? `、${dup} 份重複` : ''}${fail ? `、${fail} 份失敗` : ''}`);
-    const keep = box.innerHTML;
-    await loadPending(); meta.counts = (await api('/api/finance/documents?status=needs_review&limit=1')).counts;
-    shell(root); paintInbox(root, $('#fin-body', root)); $('#fin-progress', root).innerHTML = keep;
-    if (pending.length) openReview(root, pending[0].id); // 不確定的直接跳出來問
-  }
-
-  async function openReview(root, id) {
-    const dlg = $('#fin-dialog', root);
-    const d = pending.find((x) => x.id === id) || await api('/api/finance/documents/' + id);
-    const f = d.fields || {};
-    const left = pending.filter((x) => x.id !== id).length;
-    dlg.innerHTML = `<div class="dialog-head"><h2 style="font-size:18px">請確認這份文件</h2><button type="button" data-x aria-label="關閉">×</button></div>
-      <div class="fin-review"><div><div class="fin-preview">${isImage(d) ? `<img src="${fileUrl(d)}" alt="">` : `<p class="fin-muted" style="padding:20px;text-align:center">${esc(d.originalName)}<br><br><a class="fin-btn" href="${fileUrl(d)}" target="_blank" rel="noopener">開啟原檔</a></p>`}</div>
-        <p class="fin-muted" style="margin-top:6px">AI 把握度：${d.confidence === null ? '—' : Math.round(d.confidence * 100) + '%'}　<a href="${fileUrl(d)}" target="_blank" rel="noopener">開新視窗看原檔</a></p></div>
-      <form class="fin-form" id="fin-form">
-        <div class="wide">${(d.questions || []).map((q) => `<div class="fin-q">${esc(q)}</div>`).join('') || '<div class="fin-muted">沒有疑問，確認後就會歸檔。</div>'}</div>
-        <label>文件類型<select name="docType">${typeOptions(f.docType || '其他')}</select></label>
-        <label>屬於集團哪家公司<select name="company">${companyOptions(f.company)}</select></label>
-        <label>對象（名錄）<select name="orgId">${orgOptions(f.orgId)}</select></label>
-        <label>文件上的對方名稱<input name="counterpartyName" value="${esc(f.counterpartyName || '')}"></label>
-        <label>發票號碼<input name="invoiceNumber" value="${esc(f.invoiceNumber || '')}" placeholder="AB12345678"></label>
-        <label>文件日期<input type="date" name="date" value="${esc(f.date || '')}"></label>
-        <label>算在哪個月份<input type="month" name="month" value="${esc(f.month || '')}"></label>
-        <label>未稅金額<input type="number" step="0.01" name="net" value="${esc(f.net ?? '')}"></label>
-        <label>稅額<input type="number" step="0.01" name="tax" value="${esc(f.tax ?? '')}"></label>
-        <label>含稅總額<input type="number" step="0.01" name="total" value="${esc(f.total ?? '')}"></label>
-        <label>損益表科目<select name="category">${catOptions(f.category)}</select></label>
-        <label class="wide">摘要<input name="description" value="${esc(f.description || '')}"></label>
-        <label class="wide" style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input type="checkbox" name="countInPnl" style="width:auto;margin:0"${f.countInPnl ? ' checked' : ''}> 計入損益表</label>
-        <div class="wide" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">
-          <button type="button" class="fin-btn" data-retry>重新辨識</button>
-          <button type="button" class="fin-btn warn" data-ignore>不處理（不歸檔、不計入）</button>
-          <button type="submit" class="fin-btn pri">確認並歸檔${left ? `（還有 ${left} 份）` : ''}</button></div>
-      </form></div>`;
-    if (!dlg.open) dlg.showModal();
-    $('[data-x]', dlg).onclick = () => dlg.close();
-    const form = $('#fin-form', dlg);
-    form.elements.docType.onchange = () => {
-      const t = form.elements.docType.value;
-      if (['報價單', '合約', '其他', '銷項發票'].includes(t)) { form.elements.countInPnl.checked = false; form.elements.category.value = ''; }
-    };
-    const next = async () => { await loadPending(); if (pending.length) openReview(root, pending[0].id); else { dlg.close(); ctx.notify?.('全部確認完了'); } shell(root); paintInbox(root, $('#fin-body', root)); };
-    form.onsubmit = async (e) => {
-      e.preventDefault();
-      const el = form.elements, num = (v) => (v === '' ? null : Number(v));
-      try {
-        const r = await api('/api/finance/documents/' + id + '/confirm', 'POST', {docType: el.docType.value, company: el.company.value || null, orgId: el.orgId.value || null, counterpartyName: el.counterpartyName.value, invoiceNumber: el.invoiceNumber.value, date: el.date.value || null, month: el.month.value || null, net: num(el.net.value), tax: num(el.tax.value), total: num(el.total.value), category: el.category.value || null, description: el.description.value, countInPnl: el.countInPnl.checked});
-        ctx.notify?.('已歸檔到 ' + r.document.storedPath);
-        await next();
-      } catch (err) { ctx.notify?.(err.message); }
-    };
-    $('[data-ignore]', dlg).onclick = async () => {
-      if (!confirm('這份文件不歸檔、也不計入損益？（檔案會留在 財務收件匣/待確認）')) return;
-      try { await api('/api/finance/documents/' + id + '/ignore', 'POST', {}); await next(); } catch (err) { ctx.notify?.(err.message); }
-    };
-    $('[data-retry]', dlg).onclick = async (ev) => {
-      ev.target.disabled = true; ev.target.textContent = '辨識中…';
-      try { const r = await api('/api/finance/documents/' + id + '/retry', 'POST', {}); pending = pending.map((x) => x.id === id ? r.document : x); openReview(root, id); }
-      catch (err) { ctx.notify?.(err.message); ev.target.disabled = false; ev.target.textContent = '重新辨識'; }
-    };
-  }
-
   async function paintFiled(root, body) {
-    const data = await api('/api/finance/documents?status=filed' + (filedMonth ? '&month=' + filedMonth : ''));
+    const data = await api('/api/finance/documents?status=filed&scope=finance' + (filedMonth ? '&month=' + filedMonth : ''));
     filed = data.documents;
     body.innerHTML = `<div class="fin-row"><label>月份 <input type="month" id="fin-fm" value="${esc(filedMonth)}"></label><span class="fin-muted">共 ${filed.length} 份</span></div>
       <div class="fin-scroll"><table class="fin-table fin-left"><thead><tr><th>日期</th><th>公司</th><th>類型</th><th>對象</th><th>發票號碼</th><th>含稅總額</th><th>科目</th><th>計入</th><th>歸檔位置</th><th></th></tr></thead><tbody>
@@ -193,7 +71,7 @@
       </tbody></table></div>`;
     $('#fin-fm', body).onchange = (e) => { filedMonth = e.target.value; paintFiled(root, body); };
     $$('[data-reopen]', body).forEach((b) => b.onclick = async () => {
-      try { await api('/api/finance/documents/' + b.dataset.reopen + '/reopen', 'POST', {}); await loadPending(); tab = 'inbox'; shell(root); paintInbox(root, $('#fin-body', root)); openReview(root, b.dataset.reopen); }
+      try { await api('/api/finance/documents/' + b.dataset.reopen + '/reopen', 'POST', {}); ctx.notify?.('已移回收件匣，請在收件匣重新確認'); ctx.openInbox?.(b.dataset.reopen); }
       catch (e) { ctx.notify?.(e.message); }
     });
   }

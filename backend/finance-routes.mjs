@@ -2,11 +2,10 @@ import {createReadStream} from 'node:fs';
 import {stat} from 'node:fs/promises';
 import {AppError} from './domain.mjs';
 import {sendJson} from './http-send.mjs';
-import {parseMultipart} from './directory-routes.mjs';
 import {safeJoinRoot} from './directory-docs.mjs';
 import {
-  FinanceStore, reviewFields, classifyWithGemini, saveToInbox, fileDocument, publicDoc, sha256,
-  isAllowedFinanceUpload, financeMime, financeRoot, FINANCE_UPLOAD_LIMIT, FINANCE_MAX_FILES,
+  FinanceStore, reviewFields, classifyWithGemini, fileDocument, publicDoc,
+  financeRoot,
   buildPnl, pnlCsv, validateManualEntry, DOC_TYPES, EXPENSE_CATEGORIES, INCOME_CATEGORIES, AUTO_CONFIDENCE,
   normalizeDate, normalizeMonth, cleanInvoiceNumber, ALL_CATEGORIES,
 } from './finance.mjs';
@@ -33,7 +32,7 @@ async function readJson(req) {
 }
 
 /** 老闆手動修改後的欄位，重新整理並驗證。 */
-function editedFields(body, current, organizations, companies = []) {
+export function editedFields(body, current, organizations, companies = []) {
   const f = {...current};
   if (body.docType !== undefined) {
     if (!DOC_TYPES.includes(body.docType)) throw new AppError(400, '文件類型不正確');
@@ -99,34 +98,10 @@ export async function handleFinance(req, res, {store, session, method, path: p, 
     }), true;
   }
 
-  if (p === '/api/finance/inbox' && method === 'POST') {
-    const boundary = /multipart\/form-data;\s*boundary=([^;]+)/i.exec(req.headers['content-type'] || '')?.[1]?.trim().replace(/^"|"$/g, '');
-    if (!boundary) throw new AppError(400, '請用檔案上傳');
-    const parts = parseMultipart(await readRaw(req, 60 * 1024 * 1024), boundary).filter((x) => x.filename && x.body?.length);
-    if (!parts.length) throw new AppError(400, '請選擇檔案');
-    if (parts.length > FINANCE_MAX_FILES) throw new AppError(400, `一次最多 ${FINANCE_MAX_FILES} 個檔案`);
-    for (const part of parts) {
-      if (!isAllowedFinanceUpload(part.filename)) throw new AppError(400, `「${part.filename}」格式不支援，請上傳照片、PDF、Excel 或 CSV`);
-      if (part.body.length > FINANCE_UPLOAD_LIMIT) throw new AppError(400, `「${part.filename}」超過 20MB`);
-    }
-    financeRoot();
-    const state = await store.read();
-    const organizations = state.organizations || [];
-    const results = [];
-    for (const part of parts) {
-      const hash = sha256(part.body);
-      const existing = await fin.bySha(hash);
-      if (existing) { results.push({...publicDoc(existing), duplicate: true}); continue; }
-      const saved = await saveToInbox({buf: part.body, originalName: part.filename});
-      const doc = {id: crypto.randomUUID(), sha256: hash, status: 'processing', originalName: part.filename, storedPath: saved.storedPath, mime: financeMime(part.filename), size: saved.size, createdBy: actor};
-      await fin.insert(doc);
-      results.push(publicDoc(await processDocument({store, fin, id: doc.id, absPath: saved.abs, organizations, config, classify, actor, companies: await fin.companies()})));
-    }
-    return send(req, res, 200, {documents: results, counts: await fin.counts()}), true;
-  }
+  // 上傳（含舊網址 /api/finance/inbox）改由「收件匣」處理：見 inbox-routes.mjs。
 
   if (p === '/api/finance/documents' && method === 'GET') {
-    const rows = await fin.list({status: url.searchParams.get('status') || 'all', month: url.searchParams.get('month') || '', limit: url.searchParams.get('limit')});
+    const rows = await fin.list({status: url.searchParams.get('status') || 'all', month: url.searchParams.get('month') || '', limit: url.searchParams.get('limit'), scope: url.searchParams.get('scope') || ''});
     return send(req, res, 200, {documents: rows.map(publicDoc), counts: await fin.counts()}), true;
   }
 
@@ -134,6 +109,8 @@ export async function handleFinance(req, res, {store, session, method, path: p, 
   if (m) {
     const doc = await fin.get(m[1]);
     const action = m[2] || '';
+    if (action && action !== 'file' && ((doc.route && doc.route !== 'finance') || doc.pii)) throw new AppError(409, '這份文件不是財務文件，請到「收件匣」處理');
+    if (action === 'file' && doc.pii) throw new AppError(409, '個資文件請到「收件匣」開啟');
     if (action === 'file' && method === 'GET') {
       const abs = safeJoinRoot(financeRoot(), doc.stored_path);
       let st;
@@ -248,10 +225,10 @@ export async function handleFinance(req, res, {store, session, method, path: p, 
 }
 
 /** 辨識一份已存進收件匣的文件；有把握就自動歸檔，否則留在「待確認」。 */
-export async function processDocument({store, fin, id, absPath, organizations, config, classify, actor, allowAuto = true, companies}) {
+export async function processDocument({store, fin, id, absPath, organizations, config, classify, actor, allowAuto = true, companies, raw: given = null}) {
   const doc = await fin.get(id);
-  let raw;
-  try {
+  let raw = given;
+  if (!raw) try {
     raw = classify
       ? await classify({absPath, filename: doc.original_name, organizations})
       : await classifyWithGemini({absPath, filename: doc.original_name, organizations, rules: await fin.rules(), companies, config});

@@ -69,8 +69,8 @@ export function isAllowedFinanceUpload(name) {
 }
 
 const n = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Math.round(Number(v) * 100) / 100);
-const normKey = (v) => String(v || '').normalize('NFKC').toLowerCase().replace(/[\s·・．.（）()／/—–\-]/g, '').replace(/(股份有限公司|有限公司|企業社|公司|商行|行號)$/, '');
-const taipeiToday = () => new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit'}).format(new Date());
+export const normKey = (v) => String(v || '').normalize('NFKC').toLowerCase().replace(/[\s·・．.（）()／/—–\-]/g, '').replace(/(股份有限公司|有限公司|企業社|公司|商行|行號)$/, '');
+export const taipeiToday = () => new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit'}).format(new Date());
 
 /** 民國年與各種寫法轉成 YYYY-MM-DD；無效回 null。 */
 export function normalizeDate(value) {
@@ -159,7 +159,7 @@ export function spreadsheetText(absPath, {timeoutMs = 20000} = {}) {
   });
 }
 
-export async function classifyWithGemini({absPath, filename, organizations, rules, companies, config}) {
+export async function classifyWithGemini({absPath, filename, organizations, rules, companies, config, prompt, schema = CLASSIFY_SCHEMA}) {
   if (!config?.key || config.key === 'PASTE_YOUR_KEY_HERE') throw new AppError(503, '尚未在 NAS 設定 Gemini API Key，無法自動辨識');
   const ext = path.extname(filename || absPath).toLowerCase();
   let parts;
@@ -170,7 +170,7 @@ export async function classifyWithGemini({absPath, filename, organizations, rule
     const text = await spreadsheetText(absPath);
     parts = [{text: `檔名：${filename}\n以下是試算表內容（每列以 Tab 分隔，只列出前段）：\n${text}`}];
   }
-  return generateJson({system: classifyPrompt({organizations, rules, companies}), parts, schema: CLASSIFY_SCHEMA, key: config.key, model: config.model || 'gemini-3.1-flash-lite'});
+  return generateJson({system: prompt || classifyPrompt({organizations, rules, companies}), parts, schema, key: config.key, model: config.model || 'gemini-3.1-flash-lite'});
 }
 
 /** 對照名錄：AI 給的 orgId 必須存在；再用已學會的規則（統編、名稱），最後用名稱／別名完全相符。 */
@@ -295,6 +295,23 @@ CREATE TABLE IF NOT EXISTS fin_documents (
   filed_at timestamptz
 );
 CREATE INDEX IF NOT EXISTS fin_documents_status ON fin_documents(status, created_at);
+-- 收件匣（什麼檔案都收）：route = finance／card／hr／resignation／salary；pii = 檔案加密暫存在資料庫，確認後才搬到 NAS
+ALTER TABLE fin_documents ADD COLUMN IF NOT EXISTS route text;
+ALTER TABLE fin_documents ADD COLUMN IF NOT EXISTS pii boolean NOT NULL DEFAULT false;
+ALTER TABLE fin_documents ADD COLUMN IF NOT EXISTS target jsonb;
+CREATE TABLE IF NOT EXISTS inbox_pii_blobs (
+  doc_id text PRIMARY KEY REFERENCES fin_documents(id) ON DELETE CASCADE,
+  enc bytea NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS inbox_audit (
+  id bigserial PRIMARY KEY,
+  doc_id text,
+  action text NOT NULL,
+  actor text NOT NULL,
+  detail text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS fin_entries (
   id text PRIMARY KEY,
   month text NOT NULL,
@@ -369,8 +386,9 @@ export class FinanceStore {
     vals.push(id);
     await this.pool.query(`UPDATE fin_documents SET ${cols.join(',')}, updated_at=now() WHERE id=$${vals.length}`, vals);
   }
-  async list({status, month, limit = 200} = {}) {
+  async list({status, month, limit = 200, scope} = {}) {
     const where = [], vals = [];
+    if (scope === 'finance') where.push("(route IS NULL OR route='finance')");
     if (status && status !== 'all') { vals.push(status); where.push(`status=$${vals.length}`); }
     if (month) { vals.push(month); where.push(`fields->>'month'=$${vals.length}`); }
     vals.push(Math.min(Number(limit) || 200, 500));
@@ -578,7 +596,7 @@ export function financeRoot() {
   return root;
 }
 
-async function moveFile(src, dest) {
+export async function moveFile(src, dest) {
   try { await rename(src, dest); }
   catch (e) {
     if (e?.code !== 'EXDEV') throw e;
@@ -635,5 +653,6 @@ export function publicDoc(row) {
     id: row.id, status: row.status, originalName: row.original_name, storedPath: row.stored_path, mime: row.mime, size: Number(row.size),
     fields: row.fields || {}, questions: row.questions || [], confidence: row.confidence === null || row.confidence === undefined ? null : Number(row.confidence),
     error: row.error || null, createdAt: row.created_at, filedAt: row.filed_at || null,
+    route: row.route || 'finance', pii: Boolean(row.pii), target: row.target || null,
   };
 }

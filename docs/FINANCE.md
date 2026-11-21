@@ -46,3 +46,7 @@
 - `HR_SHEET_SYNC_MINUTES` 預設改為 10，NAS compose.yaml 需同步。
 - 新環境變數（選填）：`FINANCE_FIRESTORE_PROJECT`（預設 hotel-inventory-3a1ad）、`FINANCE_COMPANY_TAX_IDS`（逗號分隔，預設 96842769）、`FINANCE_AUTO_CONFIDENCE`。compose.yaml 已加，NAS 的 compose.yaml 需手動同步。
 - 需要 `NAS_DIRECTORY_ROOT` 已掛載（compose.directory-docs.yaml）。
+
+## 收件匣
+
+上傳與待確認已移到左側「收件匣」（見 [INBOX.md](INBOX.md)）；舊的 `POST /api/finance/inbox` 仍可用。財務頁保留已歸檔、損益表、設定（含 Excel 匯入）。
