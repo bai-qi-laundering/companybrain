@@ -204,6 +204,28 @@ class RealQrSizeTests(unittest.TestCase):
         self.assertEqual(tuple(decoded.shape[:2]), (1440, 2560))
 
 
+class StaleDetectPolicyTests(unittest.TestCase):
+    def test_keeps_successful_decode_after_slow_native_pass(self):
+        # NAS timings: 1280 miss + native table ROI is typically 2.5-4.1s.
+        frame_t = 100.0
+        decode_done = 104.0
+        newest = 104.0
+        self.assertTrue(cl.detection_is_stale(frame_t, decode_done, newest))
+        self.assertFalse(cl.should_drop_decoded_frame('日航制服', frame_t, decode_done, newest))
+        self.assertTrue(cl.should_drop_decoded_frame('', frame_t, decode_done, newest))
+
+    def test_still_drops_empty_stale_frame_but_not_a_fresh_empty(self):
+        self.assertTrue(cl.should_drop_decoded_frame('', 100.0, 100.9, 100.9))
+        self.assertFalse(cl.should_drop_decoded_frame('', 100.0, 100.2, 100.2))
+        self.assertFalse(cl.should_drop_decoded_frame('H2O客衣', 100.0, 100.2, 100.2))
+
+    def test_fast_path_miss_does_not_clear_thorough_code(self):
+        self.assertFalse(cl.should_clear_seen_code('', thorough=False))
+        self.assertTrue(cl.should_clear_seen_code('', thorough=True))
+        self.assertFalse(cl.should_clear_seen_code('日航制服', thorough=False))
+        self.assertFalse(cl.should_clear_seen_code('日航制服', thorough=True))
+
+
 class LoadStateTests(unittest.TestCase):
     def test_restores_capture_id(self):
         cl._capture_id = 0

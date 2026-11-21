@@ -371,6 +371,35 @@ def decode_qr(detector, frame, thorough=True):
     return ''
 
 
+def detection_is_stale(frame_t, decode_done_t, newest_t, stale=FRAME_STALE_SECONDS):
+    """True when the decoded frame is older than the stale window."""
+    return (decode_done_t - frame_t) > stale or (newest_t - frame_t) > stale
+
+
+def should_drop_decoded_frame(code, frame_t, decode_done_t, newest_t, stale=FRAME_STALE_SECONDS):
+    """Keep a successful decode even if the 2560 pass ran longer than 0.75s.
+
+    On the NAS, a 1280 miss plus native table-ROI decode typically takes 2.5-4s,
+    which is always over FRAME_STALE_SECONDS. Dropping those hits made 8 cm
+    cards invisible in production even though decode_qr itself succeeded.
+    Empty results may still be ignored when stale so a later fresh frame is used.
+    """
+    if code:
+        return False
+    return detection_is_stale(frame_t, decode_done_t, newest_t, stale)
+
+
+def should_clear_seen_code(code, thorough):
+    """Fast-path misses must not clear a code that only the thorough pass can read.
+
+    After a native-ROI hit, the next tick is often 1280-only. Clearing the
+    seen code there would reset STABLE_SECONDS and a photo would never be saved.
+    """
+    if code:
+        return False
+    return bool(thorough)
+
+
 def current_stage():
     with _lock:
         return _stage
@@ -844,11 +873,12 @@ def main(uris=None):
                 time.sleep(leftover)
             with latest_lock:
                 newest_t = latest['t']
-            if (now - frame_t) > FRAME_STALE_SECONDS or (newest_t - frame_t) > FRAME_STALE_SECONDS:
+            if should_drop_decoded_frame(code, frame_t, now, newest_t):
                 continue
             if not code:
-                last_seen_code = None
-                seen_since = 0.0
+                if should_clear_seen_code(code, thorough):
+                    last_seen_code = None
+                    seen_since = 0.0
                 continue
             if code != last_seen_code:
                 last_seen_code = code
