@@ -82,8 +82,9 @@ def _jpeg_bytes(image, quality):
 def encode_photo(frame, original_jpeg=None):
     """Upload the saved JPG as-is when it already fits; otherwise encode a full-res JPEG (max 10MB).
 
-    Detection still runs on downscaled frames; this only affects the saved/uploaded photo.
-    Downscale only as a last resort if even low quality cannot fit the LINE limit.
+    The uploaded/saved photo is the native stream frame from detection time,
+    not a downscaled detect preview. Downscale only as a last resort if even
+    low quality cannot fit the LINE limit.
     """
     if original_jpeg and len(original_jpeg) <= MAX_JPEG:
         return original_jpeg
@@ -318,40 +319,55 @@ def _decode_one(detector, image):
     return (code or '').strip(), pts
 
 
+def _try_decode_region(detector, frame, image, scale, offset=(0, 0)):
+    """Decode `image`; if only a quad is found, retry a native crop of `frame`."""
+    code, pts = _decode_one(detector, image)
+    if code:
+        return code
+    if pts is not None and len(pts):
+        quad = _quad_to_native(pts, scale, offset)
+        if quad is not None:
+            code, _ = _decode_one(detector, _crop_around_quad(frame, quad))
+            if code:
+                return code
+    return ''
+
+
 def decode_qr(detector, frame, thorough=True):
     """Read a QR code. Must never run on the RTSP capture thread.
 
-    Try the proven 1280-wide path first. If that is empty and thorough=True,
-    try a mid-width (default 1600) pass on the table region, and a
-    native-resolution crop around any detected quad. The cheap path is used
-    most of the time so the NAS is not at 300%+ CPU. Do not run
-    detectAndDecode on a full 2560 frame.
+    The original pipeline shrinks the frame to 1280-wide and runs
+    OpenCV's QRCodeDetector. Keep that as the cheap fast path on every
+    detect tick.
+
+    PR #9 tried the native 2560-wide frame first so an 8 cm symbol stayed
+    large enough, then fell back to 1280. PR #10 reverted that because
+    detectAndDecode on the uncropped 2560 frame pushed the NAS above 300%
+    CPU. When thorough=True, restore a native-resolution pass on the table
+    ROI only (OSD margins cropped), then the mid-width (1600) pass, and a
+    native crop around any detected quad. Do not run detectAndDecode on
+    the uncropped full 2560 frame.
     """
     if frame is None or getattr(frame, 'size', 0) == 0:
         return ''
     small, scale = _resize_to_width(frame, DETECT_FAST_WIDTH)
-    code, pts = _decode_one(detector, small)
+    code = _try_decode_region(detector, frame, small, scale)
     if code:
         return code
-    if pts is not None and len(pts):
-        quad = _quad_to_native(pts, scale)
-        if quad is not None:
-            code, _ = _decode_one(detector, _crop_around_quad(frame, quad))
-            if code:
-                return code
     if not thorough:
         return ''
     roi, offset = _table_roi(frame)
+    # Native table pass restores PR #9's 8 cm capability without scanning
+    # the full uncropped 2560 frame. Skip when the stream is already <=1280.
+    if roi.shape[1] > DETECT_FAST_WIDTH:
+        code = _try_decode_region(detector, frame, roi, 1.0, offset)
+        if code:
+            return code
     mid, mid_scale = _resize_to_width(roi, DETECT_MID_WIDTH)
-    code, pts = _decode_one(detector, mid)
-    if code:
-        return code
-    if pts is not None and len(pts):
-        quad = _quad_to_native(pts, mid_scale, offset)
-        if quad is not None:
-            code, _ = _decode_one(detector, _crop_around_quad(frame, quad))
-            if code:
-                return code
+    if mid.shape[1] < roi.shape[1]:
+        code = _try_decode_region(detector, frame, mid, mid_scale, offset)
+        if code:
+            return code
     return ''
 
 
