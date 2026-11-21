@@ -5,6 +5,10 @@ import {fileURLToPath} from 'node:url';
 import path from 'node:path';
 import {guessMapping, parseCsv, parseSheetRows, compareSalaryRows, parseMonth, parseAmount, isSummaryEmployeeId, isSalarySummaryRow, baiqiSalaryId, baiqiSalaryColumnKey, salaryColumnMap, salaryImportCoverage, SETUP_INSTRUCTIONS} from '../backend/hr-salary-import.mjs';
 
+// Never touch real Google credentials from tests (an env key once made a test append to the live sheet).
+delete process.env.GOOGLE_SA_JSON; delete process.env.GOOGLE_SA_JSON_B64; delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+process.env.HR_SHEET_WRITE = 'off';
+
 const fixture = fileURLToPath(new URL('./fixtures/salary-sheet.csv', import.meta.url));
 
 test('guesses 薪資計算明細 headers and parses only employee summary rows', async () => {

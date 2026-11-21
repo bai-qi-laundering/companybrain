@@ -11,6 +11,10 @@ import {createHandler} from '../backend/app.mjs';
 import {openPglite} from '../scripts/pglite-pool.mjs';
 import {prepareDocFolders} from '../scripts/seed-hr.mjs';
 
+// Never touch real Google credentials from tests (an env key once made a test append to the live sheet).
+delete process.env.GOOGLE_SA_JSON; delete process.env.GOOGLE_SA_JSON_B64; delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+process.env.HR_SHEET_WRITE = 'off';
+
 const root = fileURLToPath(new URL('..', import.meta.url));
 const origin = 'http://companybrain.test';
 

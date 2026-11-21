@@ -4,7 +4,8 @@ import {Store} from './store.mjs';
 import {createHandler} from './app.mjs';
 import {createLineService} from './line.mjs';
 import {HrStore} from './hr-store.mjs';
-import {createSheetSync} from './hr-sheet-sync.mjs';
+import {createSheetSync, syncIntervalMinutes} from './hr-sheet-sync.mjs';
+import {createSheetWriter} from './hr-sheet-write.mjs';
 import {FinanceStore} from './finance.mjs';
 import {startRevenueRefresh} from './finance-revenue.mjs';
 const env=process.env;
@@ -15,6 +16,7 @@ if(secure&&!origin.startsWith('https://'))throw new Error('Secure mode requires 
 const store=new Store();await store.init(env.ADMIN_USER||'admin1',env.ADMIN_PASSWORD);
 const hr=new HrStore(store.pool);await hr.ensure();
 hr.sheetSync=createSheetSync({hr});await hr.sheetSync.ensure();hr.sheetSync.start();
+hr.sheetWriter=createSheetWriter({hr});await hr.sheetWriter.ensure();hr.onBankSaved=(id)=>hr.sheetWriter.fillOwned({employeeId:id,actor:'bank-saved'});hr.sheetWriter.start({intervalMinutes:syncIntervalMinutes()});
 const config={origin,secure,key:env.GEMINI_API_KEY||'',model:env.GEMINI_MODEL||'gemini-3.1-flash-lite',lineSecret:env.LINE_CHANNEL_SECRET||'',lineToken:env.LINE_CHANNEL_ACCESS_TOKEN||'',lineAllowedUsers:env.LINE_ALLOWED_USER_IDS||'',garmentAdminUserIds:env.GARMENT_ADMIN_LINE_USER_IDS||'',garmentNotifyToken:env.GARMENT_NOTIFY_TOKEN||'',cameraApiKey:env.CAMERA_API_KEY||'',cameraLinkKey:env.CAMERA_LINK_KEY||'',cameraAdminUserIds:env.CAMERA_ADMIN_LINE_USER_IDS||'',lineAccess:env.LINE_ACCESS_MODE||'friends',lineReminders:env.LINE_REMINDERS_ENABLED!=='false',linePushFallback:env.LINE_PUSH_FALLBACK!=='false',reminderHour:Number(env.LINE_REMINDER_HOUR||8)};
 if(!Number.isInteger(config.reminderHour)||config.reminderHour<0||config.reminderHour>23)throw new Error('LINE_REMINDER_HOUR must be 0..23');
 {const fin=new FinanceStore(store.pool);await fin.ensure();store.finance=fin;store.financeReady=true;startRevenueRefresh({fin});}

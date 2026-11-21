@@ -4,6 +4,10 @@ import {HrStore} from '../backend/hr-store.mjs';
 import {openPglite} from '../scripts/pglite-pool.mjs';
 import {parseSheetDate, parseEmployeeTab, planEmployeeSync, planSalarySync, createSheetSync, syncIntervalMinutes} from '../backend/hr-sheet-sync.mjs';
 
+// Never touch real Google credentials from tests (an env key once made a test append to the live sheet).
+delete process.env.GOOGLE_SA_JSON; delete process.env.GOOGLE_SA_JSON_B64; delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+process.env.HR_SHEET_WRITE = 'off';
+
 const EMP_HEAD = ['員工編號', '姓名', 'LINE ID', '部門', '計薪型態', '到職日', '實際最後在職日', '', '', '', '', '組長身分', '職稱'];
 const SAL_HEAD = ['計算月份', '最後打卡日期', '員工編號', '員工姓名', '員工部門', '職稱', '匯款類型', '薪資類型', '實領薪資'];
 
@@ -117,16 +121,14 @@ test('runSync writes employees + ledger, logs each run, and a second run is a no
   assert.equal((await hr.getEmployee('F011')).departureDate, '');
   const r = await sync.run({actor: 'admin1'});
   assert.equal(r.employeeApplied, 3);
-  assert.equal(r.salaryApplied, 1);
+  assert.equal(r.salaryApplied, 0);
   const f011 = await hr.getEmployee('F011');
   assert.equal(f011.departureDate, '2026-10-11');
   assert.equal(f011.arrivalDate, '2026-10-05');
   assert.equal((await hr.getEmployee('D001')).job, '物流司機');
   const state = await hr.state();
-  const sal = state.salaries.filter((s) => s.month === '2026-10');
-  assert.equal(sal.find((s) => s.employeeId === 'F011').netPay, 5000);
-  assert.equal(sal.find((s) => s.employeeId === 'D001').netPay, 42000, 'paid month untouched');
-  assert.ok(r.flags.find((f) => f.type === 'salary-paid-changed'));
+  assert.equal(state.salaries.find((s) => s.employeeId === 'D001' && s.month === '2026-10').netPay, 42000);
+  assert.equal(state.salaries.filter((s) => s.employeeId === 'F011').length, 0, 'salary sync is off');
   assert.ok(r.flags.find((f) => f.type === 'bad-date' && f.employeeId === 'F109') || r.flags.find((f) => f.type === 'sheet-only' && f.employeeId === 'F109'));
   const again = await sync.run({trigger: 'schedule'});
   assert.equal(again.employeeApplied, 0);
@@ -135,7 +137,7 @@ test('runSync writes employees + ledger, logs each run, and a second run is a no
   assert.equal(st.logs.length, 3);
   assert.equal(st.lastSuccess.trigger, 'schedule');
   const audit = await pool.query("SELECT count(*)::int AS n FROM hr_audit WHERE action LIKE '試算表同步%'");
-  assert.ok(audit.rows[0].n >= 3);
+  assert.ok(audit.rows[0].n >= 2);
 });
 
 test('runSync failure is logged and reported, unconfigured is a clear 400', async () => {
@@ -181,28 +183,16 @@ test('GOOGLE_SA_JSON_B64 is decoded and preferred over GOOGLE_SA_JSON', async ()
   }
 });
 
-test('薪資計算明細 is overwritten on each 算薪水; every month/person snapshot seen is kept, 已匯 never overwritten', async () => {
+test('實領薪資 is no longer synced from the sheet (owner uploads pay himself)', async () => {
   const {pool} = openPglite();
   const hr = new HrStore(pool);
   await hr.ensure();
   await hr.upsertEmployee('D001', {name: '甲', department: '物流'}, 'admin1', {create: true});
-  await hr.upsertEmployee('F011', {name: '乙', department: '摺疊'}, 'admin1', {create: true});
-  const emp = [EMP_HEAD, ['D001', '甲', '', '物流', '正職'], ['F011', '乙', '', '摺疊', '兼職']];
-  let tab;
+  const emp = [EMP_HEAD, ['D001', '甲', '', '物流', '正職']];
+  const tab = [SAL_HEAD, ['2026/09', '2026/09/30', 'D001', '甲', '物流', '', '匯款', '正職', '40000']];
   const sync = createSheetSync({hr, loadValues: async () => ({'員工資料': emp, '薪資計算明細': tab}), statusImpl: async () => ({configured: true})});
-  // 第一次只算了甲 9 月
-  tab = [SAL_HEAD, ['2026/09', '2026/09/30', 'D001', '甲', '物流', '', '匯款', '正職', '40000']];
-  await sync.run({actor: 't'});
-  // 接著算了乙 10 月（分頁被整頁覆蓋，甲 9 月已不在分頁上）
-  tab = [SAL_HEAD, ['2026/10', '2026/10/31', 'F011', '乙', '摺疊', '', '現金', '兼職', '5000']];
-  await sync.run({actor: 't'});
-  // 甲 9 月標記已匯後，分頁又出現不同金額 → 不覆蓋
-  const sep = (await hr.state()).salaries.find((s) => s.employeeId === 'D001' && s.month === '2026-09');
-  await pool.query("UPDATE hr_salaries SET status='已匯' WHERE id=$1", [sep.id]);
-  tab = [SAL_HEAD, ['2026/09', '2026/09/30', 'D001', '甲', '物流', '', '匯款', '正職', '41000']];
   const r = await sync.run({actor: 't'});
-  assert.ok(r.flags.find((f) => f.type === 'salary-paid-changed'));
-  const all = (await hr.state()).salaries;
-  assert.equal(all.find((s) => s.employeeId === 'D001' && s.month === '2026-09').netPay, 40000);
-  assert.equal(all.find((s) => s.employeeId === 'F011' && s.month === '2026-10').netPay, 5000);
+  assert.equal(r.salaryApplied, 0);
+  assert.deepEqual(r.salaryWrites, []);
+  assert.equal((await hr.state()).salaries.length, 0);
 });

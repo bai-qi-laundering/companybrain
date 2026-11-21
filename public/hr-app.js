@@ -10,7 +10,7 @@
   const PAY_TYPES = ['正職', '兼職'];
   const PAY_METHODS = ['匯款', '現金'];
   const DEFAULT_PREFIXES = {物流:'D',摺疊:'F',撐開:'H',洗滌:'W',洗滓:'W',辦公室:'O',行政:'O'};
-  const PREFIX_CHOICES = {洗滌:['W','E'],洗滓:['W','E']};
+  const PREFIX_CHOICES = {洗滌:['W'],洗滓:['W']};
   const STANDARD_DEPARTMENT_JOBS = [['辦公室','行政'],['洗滌','洗滌人員'],['摺疊','現場作業員'],['撐開','現場作業員'],['物流','新進司機'],['物流','司機'],['摺疊','作業員'],['撐開','作業員'],['洗滌','早班作業員']];
   const STANDARD_DEPARTMENTS = [...new Set(STANDARD_DEPARTMENT_JOBS.map((row) => row[0]))];
   const STANDARD_JOBS = [...new Set(STANDARD_DEPARTMENT_JOBS.map((row) => row[1]))];
@@ -229,7 +229,7 @@
   }
   function prefixChoicesFor(department) {
     const d = String(department || '').trim();
-    return PREFIX_CHOICES[d] || PREFIX_CHOICES[d === '洗滓' ? '洗滌' : d] || (prefixFor(d) ? [prefixFor(d)] : ['D','F','H','W','E','O']);
+    return PREFIX_CHOICES[d] || PREFIX_CHOICES[d === '洗滓' ? '洗滌' : d] || (prefixFor(d) ? [prefixFor(d)] : ['D','F','H','W','O']);
   }
   function officialJobs() {
     return state.jobTitlesOfficial || STANDARD_JOBS;
@@ -507,6 +507,9 @@
     if ((m = path.match(/^\/api\/hr\/salaries\/([^/]+)$/)) && method === 'DELETE') {
       state.salaries = (state.salaries || []).filter((s) => s.id !== m[1]);
       saveDemo(); return {ok: true};
+    }
+    if (/\/sheet-write\/retry$/.test(path) && method === 'POST') {
+      return {status: 'written', label: '示範模式：不會寫入試算表'};
     }
     if (path === '/api/hr/sheet-sync' && method === 'GET') {
       return {configured: true, source: 'demo', intervalMinutes: 60, logs: [], last: null, lastSuccess: null, flagLabels: {}};
@@ -819,6 +822,13 @@
     await reload();
   }
 
+  function sheetRowBanner(sr) {
+    if (!sr) return '';
+    const ok = sr.status === 'written';
+    const rows = sr.rows || {};
+    const where = [rows['員工資料'] ? '員工資料第 ' + rows['員工資料'] + ' 列' : '', rows['薪資設定'] ? '薪資設定第 ' + rows['薪資設定'] + ' 列' : ''].filter(Boolean).join('、');
+    return `<div class="${ok ? 'muted' : 'import-warning'}" data-sheet-row style="margin:6px 0">${ok ? '已寫入打卡算薪水試算表' + (where ? '（' + esc(where) + '）' : '') + '；之後補齊的部門、計薪型態、到職日、職稱與存簿（匯款）會自動補到空白欄。' : '<strong>' + esc(sr.label || '未寫入試算表') + '</strong>' + (sr.error ? '：' + esc(sr.error) : '')} <button type="button" class="hr-btn ghost" data-act="sheet-retry">${ok ? '立即補欄' : '重試'}</button></div>`;
+  }
   function paintProfile(root, id) {
     const e = state.employees.find((x) => x.id === id);
     if (!e) { route = {page: 'list'}; return paintStaff(root); }
@@ -827,6 +837,7 @@
     const miss = missingPaper(e);
     root.innerHTML = `
       <div class="hr-toolbar"><button class="hr-btn ghost" data-act="back">← 返回員工名錄</button><span class="muted">${esc(e.id)}</span></div>
+      ${sheetRowBanner(state.sheetRow && state.sheetRow.employeeId === id ? state.sheetRow : null)}
       <div class="profile">
         <div class="profile-main">
           <section class="hr-card">
@@ -910,6 +921,11 @@
         </div>
       </div>`;
     $('[data-act="back"]', root).onclick = () => { route = {page: 'list'}; paintStaff(root); };
+    { const rb = $('[data-act="sheet-retry"]', root); if (rb) rb.onclick = async () => {
+      rb.disabled = true;
+      try { const r = await write('/api/hr/employees/' + encodeURIComponent(id) + '/sheet-write/retry', 'POST', {}); toast(r && r.label ? r.label : '已處理'); await refresh({view: 'profile', id}); paintProfile(root, id); }
+      catch (err) { toast(err.message); rb.disabled = false; }
+    }; }
         bindDeptJob($('#emp-inline', root));
     $('#emp-inline', root).onsubmit = async (ev) => {
       ev.preventDefault();
@@ -1244,7 +1260,7 @@
         return;
       }
       const logs = (st.logs || []).map((l) => `<tr><td>${esc(fmtTaipei(l.startedAt))}</td><td>${esc(SYNC_TRIGGER[l.trigger] || l.trigger)}</td><td>${l.ok ? '<span class="pill ok">成功</span>' : '<span class="pill warn">失敗</span>'}</td><td>${l.ok ? `員工 ${l.counts.employeeApplied}、薪資 ${l.counts.salaryApplied}、需注意 ${l.counts.flags}` : esc(l.error || '')}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">還沒有同步紀錄。</td></tr>';
-      shell(`<p class="muted">單向同步：打卡算薪水試算表 → 百麒大腦。「員工資料」的實際最後在職日、職稱以試算表為準；到職日只補空白；「薪資計算明細」的實領薪資寫進每月實發金額（已匯的月份不會被改）。不會寫回試算表。${st.intervalMinutes ? '每 ' + esc(st.intervalMinutes) + ' 分鐘自動同步一次。' : '自動同步已關閉。'}</p>
+      shell(`<p class="muted">試算表 → 百麒大腦：「員工資料」的實際最後在職日、職稱以試算表為準；到職日只補空白。薪資不再同步。百麒大腦 → 試算表：只針對在百麒大腦「報到並轉為員工」新增的人，補空白欄與存簿後的匯款類型，不改舊資料。${st.intervalMinutes ? '每 ' + esc(st.intervalMinutes) + ' 分鐘自動同步一次。' : '自動同步已關閉。'}</p>
         <p>上次成功：${esc(fmtTaipei(st.lastSuccess && st.lastSuccess.finishedAt))}</p>
         <div class="hr-toolbar"><button class="hr-btn" type="button" data-run>立即同步</button><button class="hr-btn ghost" type="button" data-preview>預覽（不寫入）</button><button class="hr-btn ghost" type="button" data-cancel>關閉</button></div>
         <div data-result>${result ? paintResult(result) : ''}</div>
@@ -1639,18 +1655,49 @@
     const c = state.candidates.find((x) => x.id === id);
     const choices = prefixChoicesFor(c.department);
     const preview = nextEmpId(c.department, choices[0]);
+    if (!demo && ctx.api) {
+      ctx.api('/api/hr/next-employee-id?department=' + encodeURIComponent(c.department || '') + '&prefix=' + encodeURIComponent(choices[0] || ''))
+        .then((r) => { const el = root.querySelector('[data-id-preview]'); if (el && r && r.id) el.textContent = r.id; })
+        .catch(() => {});
+    }
+    const startDept = (() => { const d = String(c.department || '').trim(); const n = d === '洗滓' ? '洗滌' : d === '行政' ? '辦公室' : d; return STANDARD_DEPARTMENTS.includes(n) ? n : ''; })();
+    const startJob = (DEPARTMENT_JOBS[startDept] || []).includes(String(c.job || '').trim()) ? String(c.job).trim() : '';
+    const jobOpts = (d, v) => ['<option value="">（未定，之後補）</option>', ...(DEPARTMENT_JOBS[d] || []).map((j) => `<option ${j === v ? 'selected' : ''}>${esc(j)}</option>`)].join('');
     dlg(root, '報到並轉為員工',
-      `<p class="muted">員工編號依打卡計薪規則自動給「部門字首＋流水號」（物流 D、摺疊 F、撐開 H、洗滌 W／E、辦公室／行政 O）。既有編號原樣保留。預覽：<strong>${esc(preview || '請選擇字首')}</strong>。並帶入報到清單。</p>` + deptCombo('department', '部門', c.department) + `<div class="field"><span>編號字首</span><select name="prefix">${choices.map((p) => `<option>${p}</option>`).join('')}</select></div>` + jobCombo('job', '職稱', c.job, c.department) + sel('employmentType', '雇用型態', TYPES, '正職') + sel('payType', '計薪型態', PAY_TYPES, '正職') + sel('paymentMethod', '匯款類型', PAY_METHODS, '匯款') + field('lineId', 'LINE ID', '') + field('arrivalDate', '到職日', c.availableDate || today(), 'date') + field('phone', '電話', c.phone),
+      `<p class="muted">員工編號依打卡計薪規則自動給「部門字首＋流水號」（物流 D、摺疊 F、撐開 H、洗滌 W、辦公室 O），會避開試算表上已用過的編號。預覽：<strong data-id-preview>${esc(preview || '請選擇字首')}</strong>（以送出時為準）。轉為員工後會立刻在打卡算薪水試算表「員工資料」與「薪資設定」各新增一列；部門＋職稱只能選試算表「部門預設值」裡的組合，薪資欄（底薪／時薪、加班費率、勞健保、津貼…）會照「部門預設值」當下的數字帶入空白欄。兼職一律寫成 部門 兼職、職稱 兼職。沒填的欄位留空，之後補上會自動帶入空白欄；匯款類型先填現金，存簿確認後改匯款。</p>`
+      + `<div class="field"><span>部門（工作區域）</span><select name="department">${['', ...STANDARD_DEPARTMENTS].map((d) => `<option value="${esc(d)}" ${d === startDept ? 'selected' : ''}>${esc(d || '（請選擇）')}</option>`).join('')}</select></div>`
+      + `<div class="field"><span>編號字首</span><select name="prefix">${choices.map((p) => `<option>${p}</option>`).join('')}</select></div>`
+      + sel('payType', '計薪型態', PAY_TYPES, '正職')
+      + `<div class="field"><span>職稱</span><select name="job" data-conv-job>${jobOpts(startDept, startJob)}</select><small class="muted" data-conv-pt hidden>兼職：試算表寫 部門 兼職、職稱 兼職（時薪依部門預設值）</small></div>`
+      + sel('employmentType', '雇用型態', TYPES, '正職') + sel('paymentMethod', '匯款類型', PAY_METHODS, '現金') + field('lineId', 'LINE ID', '') + field('arrivalDate', '到職日', c.availableDate || today(), 'date') + field('phone', '電話', c.phone),
       async (f) => {
         const body = Object.fromEntries(['department', 'job', 'employmentType', 'payType', 'paymentMethod', 'lineId', 'arrivalDate', 'phone', 'prefix'].map((k) => [k, f.elements[k].value]));
+        if (body.payType === '兼職') body.job = '兼職';
+        if (!body.department) throw new Error('請選擇部門（工作區域），用來決定員工編號字首');
         const r = await write('/api/hr/candidates/' + id + '/convert', 'POST', body);
-        toast('已轉為 ' + r.employee.id);
+        const sr = r.sheetRow;
+        toast('已轉為 ' + r.employee.id + (sr ? (sr.status === 'written' ? '，已寫入試算表' : '，' + (sr.label || '未寫入試算表') + (sr.error ? '：' + sr.error : '')) : ''));
         await refresh();
         route = {page: 'profile', id: r.employee.id};
         ctx.view = 'staff';
         if (ctx.go) ctx.go('staff', {keepRoute: true});
         else paintProfile(root, r.employee.id);
       });
+    const cf = root.querySelector('[data-conv-job]')?.form;
+    if (cf) {
+      const syncConv = () => {
+        const d = cf.elements.department.value, pt = cf.elements.payType.value === '兼職';
+        const cur = cf.elements.job.value;
+        cf.elements.job.innerHTML = pt ? '<option>兼職</option>' : jobOpts(d, cur);
+        cf.elements.job.disabled = pt;
+        cf.querySelector('[data-conv-pt]').hidden = !pt;
+        if (pt) cf.elements.employmentType.value = '兼職';
+        const pc = prefixChoicesFor(d);
+        cf.elements.prefix.innerHTML = pc.map((p) => `<option>${p}</option>`).join('');
+      };
+      cf.elements.department.addEventListener('change', syncConv);
+      cf.elements.payType.addEventListener('change', syncConv);
+    }
   }
   function openGoal(root) {
     if (!$('#hr-dialogs', root)) root.insertAdjacentHTML('beforeend', '<div id="hr-dialogs"></div>');

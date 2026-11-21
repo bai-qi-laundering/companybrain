@@ -6,6 +6,10 @@ import {encryptSecret, decryptSecret, last4, hasPiiKey} from '../backend/hr-cryp
 import {planArrivalFromInsurance, earliestEnrollmentDate} from '../backend/hr-arrival.mjs';
 import {normalizeExtract, packConfirmed, geminiReady} from '../backend/hr-ocr.mjs';
 
+// Never touch real Google credentials from tests (an env key once made a test append to the live sheet).
+delete process.env.GOOGLE_SA_JSON; delete process.env.GOOGLE_SA_JSON_B64; delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+process.env.HR_SHEET_WRITE = 'off';
+
 test('Taiwan ID checksum accepts a known valid number and rejects a bad check digit', () => {
   assert.equal(isValidTaiwanId('A123456789'), true);
   assert.equal(isValidTaiwanId('a123456789'), true);

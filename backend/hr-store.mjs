@@ -4,7 +4,7 @@ import {encryptSecret, decryptSecret, hasPiiKey, last4} from './hr-crypto.mjs';
 import {maskTaiwanId, isValidTaiwanId, normalizeTaiwanId} from './hr-twid.mjs';
 import {DEFAULT_SALARY_IMPORT} from './hr-salary-import.mjs';
 import {yearsForEmployee, decorateYear, defaultSettlement, SETTLEMENTS, DEFAULT_BASIS, endingSoon} from './hr-leave.mjs';
-import {DEFAULT_DEPT_PREFIXES, nextPrefixedId, prefixForDepartment, isUsableEmployeeId, PAY_TYPES, PAYMENT_METHODS, jobTitleOptions, STANDARD_JOBS, STANDARD_DEPARTMENTS, DEPARTMENT_JOBS} from './hr-ids.mjs';
+import {DEFAULT_DEPT_PREFIXES, nextPrefixedId, prefixForDepartment, isUsableEmployeeId, PAY_TYPES, PAYMENT_METHODS, jobTitleOptions, STANDARD_JOBS, STANDARD_DEPARTMENTS, DEPARTMENT_JOBS, convertProfileError} from './hr-ids.mjs';
 import {KEEP_RECRUITMENT_STATUS, isKeptRecruitmentStatus} from './hr-purge.mjs';
 
 export const DOC_TYPES = {identity: '身分證', bank: '存摺', license: '駕照', resume: '履歷表'};
@@ -191,7 +191,13 @@ function active(emp, day = today()) {
 }
 
 export class HrStore {
-  constructor(pool) { this.pool = pool; }
+  constructor(pool) { this.pool = pool; this.onBankSaved = null; }
+
+  /** Passbook on file → let the sheet writer flip 匯款類型 for rows companybrain created (never blocks the save). */
+  bankSaved(employeeId) {
+    if (typeof this.onBankSaved !== 'function') return;
+    Promise.resolve().then(() => this.onBankSaved(employeeId)).catch(() => {});
+  }
 
   async ensure() {
     await this.pool.query(SCHEMA);
@@ -490,12 +496,13 @@ export class HrStore {
     if (v && typeof v === 'object' && !Array.isArray(v)) return {...DEFAULT_DEPT_PREFIXES, ...v};
     return {...DEFAULT_DEPT_PREFIXES};
   }
-  async nextEmployeeId(department, prefix) {
+  /** extraIds: 員工編號 already used on the payroll sheet (員工資料 ∪ 薪資設定), so numbers are never reused. */
+  async nextEmployeeId(department, prefix, extraIds = []) {
     const map = await this.deptPrefixes();
     const p = String(prefix || prefixForDepartment(department, map) || '').trim().toUpperCase();
-    if (!/^[A-Z]{1,3}$/.test(p)) throw new AppError(400, '請選擇部門字首。打卡計薪編號為「部門字母＋流水號」（如物流 D001、摺疊 F113）；洗滌可選 W 或 E。');
+    if (!/^[A-Z]{1,3}$/.test(p)) throw new AppError(400, '請選擇部門字首。打卡計薪編號為「部門字母＋流水號」（如物流 D001、摺疊 F113、洗滌 W132）。');
     const ids = (await this.pool.query('SELECT id FROM hr_employees')).rows.map((r) => r.id);
-    return nextPrefixedId(p, ids);
+    return nextPrefixedId(p, [...ids, ...(extraIds || [])]);
   }
 
   async upsertEmployee(id, data, actor, {create} = {}) {
@@ -621,22 +628,36 @@ export class HrStore {
     } finally { c.release(); }
   }
 
-  async convert(candidateId, body, actor) {
+  async convert(candidateId, body, actor, {extraIds = []} = {}) {
     const candR = await this.pool.query('SELECT payload, revision FROM hr_candidates WHERE id=$1', [candidateId]);
     if (!candR.rowCount) throw new AppError(404, '找不到應徵者');
     const cand = candR.rows[0].payload;
     if (cand.employeeId) throw new AppError(409, '這位應徵者已轉為員工 ' + cand.employeeId);
+    const convPayType = body.payType || (body.employmentType === '兼職' || body.employmentType === '時薪' ? '兼職' : '正職');
+    const convDept = body.department || cand.department;
+    // An applicant's free-text 職稱 is only carried over when it is a 部門預設值 title; otherwise left blank.
+    const convJob = convPayType === '兼職' ? '兼職'
+      : (body.job !== undefined ? String(body.job || '').trim() : (convertProfileError({department: convDept, job: cand.job, payType: convPayType}) ? '' : String(cand.job || '').trim()));
+    {
+      const err = convertProfileError({department: convDept, job: convJob, payType: convPayType});
+      if (err) throw new AppError(400, err);
+    }
     let empId = String(body.employeeId || '').trim().toUpperCase();
-    if (!empId) empId = await this.nextEmployeeId(body.department || cand.department, body.prefix);
+    if (!empId) {
+      const dept = String(body.department || cand.department || '').trim();
+      // 洗滌 new hires are always W (E is legacy only).
+      const prefix = (dept === '洗滌' || dept === '洗滓') ? 'W' : body.prefix;
+      empId = await this.nextEmployeeId(dept, prefix, extraIds);
+    }
     if (!isUsableEmployeeId(empId)) throw new AppError(400, '員工編號限英數字、底線及短橫線，既有編號會原樣保留');
     empId = empId.toUpperCase();
     const extraNotes = [cand.notes, cand.address && ('住址：' + cand.address), cand.education && ('學歷：' + cand.education), cand.experience && ('經歷：' + cand.experience)].filter(Boolean).join('\n');
     const payload = pickEmp({
       name: cand.name,
       department: body.department || cand.department,
-      job: body.job || cand.job,
-      employmentType: body.employmentType || '正職',
-      payType: body.payType || (body.employmentType === '兼職' || body.employmentType === '時薪' ? '兼職' : '正職'),
+      job: convJob,
+      employmentType: body.employmentType || convPayType,
+      payType: convPayType,
       paymentMethod: body.paymentMethod || '匯款',
       lineId: body.lineId || cand.lineId || '',
       arrivalDate: body.arrivalDate || cand.availableDate || today(),
@@ -1263,6 +1284,7 @@ export class HrStore {
       [employeeId, next.bank_code, next.bank_branch, next.account_name, next.account_last4, next.account_enc,
        next.national_id_mask, next.national_id_enc, next.national_name, next.birth_date || null]
     );
+    if (category === 'bank' && (next.account_enc || next.account_last4)) this.bankSaved(employeeId);
     return publicPii({employee_id: employeeId, ...next});
   }
 
@@ -1283,6 +1305,7 @@ export class HrStore {
        packed.national_id_mask, packed.national_id_enc, packed.national_name, packed.birth_date]
     );
     if (actor) await this.audit(this.pool, actor, '更新員工證件資料', employeeId, '');
+    if ((fields.account !== undefined || fields.bankCode !== undefined) && (saved.rows[0]?.account_enc || saved.rows[0]?.account_last4)) this.bankSaved(employeeId);
     return publicPii(saved.rows[0]);
   }
 

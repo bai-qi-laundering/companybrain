@@ -1,11 +1,11 @@
 // One-way sync: payroll Google Sheet (打卡算薪水) → companybrain HR.
 // The sheet is the source of truth for 實際最後在職日 (離職日), 職稱 and 員工編號; 到職日 only fills blanks.
-// Monthly 實領薪資 from 薪資計算明細 summary rows is kept as the per-month 實發金額 ledger.
+// Monthly 實領薪資 is NOT synced any more (owner uploads pay himself); planSalarySync is kept only for the
+// manual 「匯入本月薪資」 preview code and tests.
 // Nothing is ever written back to the sheet. Bad cells are flagged in the sync log, never fatal.
-import {baiqiSalaryId, baiqiSalaryColumnKey, parseSheetRows, DEFAULT_SALARY_IMPORT, importStatus, fixturePath, parseCsv} from './hr-salary-import.mjs';
+import {baiqiSalaryId, baiqiSalaryColumnKey, parseSheetRows, importStatus, fixturePath, parseCsv} from './hr-salary-import.mjs';
 import {fetchSheetTabs} from './google-sa.mjs';
 import {readFile} from 'node:fs/promises';
-import {randomBytes} from 'node:crypto';
 
 export const EMPLOYEE_TAB = '員工資料';
 const EMP_HEADERS = {
@@ -194,17 +194,13 @@ export function syncIntervalMinutes(env = process.env) {
   return Number.isFinite(n) && n >= 0 ? Math.min(Math.floor(n), 24 * 60) : 10;
 }
 
-async function loadTabs({spreadsheetId, salaryTab, fetchImpl}) {
-  const fixture = fixturePath();
-  if (fixture) {
-    // Test/demo: HR_SALARY_SHEET_FIXTURE is the salary CSV; HR_EMPLOYEE_SHEET_FIXTURE the 員工資料 CSV.
-    const empFixture = String(process.env.HR_EMPLOYEE_SHEET_FIXTURE || '').trim();
-    return {
-      [EMPLOYEE_TAB]: empFixture ? parseCsv(await readFile(empFixture, 'utf8')) : [],
-      [salaryTab]: parseCsv(await readFile(fixture, 'utf8')),
-    };
+async function loadTabs({spreadsheetId, fetchImpl}) {
+  const empFixture = String(process.env.HR_EMPLOYEE_SHEET_FIXTURE || '').trim();
+  if (empFixture || fixturePath()) {
+    // Test/demo: HR_EMPLOYEE_SHEET_FIXTURE is the 員工資料 CSV.
+    return {[EMPLOYEE_TAB]: empFixture ? parseCsv(await readFile(empFixture, 'utf8')) : []};
   }
-  return fetchSheetTabs({spreadsheetId, tabs: [EMPLOYEE_TAB, salaryTab], fetchImpl});
+  return fetchSheetTabs({spreadsheetId, tabs: [EMPLOYEE_TAB], fetchImpl});
 }
 
 export const SYNC_SCHEMA = `
@@ -269,32 +265,6 @@ export function createSheetSync({hr, fetchImpl, loadValues, statusImpl = importS
     return applied;
   }
 
-  async function applySalaryWrites(writes, actor) {
-    let applied = 0;
-    const at = new Date().toISOString();
-    for (const w of writes) {
-      if (w.action === 'insert') {
-        const id = 'SAL-' + randomBytes(6).toString('hex');
-        const payload = {netPay: w.netPay, notes: '由薪資計算明細同步', remittance: '未匯', source: 'sheet', sheetSyncedAt: at};
-        const r = await pool.query(
-          `INSERT INTO hr_salaries(id, employee_id, month, digest, version, status, payload)
-           SELECT $1,$2,$3,'ledger',1,'未匯',$4::jsonb
-           WHERE NOT EXISTS (SELECT 1 FROM hr_salaries WHERE employee_id=$2 AND month=$3 AND digest='ledger')`,
-          [id, w.employeeId, w.month, JSON.stringify(payload)]
-        );
-        if (r.rowCount) { applied += 1; await hr.audit(pool, actor, '試算表同步薪資', w.employeeId, w.month + ' 新增 ' + w.netPay); }
-      } else {
-        const r = await pool.query(
-          `UPDATE hr_salaries SET payload = payload || $1::jsonb
-           WHERE id=$2 AND status<>'已匯' AND (payload->>'netPay')::numeric = $3::numeric`,
-          [JSON.stringify({netPay: w.netPay, sheetSyncedAt: at, source: 'sheet'}), w.id, w.from]
-        );
-        if (r.rowCount) { applied += 1; await hr.audit(pool, actor, '試算表同步薪資', w.employeeId, w.month + ' ' + w.from + ' → ' + w.netPay); }
-      }
-    }
-    return applied;
-  }
-
   async function runOnce({trigger = 'manual', actor = 'system', dryRun = false} = {}) {
     await ensure();
     const status = await statusImpl();
@@ -308,24 +278,15 @@ export function createSheetSync({hr, fetchImpl, loadValues, statusImpl = importS
     const logId = log.rows[0].id;
     try {
       const cfg = await hr.getSalaryImport();
-      const salaryTab = cfg.sheetTab || DEFAULT_SALARY_IMPORT.sheetTab;
-      const tabs = loadValues ? await loadValues({spreadsheetId: cfg.spreadsheetId, salaryTab}) : await loadTabs({spreadsheetId: cfg.spreadsheetId, salaryTab, fetchImpl});
+      const tabs = loadValues ? await loadValues({spreadsheetId: cfg.spreadsheetId}) : await loadTabs({spreadsheetId: cfg.spreadsheetId, fetchImpl});
       const employees = (await pool.query('SELECT id, payload FROM hr_employees')).rows.map((r) => ({id: r.id, ...r.payload}));
-      const salaries = (await pool.query("SELECT id, employee_id, month, status, payload FROM hr_salaries WHERE digest='ledger'")).rows.map((r) => ({
-        id: r.id, employeeId: r.employee_id, month: r.month, netPay: Number(r.payload?.netPay ?? 0),
-        notes: r.payload?.notes || '', remittance: r.status === '已匯' || r.payload?.remittance === '已匯' ? '已匯' : '未匯',
-      }));
       const empValues = tabs[EMPLOYEE_TAB] || [];
       const empPlan = empValues.length ? planEmployeeSync({sheetRows: parseEmployeeTab(empValues).rows, employees}) : {changes: [], flags: []};
-      let salPlan = {writes: [], flags: [], months: [], skipped: 0};
-      let salaryError = '';
-      try { salPlan = planSalarySync({values: tabs[salaryTab] || [], employees, salaries, columns: cfg.columns}); }
-      catch (e) { salaryError = e.message || '薪資計算明細讀取失敗'; }
-      let employeeApplied = 0, salaryApplied = 0;
-      if (!dryRun) {
-        employeeApplied = await applyEmployeeChanges(empPlan.changes, 'sheet-sync:' + actor);
-        salaryApplied = await applySalaryWrites(salPlan.writes, 'sheet-sync:' + actor);
-      }
+      const salPlan = {writes: [], flags: [], months: []};
+      const salaryError = '';
+      const salaryApplied = 0;
+      let employeeApplied = 0;
+      if (!dryRun) employeeApplied = await applyEmployeeChanges(empPlan.changes, 'sheet-sync:' + actor);
       const summary = {
         employeeRows: empValues.length ? empValues.length - 1 : 0,
         employeeChanges: empPlan.changes,

@@ -2,7 +2,8 @@ import {readFile} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {createPrivateKey, createSign} from 'node:crypto';
 
-const SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets.readonly';
+// Read/write: companybrain appends new-hire rows and flips 匯款類型 for rows it created (see hr-sheet-write.mjs).
+const SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 
 export const DATASTORE_READ_SCOPE = 'https://www.googleapis.com/auth/datastore';
@@ -106,4 +107,40 @@ export async function fetchSheetTabs({spreadsheetId, tabs = [], fetchImpl = fetc
   const out = {};
   tabs.forEach((t, i) => { out[t] = data.valueRanges?.[i]?.values || []; });
   return out;
+}
+
+function a1Tab(tab) {
+  return "'" + String(tab || '').replaceAll("'", '') + "'";
+}
+
+async function sheetsWrite({url, method, body, fetchImpl = fetch, token}) {
+  const access = token || await getAccessToken({fetchImpl});
+  if (!access) throw new Error('尚未設定服務帳戶');
+  const res = await fetchImpl(url, {
+    method,
+    headers: {Authorization: 'Bearer ' + access, 'content-type': 'application/json'},
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30000),
+  });
+  if (res.status === 403) throw new Error('服務帳戶沒有編輯權限：請在試算表「共用」把服務帳戶改成「編輯者」。');
+  if (res.status === 404 || res.status === 400) throw new Error('找不到試算表或分頁名稱不正確（' + res.status + '）。');
+  if (!res.ok) throw new Error('寫入試算表失敗（' + res.status + '）');
+  return res.json();
+}
+
+/** Append one row after the last row of a tab (USER_ENTERED so yyyy/mm/dd becomes a date). Returns the updated A1 range. */
+export async function appendSheetRow({spreadsheetId, tab, row, fetchImpl, token}) {
+  const url = 'https://sheets.googleapis.com/v4/spreadsheets/' + encodeURIComponent(spreadsheetId) + '/values/'
+    + encodeURIComponent(a1Tab(tab) + '!A1') + ':append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS&includeValuesInResponse=false';
+  const data = await sheetsWrite({url, method: 'POST', body: {majorDimension: 'ROWS', values: [row]}, fetchImpl, token});
+  return data.updates?.updatedRange || '';
+}
+
+/** Overwrite one cell, e.g. 'K12'. */
+export async function updateSheetCell({spreadsheetId, tab, cell, value, fetchImpl, token}) {
+  const range = a1Tab(tab) + '!' + cell;
+  const url = 'https://sheets.googleapis.com/v4/spreadsheets/' + encodeURIComponent(spreadsheetId) + '/values/'
+    + encodeURIComponent(range) + '?valueInputOption=USER_ENTERED';
+  const data = await sheetsWrite({url, method: 'PUT', body: {range, majorDimension: 'ROWS', values: [[value]]}, fetchImpl, token});
+  return data.updatedRange || range;
 }
