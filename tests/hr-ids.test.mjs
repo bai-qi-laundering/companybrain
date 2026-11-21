@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {nextPrefixedId, prefixForDepartment, prefixChoices, isUsableEmployeeId, AUTO_ID_RE, jobTitleOptions, STANDARD_JOBS, STANDARD_DEPARTMENTS, STANDARD_DEPARTMENT_JOBS, jobsForDepartment, normalizeDepartment} from '../backend/hr-ids.mjs';
 
+// Never touch real Google credentials from tests (an env key once made a test append to the live sheet).
+delete process.env.GOOGLE_SA_JSON; delete process.env.GOOGLE_SA_JSON_B64; delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+process.env.HR_SHEET_WRITE = 'off';
+
 test('dept prefixes match the 打卡算薪水 sheet letters', () => {
   assert.equal(prefixForDepartment('物流'), 'D');
   assert.equal(prefixForDepartment('摺疊'), 'F');
@@ -30,8 +34,8 @@ test('洗滌 uses the same ID prefix as the typo 洗滓, including older stored 
   const oldMap = {物流: 'D', 摺疊: 'F', 撐開: 'H', 洗滓: 'W', 辦公室: 'O', 行政: 'O'};
   assert.equal(prefixForDepartment('洗滌', oldMap), 'W');
   assert.equal(prefixForDepartment('洗滓', oldMap), 'W');
-  assert.deepEqual(prefixChoices('洗滌', oldMap), ['W', 'E']);
-  assert.deepEqual(prefixChoices('洗滓', oldMap), ['W', 'E']);
+  assert.deepEqual(prefixChoices('洗滌', oldMap), ['W']);
+  assert.deepEqual(prefixChoices('洗滓', oldMap), ['W']);
   assert.deepEqual(prefixChoices('物流', oldMap), ['D']);
 });
 
@@ -47,7 +51,7 @@ test('official jobs and departments follow payroll 部門預設值 order, and pr
   assert.equal(prefixForDepartment('摺疊'), 'F');
   assert.equal(prefixForDepartment('撐開'), 'H');
   assert.equal(prefixForDepartment('洗滌'), 'W');
-  assert.deepEqual(prefixChoices('洗滌'), ['W', 'E']);
+  assert.deepEqual(prefixChoices('洗滌'), ['W']);
   assert.equal(prefixForDepartment('辦公室'), 'O');
   const titles = jobTitleOptions(
     [{job: '現場作業員'}, {job: ' 司機 '}, {job: ''}],
@@ -78,5 +82,6 @@ test('HR UI job pickers offer 司機 and user-facing copy uses 洗滌', async ()
   assert.ok(js.includes("'洗滌人員'"));
   assert.doesNotMatch(js, /物流助理/);
   assert.doesNotMatch(js, /洗滓 W／E/);
-  assert.match(js, /洗滌 W／E/);
+  assert.match(js, /洗滌 W、/);
+  assert.doesNotMatch(js, /洗滌 W／E/);
 });

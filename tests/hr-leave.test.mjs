@@ -2,6 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {statutoryDays, yearsForEmployee, hoursToDays, parsePeriod, defaultSettlement, summaryLine, addMonths, addYears} from '../backend/hr-leave.mjs';
 
+// Never touch real Google credentials from tests (an env key once made a test append to the live sheet).
+delete process.env.GOOGLE_SA_JSON; delete process.env.GOOGLE_SA_JSON_B64; delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+process.env.HR_SHEET_WRITE = 'off';
+
 test('LSA Art.38 statutory days on anniversary starts', () => {
   const hire = '2019-03-01';
   assert.equal(statutoryDays(hire, '2019-08-31'), 0);

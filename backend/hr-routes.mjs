@@ -10,6 +10,8 @@ import {folderConfig, saveUpload, scanFolders, fileId, savedPath, UPLOAD_LIMIT, 
 import {runAfterUpload, batchScanBank, geminiReady} from './hr-ocr.mjs';
 import {hasPiiKey} from './hr-crypto.mjs';
 import {createSheetSync} from './hr-sheet-sync.mjs';
+import {createNewcomers} from './hr-sheet-newcomers.mjs';
+import {createSheetWriter} from './hr-sheet-write.mjs';
 import {importStatus, loadSheetValues, parseSheetRows, compareSalaryRows, normalizeColumns, SETUP_INSTRUCTIONS} from './hr-salary-import.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -92,6 +94,13 @@ export async function handleHr(req, res, {hr, session, method, path: p, config =
   const pathname = url.pathname;
   const actor = actorOf(session);
   const send = makeSend(req);
+  const writer = () => {
+    if (!hr.sheetWriter) {
+      hr.sheetWriter = createSheetWriter({hr});
+      if (!hr.onBankSaved) hr.onBankSaved = (id) => hr.sheetWriter.fillOwned({employeeId: id, actor: 'bank-saved'});
+    }
+    return hr.sheetWriter;
+  };
 
   if (method === 'GET' && pathname === '/api/hr/state') {
     const view = url.searchParams.get('view') || 'full';
@@ -103,6 +112,11 @@ export async function handleHr(req, res, {hr, session, method, path: p, config =
     state.ocr = {geminiConfigured: geminiReady(config), piiKeyConfigured: hasPiiKey(), ...(state.ocr || {})};
     const sheet = await hr.getSalaryImport();
     state.salaryImport = {...sheet, ...(await importStatus()), ...(state.salaryImport || {})};
+    if (view === 'profile' && id) state.sheetRow = await writer().forEmployee(String(id).toUpperCase()).catch(() => null);
+    if (view === 'full' || view === 'staff' || view === 'profile' || view === 'home') {
+      if (!hr.sheetNewcomers) hr.sheetNewcomers = createNewcomers({hr});
+      state.pendingNewcomers = await hr.sheetNewcomers.pending().catch(() => []);
+    }
     send(res, 200, state);
     return true;
   }
@@ -155,7 +169,28 @@ export async function handleHr(req, res, {hr, session, method, path: p, config =
   }
   if (method === 'POST' && (m = pathname.match(/^\/api\/hr\/candidates\/([^/]+)\/convert$/))) {
     const body = JSON.parse(await readRaw(req, 200_000) || '{}');
-    send(res, 200, await hr.convert(decodeURIComponent(m[1]), body || {}, actor));
+    const w = writer();
+    // Numbering must see the live sheet (people add foreign workers there directly); no fallback.
+    let extraIds;
+    try { extraIds = await w.idsForNumbering({strict: true}); } catch (e) { throw new AppError(e.status || 503, e.message); }
+    const result = await hr.convert(decodeURIComponent(m[1]), body || {}, actor, {extraIds});
+    // Write the new hire to the payroll sheet right away; a failure never undoes the conversion.
+    result.sheetRow = await w.writeNew(result.employee.id, actor).catch((e) => ({status: 'failed', label: '未寫入試算表', error: String(e.message || e)}));
+    send(res, 200, result);
+    return true;
+  }
+  if (method === 'GET' && pathname === '/api/hr/next-employee-id') {
+    const dept = String(url.searchParams.get('department') || '').trim();
+    const prefix = (dept === '洗滌' || dept === '洗滓') ? 'W' : url.searchParams.get('prefix');
+    let extraIds = [], sheetError = '';
+    try { extraIds = await writer().idsForNumbering({strict: true}); } catch (e) { sheetError = String(e.message || e); extraIds = await writer().knownIds(); }
+    send(res, 200, {id: await hr.nextEmployeeId(dept, prefix, extraIds), sheetError});
+    return true;
+  }
+  if (method === 'POST' && (m = pathname.match(/^\/api\/hr\/employees\/([^/]+)\/sheet-write\/retry$/))) {
+    const id = decodeURIComponent(m[1]).toUpperCase();
+    await hr.getEmployee(id);
+    send(res, 200, await writer().retry(id, actor));
     return true;
   }
   if (method === 'DELETE' && (m = pathname.match(/^\/api\/hr\/candidates\/([^/]+)$/))) {
@@ -181,6 +216,17 @@ export async function handleHr(req, res, {hr, session, method, path: p, config =
       const hit = (await sync.logs(100)).find((l) => l.id === Number(lm[1]));
       if (!hit) throw new AppError(404, '找不到這次同步紀錄');
       send(res, 200, hit);
+      return true;
+    }
+    let nm;
+    if (method === 'POST' && (nm = pathname.match(/^\/api\/hr\/sheet-sync\/newcomers\/([^/]+)\/(confirm|dismiss)$/))) {
+      const id = decodeURIComponent(nm[1]).toUpperCase();
+      const nc = hr.sheetNewcomers;
+      try {
+        send(res, 200, nm[2] === 'confirm' ? await nc.confirm(id, actor) : await nc.dismiss(id, actor));
+      } catch (e) {
+        throw new AppError(e.status || 500, e.message || '操作失敗');
+      }
       return true;
     }
     if (method === 'POST' && pathname === '/api/hr/sheet-sync/run') {

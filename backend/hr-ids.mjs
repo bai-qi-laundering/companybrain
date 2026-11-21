@@ -3,7 +3,7 @@ export const DEFAULT_DEPT_PREFIXES = {
   物流: 'D',
   摺疊: 'F',
   撐開: 'H',
-  洗滌: 'W', // existing sheet also uses E for 洗滌; pick on convert
+  洗滌: 'W', // E004 is a legacy 洗滌 number; new numbers are always W
   洗滓: 'W', // typo alias kept so older stored maps and records still resolve
   辦公室: 'O',
   行政: 'O',
@@ -11,8 +11,8 @@ export const DEFAULT_DEPT_PREFIXES = {
 
 /** Departments that may use more than one prefix. */
 export const DEPT_PREFIX_CHOICES = {
-  洗滌: ['W', 'E'],
-  洗滓: ['W', 'E'],
+  洗滌: ['W'],
+  洗滓: ['W'],
 };
 
 /**
@@ -47,6 +47,31 @@ export function jobsForDepartment(department, extra = []) {
   const canon = normalizeDepartment(department);
   const official = (canon && DEPARTMENT_JOBS[canon]) ? DEPARTMENT_JOBS[canon] : STANDARD_JOBS;
   return mergeJobTitles(official, extra);
+}
+
+/**
+ * 部門預設值 also has 兼職／兼職 (時薪, not split by department): every part-timer's pay comes from that row.
+ * Part-timers are still written with their real 部門 and, like existing sheet rows, the department's first
+ * 職稱 (摺疊/撐開 現場作業員, 洗滌 洗滌人員, 辦公室 行政) unless another 部門預設值 title is chosen.
+ */
+export const PART_TIME_PROFILE = ['兼職', '兼職'];
+export function partTimeJobFor(department) {
+  const d = normalizeDepartment(department) === '行政' ? '辦公室' : normalizeDepartment(department);
+  return (DEPARTMENT_JOBS[d] || [])[0] || '';
+}
+
+/**
+ * 轉員工 must use a 部門＋職稱 pair from 部門預設值 so reselecting in the sheet applies the same pay.
+ * Blank 職稱 is allowed (written blank, filled later). Returns an error message or ''.
+ */
+export function convertProfileError({department, job}) {
+  const d = normalizeDepartment(department) === '行政' ? '辦公室' : normalizeDepartment(department);
+  const j = String(job || '').trim();
+  if (d && !STANDARD_DEPARTMENTS.includes(d)) return '部門必須是試算表「部門預設值」的部門：' + STANDARD_DEPARTMENTS.join('、');
+  if (!j) return '';
+  if (!d) return '請先選部門';
+  if (!STANDARD_DEPARTMENT_JOBS.some(([a, b]) => a === d && b === j)) return '「' + d + '」的職稱必須是：' + (DEPARTMENT_JOBS[d] || []).join('、');
+  return '';
 }
 
 export const PAY_TYPES = ['正職', '兼職'];
