@@ -327,6 +327,22 @@ class EncodeAndHoldTests(unittest.TestCase):
         self.assertGreater(len(data), 1000)
         self.assertEqual(data[:2], b'\xff\xd8')
 
+    def test_photo_encodes_at_quality_100(self):
+        self.assertEqual(cl.JPEG_QUALITY, 100)
+        frame = blank(2560, 1440)
+        frame[80:400, 80:900] = (40, 80, 200)
+        frame[200:250, 200:850] = (20, 180, 90)
+        data = cl.encode_photo(frame)
+        self.assertEqual(data, cl._jpeg_bytes(frame, 100))
+        self.assertGreater(len(data), len(cl._jpeg_bytes(frame, 95)))
+        self.assertLessEqual(len(data), cl.MAX_JPEG)
+
+    def test_encode_photo_keeps_saved_jpeg_when_under_limit(self):
+        frame = blank(640, 360)
+        original = cl._jpeg_bytes(frame, 100)
+        self.assertLessEqual(len(original), cl.MAX_JPEG)
+        self.assertIs(cl.encode_photo(frame, original), original)
+
     def test_preview_is_small_and_under_line_limit(self):
         frame = blank(2560, 1440)
         frame[100:400, 100:400] = (20, 180, 80)

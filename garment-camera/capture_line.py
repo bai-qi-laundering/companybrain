@@ -39,9 +39,15 @@ QUEUE = OUT / 'pending'
 QUEUE.mkdir(exist_ok=True)
 API_URL = os.environ.get('COMPANYBRAIN_URL', '').rstrip('/')
 API_KEY = os.environ.get('CAMERA_API_KEY', '')
-MAX_JPEG = 10_000_000  # LINE originalContentUrl limit
-MAX_PREVIEW_JPEG = 1_000_000  # LINE previewImageUrl limit
+# CompanyBrain POST /api/camera/photo still rejects JPEGs over 10MB and
+# preview JPEGs over 1MB. Exceeding those caps makes upload/delivery fail.
+# LINE #commands now send a text link to /api/camera/album/..., so the
+# LINE originalContentUrl (10MB) and previewImageUrl (1MB) limits no longer
+# apply to garment-camera group delivery.
+MAX_JPEG = 10_000_000
+MAX_PREVIEW_JPEG = 1_000_000
 PREVIEW_MAX_WIDTH = 800
+JPEG_QUALITY = 100
 HOLD = OUT / 'pending-unbound'
 HOLD_RETRY_SECONDS = 600
 CANCELLED = OUT / 'pending-cancelled'
@@ -80,15 +86,14 @@ def _jpeg_bytes(image, quality):
 
 
 def encode_photo(frame, original_jpeg=None):
-    """Upload the saved JPG as-is when it already fits; otherwise encode a full-res JPEG (max 10MB).
+    """Upload the saved JPG as-is when it already fits; otherwise encode a full-res JPEG.
 
-    The uploaded/saved photo is the native stream frame from detection time,
-    not a downscaled detect preview. Downscale only as a last resort if even
-    low quality cannot fit the LINE limit.
+    Saved photos use JPEG quality 100. Downscale only as a last resort if even
+    low quality cannot fit MAX_JPEG (CompanyBrain upload would otherwise fail).
     """
     if original_jpeg and len(original_jpeg) <= MAX_JPEG:
         return original_jpeg
-    for quality in (95, 92, 85, 80, 75, 65, 55):
+    for quality in (JPEG_QUALITY, 95, 92, 85, 80, 75, 65, 55):
         data = _jpeg_bytes(frame, quality)
         if len(data) <= MAX_JPEG:
             return data
@@ -100,11 +105,11 @@ def encode_photo(frame, original_jpeg=None):
             data = _jpeg_bytes(image, quality)
             if len(data) <= MAX_JPEG:
                 return data
-    raise ValueError('Photo could not fit 10MB upload limit')
+    raise ValueError('Photo could not fit %s-byte upload limit' % MAX_JPEG)
 
 
 def encode_preview(frame, max_width=PREVIEW_MAX_WIDTH):
-    """Small JPEG for LINE previewImageUrl and the tablet thumbnail (max 1MB)."""
+    """Small JPEG for the tablet thumbnail and CompanyBrain preview (max 1MB)."""
     height, width = frame.shape[:2]
     scale = min(1, float(max_width) / width)
     image = cv2.resize(frame, None, fx=scale, fy=scale) if scale < 1 else frame
@@ -889,7 +894,7 @@ def main(uris=None):
             timestamp = datetime.now().astimezone()
             filename = timestamp.strftime('%Y%m%d_%H%M%S_%f') + '.jpg'
             path = OUT / filename
-            if not cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 95]):
+            if not cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]):
                 print('Failed to save image', flush=True)
                 continue
             thumb = path.with_name(preview_name(filename))
