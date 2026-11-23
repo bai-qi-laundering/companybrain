@@ -771,3 +771,27 @@ test('試算表同步 routes need login, report setup when unconfigured, and nev
     if (prevFx !== undefined) process.env.HR_SALARY_SHEET_FIXTURE = prevFx;
   }
 });
+
+test('新增員工 without an id numbers by 部門 prefix and skips 員工編號 already used on the payroll sheet', async () => {
+  const ctx = await start();
+  try {
+    // HR_SHEET_WRITE=off in tests: the sheet is never read; the last seen sheet ids stand in for it.
+    await ctx.hr.setSetting('sheetKnownIds', ['D009', 'F153', 'W132']);
+    const d = await ctx.api('/api/hr/employees', 'POST', {name: '新司機', department: '物流', job: '新進司機', arrivalDate: '2026-11-23'});
+    assert.equal(d.status, 200);
+    assert.equal((await d.json()).id, 'D010');
+    const w = await (await ctx.api('/api/hr/employees', 'POST', {name: '洗滌新人', department: '洗滌', prefix: 'E'})).json();
+    assert.equal(w.id, 'W133', '洗滌 is always W and follows the sheet max');
+    const f = await (await ctx.api('/api/hr/employees', 'POST', {name: '摺疊新人', department: '摺疊'})).json();
+    assert.equal(f.id, 'F154');
+    const noDept = await ctx.api('/api/hr/employees', 'POST', {name: '沒部門'});
+    assert.equal(noDept.status, 400);
+    assert.match((await noDept.json()).error, /請填寫部門/);
+    const explicit = await (await ctx.api('/api/hr/employees', 'POST', {id: 'emp-099', name: '指定編號', department: '物流'})).json();
+    assert.equal(explicit.id, 'EMP-099');
+  } finally {
+    await new Promise((r) => ctx.server.close(r));
+    await ctx.db.close();
+    await rm(ctx.docRoot, {recursive: true, force: true});
+  }
+});

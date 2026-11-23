@@ -1618,6 +1618,7 @@
       else form.appendChild(el);
     }
     el.textContent = msg;
+    el.hidden = false;
     if (fieldName && form.elements[fieldName]) {
       form.elements[fieldName].setAttribute('aria-invalid', 'true');
       form.elements[fieldName].focus();
@@ -1655,6 +1656,12 @@
     if (!$('#hr-dialogs', root)) root.insertAdjacentHTML('beforeend', '<div id="hr-dialogs"></div>');
     dlg(root, '新增員工', field('name', '姓名', '') + deptCombo('department', '部門', '') + jobCombo('job', '職稱', '') + sel('employmentType', '雇用型態', TYPES, '正職') + sel('payType', '計薪型態', PAY_TYPES, '正職') + sel('paymentMethod', '匯款類型', PAY_METHODS, '匯款') + field('phone', '電話', '') + field('lineId', 'LINE ID', '') + field('arrivalDate', '到職日', today(), 'date'), async (f) => {
       const body = Object.fromEntries(['name', 'department', 'job', 'employmentType', 'payType', 'paymentMethod', 'phone', 'lineId', 'arrivalDate'].map((k) => [k, f.elements[k].value]));
+      if (!String(body.name || '').trim()) { showFormError(f, '請填寫姓名', 'name'); throw new Error('請填寫姓名'); }
+      if (!String(body.department || '').trim()) {
+        const msg = '請選擇部門（' + officialDepartments().join('、') + '），員工編號依部門字首自動產生（物流 D、摺疊 F、撐開 H、洗滌 W、辦公室 O）';
+        showFormError(f, msg, 'department');
+        throw new Error(msg);
+      }
       const row = await write('/api/hr/employees', 'POST', body);
       toast('已新增 ' + row.id); await refresh(); route = {page: 'profile', id: row.id}; paintProfile(root, row.id);
     });
