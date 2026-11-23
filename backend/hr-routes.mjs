@@ -135,8 +135,17 @@ export async function handleHr(req, res, {hr, session, method, path: p, config =
 
   if (method === 'POST' && pathname === '/api/hr/employees') {
     const body = JSON.parse(await readRaw(req, 200_000));
-    const id = (body.id || await hr.nextEmployeeId()).toUpperCase();
-    send(res, 200, await hr.upsertEmployee(id, body, actor, {create: true}));
+    let id = String(body.id || '').trim();
+    if (!id) {
+      const dept = String(body.department || '').trim();
+      if (!dept) throw new AppError(400, '請填寫部門（物流、摺疊、撐開、洗滌、辦公室），員工編號依部門字首自動產生。');
+      // Same numbering as 轉為員工: live sheet 員工編號 count too; if the sheet can't be read, block (no fallback).
+      let extraIds;
+      try { extraIds = await writer().idsForNumbering({strict: true}); } catch (e) { throw new AppError(e.status || 503, e.message); }
+      const prefix = (dept === '洗滌' || dept === '洗滓') ? 'W' : body.prefix;
+      id = await hr.nextEmployeeId(dept, prefix, extraIds);
+    }
+    send(res, 200, await hr.upsertEmployee(id.toUpperCase(), body, actor, {create: true}));
     return true;
   }
   let m;
