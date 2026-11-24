@@ -53,6 +53,18 @@ STAGE_PATH = Path(os.environ.get('STAGE_FILE', str(OUT / 'stage.json')))
 RECENT_PATH = Path(os.environ.get('RECENT_FILE', str(OUT / 'recent.json')))
 APP_DIR = Path(__file__).resolve().parent
 STAGES = ('洗前', '洗後')
+# Home-screen icons. Requests arrive as root-relative paths: LAN `/` is served
+# directly, and a Funnel mount is stripped before it reaches this process.
+# Manifest icon URLs stay relative so they follow whichever directory served
+# manifest.webmanifest.
+PWA_ASSETS = {
+    '/icon-192.png': ('icon-192.png', 'image/png'),
+    '/icon-512.png': ('icon-512.png', 'image/png'),
+    '/icon-maskable-512.png': ('icon-maskable-512.png', 'image/png'),
+    '/apple-touch-icon.png': ('apple-touch-icon.png', 'image/png'),
+    '/favicon-32.png': ('favicon-32.png', 'image/png'),
+    '/favicon.ico': ('favicon.ico', 'image/x-icon'),
+}
 
 _lock = threading.Lock()
 _stage = '洗前'
@@ -630,7 +642,13 @@ def delivery_worker(stop):
 
 
 def tablet_request_path(raw_path):
-    """Strip TABLET_PATH_PREFIX when present. Return (path, redirect_to_or_None)."""
+    """Strip TABLET_PATH_PREFIX when present. Return (path, redirect_to_or_None).
+
+    An empty path is the app root. Funnel strips the mount before forwarding, so
+    a public URL without a trailing slash can arrive here as '' or '/'. Do not
+    redirect '/' itself: the browser URL is corrected in tablet.html, and a
+    redirect of '/' would target the other service on a shared Funnel port.
+    """
     path = raw_path or '/'
     prefix = TABLET_PATH_PREFIX
     if prefix and path == prefix:
@@ -670,6 +688,11 @@ class TabletHandler(BaseHTTPRequestHandler):
             return
         if path == '/manifest.webmanifest':
             self._send(200, (APP_DIR / 'manifest.webmanifest').read_bytes(), 'application/manifest+json')
+            return
+        asset = PWA_ASSETS.get(path)
+        if asset:
+            filename, content_type = asset
+            self._send(200, (APP_DIR / filename).read_bytes(), content_type, 'public, max-age=86400')
             return
         if path == '/api/status':
             with _lock:
