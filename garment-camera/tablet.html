@@ -2,12 +2,42 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8">
+  <script>
+    function tabletDirname(pathname) {
+      var path = pathname || '/';
+      if (path.slice(-1) === '/') return path;
+      var cut = path.lastIndexOf('/');
+      var leaf = path.slice(cut + 1);
+      if (/\.(html|webmanifest|png|ico|jpg|jpeg|json)$/i.test(leaf)) {
+        return path.slice(0, cut + 1) || '/';
+      }
+      return path + '/';
+    }
+    function tabletNeedsSlash(pathname) {
+      var path = pathname || '/';
+      if (path.slice(-1) === '/') return false;
+      var leaf = path.slice(path.lastIndexOf('/') + 1);
+      return !/\.(html|webmanifest|png|ico|jpg|jpeg|json)$/i.test(leaf);
+    }
+    (function () {
+      var path = location.pathname || '/';
+      if (!tabletNeedsSlash(path)) return;
+      var dir = path + '/';
+      var esc = dir.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+      document.write('<base href="' + esc + '">');
+      location.replace(dir + location.search + location.hash);
+    })();
+  </script>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0f8a42">
+  <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="客衣拍照">
   <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="favicon-32.png" type="image/png" sizes="32x32">
+  <link rel="icon" href="icon-192.png" type="image/png" sizes="192x192">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png" sizes="180x180">
   <title>客衣拍照確認</title>
   <style>
     :root { --bg:#102116; --card:#1a2c1f; --text:#f4fff6; --muted:#b7d0bc; --pre:#0f8a42; --post:#1d6aa2; --flash:#39e07a; --warn:#c9a227; --down:#b33939; }
@@ -45,10 +75,25 @@
     .item .label { font-size:20px; }
     .item .when { color:var(--muted); font-size:14px; }
     .hint { color:var(--muted); font-size:14px; margin-top:16px; }
+    #line-hint {
+      display:none; margin:0 0 14px; padding:12px 14px; border-radius:12px;
+      background:#24362a; border:1px solid rgba(255,255,255,.14);
+      color:var(--text); font-size:16px; line-height:1.5;
+    }
+    #line-hint.show { display:block; }
+    #line-hint p { margin:0; }
+    #line-hint button {
+      margin-top:8px; border:0; border-radius:999px; background:rgba(255,255,255,.08);
+      color:var(--text); font:inherit; font-size:14px; padding:6px 12px; cursor:pointer;
+    }
   </style>
 </head>
 <body>
   <h1>客衣拍照確認</h1>
+  <div id="line-hint">
+    <p>LINE 內建瀏覽器無法加入主畫面。請點選單的「在瀏覽器中開啟」，用 Safari 或 Chrome 開啟後，再加入主畫面。</p>
+    <button type="button" id="line-hint-dismiss">關閉</button>
+  </div>
   <div class="sub">監視器掃到 QR 後會依目前模式存成待傳照片，不會立刻推播 LINE。</div>
   <div id="link" class="connecting">連線中…</div>
   <div id="soundbar">點一下開啟聲音</div>
@@ -66,13 +111,7 @@
     const linkEl = document.getElementById('link');
     const soundBar = document.getElementById('soundbar');
     const POLL_MS = 2500;
-    const BASE = (function () {
-      const path = location.pathname;
-      if (path.endsWith('/')) return path;
-      const leaf = path.substring(path.lastIndexOf('/') + 1);
-      if (leaf.indexOf('.') !== -1) return path.substring(0, path.lastIndexOf('/') + 1);
-      return path + '/';
-    })();
+    const BASE = tabletDirname(location.pathname);
     function apiUrl(suffix) { return BASE + suffix.replace(/^\//, ''); }
     const STALE_MS = 8000;
     const DOWN_MS = 12000;
@@ -338,6 +377,21 @@
     window.addEventListener('pageshow', () => wakeAndSync());
     window.addEventListener('focus', () => wakeAndSync());
     window.addEventListener('online', () => wakeAndSync());
+
+    (function () {
+      var hint = document.getElementById('line-hint');
+      if (!hint) return;
+      var ua = navigator.userAgent || '';
+      if (ua.indexOf('Line/') === -1) return;
+      try { if (sessionStorage.getItem('garment-camera-hide-line-hint') === '1') return; } catch (e) {}
+      hint.classList.add('show');
+      var dismiss = document.getElementById('line-hint-dismiss');
+      if (!dismiss) return;
+      dismiss.addEventListener('click', function () {
+        hint.classList.remove('show');
+        try { sessionStorage.setItem('garment-camera-hide-line-hint', '1'); } catch (e) {}
+      });
+    })();
 
     showSoundBar();
     setLink('connecting');
